@@ -502,17 +502,16 @@ check "cmux setup skipped when host hooks dir exists" \
 info "23. Container hardening flags"
 # ============================================================
 
-# Static analysis: verify pids-limit is set
-check "pids-limit is configured" \
-    grep -q 'pids-limit' "$SCRIPT"
+# "pids-limit is configured": the agent's --pids-limit 512 is asserted by
+# §175(6) (mutation C06).
 
 # Static analysis: verify cap-drop ALL is set
 check "cap-drop ALL is configured" \
     grep -q 'cap-drop ALL' "$SCRIPT"
 
-# Static analysis: verify GPU passthrough support
-check "SANDY_GPU config variable supported" \
-    grep -q 'SANDY_GPU' "$SCRIPT"
+# Static analysis: verify GPU passthrough support.
+# "SANDY_GPU config variable supported": covered by the --gpus check below
+# (mutation C07: the GPU block deleted).
 check "GPU passthrough uses --gpus flag" \
     grep -q '\-\-gpus' "$SCRIPT"
 
@@ -522,9 +521,8 @@ check "GPU passthrough uses --gpus flag" \
 info "24. CLAUDE_CODE_MAX_OUTPUT_TOKENS passed to container"
 # ============================================================
 
-# Static analysis: verify the env var is passed via docker -e
-check "MAX_OUTPUT_TOKENS in docker -e flags" \
-    grep -q 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=.*128000' "$SCRIPT"
+# "MAX_OUTPUT_TOKENS in docker -e flags": run, not grepped, in §121(pre),
+# §121(1) and §121(3) (mutation C10).
 
 # ============================================================
 info "25. Skill pack infrastructure"
@@ -545,8 +543,7 @@ check "skill_pack_latest_release function defined" \
     grep -q 'skill_pack_latest_release()' "$SCRIPT"
 check "skill_pack_resolve_versions function defined" \
     grep -q 'skill_pack_resolve_versions()' "$SCRIPT"
-check "gstack registered as skill pack" \
-    grep -q 'gstack' "$SCRIPT"
+# "gstack registered as skill pack": run, not grepped, in §164(10) (mutation C13).
 check "gstack repo points to upstream garrytan" \
     grep -q 'garrytan/gstack' "$SCRIPT"
 
@@ -1102,28 +1099,12 @@ TOML
     rm -rf "$_TRUST_TMP"
 fi
 
-# Feature guards: the SANDY_SKILL_PACKS guard must reject non-claude agents.
-# Structure: `if ! _sandy_agent_has claude && [ -n "${SANDY_SKILL_PACKS:-}" ]; then ERROR ...`
-check "SANDY_SKILL_PACKS guard rejects non-claude agents" \
-    grep -q '! _sandy_agent_has claude.*SANDY_SKILL_PACKS' "$SANDY_SCRIPT"
-
-# The --remote and SANDY_CHANNELS=discord guards should also catch codex.
-# These use different structures, so match by pattern in the error text.
-if grep -qE '\-\-remote is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"; then
-    pass "--remote guard error says claude-only"
-else
-    fail "--remote guard error says claude-only"
-fi
-
-# The --remote guard condition must reject ANY non-claude agent (including codex).
-# Uses `! _sandy_agent_has claude || [ "$_SANDY_IS_MULTI" = true ]`.
-check "--remote guard condition rejects non-claude and multi-agent" \
-    grep -q '! _sandy_agent_has claude.*_SANDY_IS_MULTI.*true' "$SANDY_SCRIPT"
-
-# Discord guard must reject non-claude agents (covers codex, gemini).
-# The guard uses `$SANDY_AGENT != "claude"` with a case match on *,discord,*.
-check "discord channel guard rejects non-claude agents" \
-    grep -q 'SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"
+# Feature guards ("SANDY_SKILL_PACKS guard rejects non-claude agents", "--remote
+# guard error says claude-only", "--remote guard condition rejects non-claude
+# and multi-agent", "discord channel guard rejects non-claude agents"): run, not
+# grepped, in §222(1)-(8b): each guard is launched with several non-claude
+# agents, and the --remote and discord guards also with claude,gemini
+# (mutations C20, C20b, C20i, C21, C21b, C21c, C22, C22b, C22c).
 
 # ============================================================
 info "28e. Codex infrastructure — mounts, env, credentials, cleanup"
@@ -1142,10 +1123,8 @@ check "codex sandbox mounted at /home/sandy/.codex" \
 check "codex auth.json mount is read-only (:ro) on the api_key path" \
     grep -q 'auth.json:/home/sandy/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
-# Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this),
-# via the secret env-file helper (#13) rather than argv -e.
-check "OPENAI_API_KEY forwarded via secret env-file" \
-    grep -q '_sandy_add_secret_env OPENAI_API_KEY' "$SANDY_SCRIPT"
+# "OPENAI_API_KEY forwarded via secret env-file" (#13): run, not grepped, in
+# §194(3) (mutation C26).
 # "OPENAI_API_KEY no longer forwarded via -e argv" (#13): run, not grepped, in
 # §215(6), against every spelling.
 
@@ -2042,7 +2021,10 @@ check "no :ro overlay on settings.json" \
     bash -c '! grep -q "settings\.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
 
 # Seed block must preserve enabledPlugins from previous sandbox settings
-# so /plugin install survives across launches.
+# so /plugin install survives across launches. Kept beside
+# test_real_settings_seed_preserves_plugins_and_manages_skip_keys_on_both_parsers:
+# that test skips its node branch where node is not installed, and only
+# --require-tools (CI) makes node mandatory.
 check "seed preserves enabledPlugins across launches" \
     grep -q 'if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins' "$SANDY_SCRIPT_PATH"
 
@@ -2062,8 +2044,8 @@ info "43. Sprint 2 — Persistent symlink approval (S2.2)"
 
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
-check "persisted symlink approval list path declared" \
-    grep -q '\.sandy-approved-symlinks\.list' "$SANDY_SCRIPT_PATH"
+# "persisted symlink approval list path declared": run, not grepped, in
+# test_symlinks_use_the_production_resolver and §214 (mutation C40).
 check "symlink approval uses comm -23 for new-entry detection" \
     grep -q 'comm -23.*_current_tmp.*_approved_tmp' "$SANDY_SCRIPT_PATH"
 # "new symlink hard-errors with specific message": run, not grepped, in §214.
@@ -2111,16 +2093,15 @@ check "cleanup compares launch snapshot to detect new appearances" \
     -- "$SANDY_SCRIPT_PATH"
 # "cleanup() reads session-created-stubs and rmdirs entries": run, not grepped,
 # in §219.
-check "pre-existing cleanup uses rmdir (never rm -rf)" \
-    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "rmdir" \
-             && ! awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -qE "rm[[:space:]]+-rf"' \
-    -- "$SANDY_SCRIPT_PATH"
-check "pre-existing cleanup gated on untracked (git ls-files)" \
-    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "git ls-files --error-unmatch"' \
-    -- "$SANDY_SCRIPT_PATH"
-check "pre-existing cleanup gated on emptiness (ls -A)" \
-    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "ls -A"' \
-    -- "$SANDY_SCRIPT_PATH"
+# "pre-existing cleanup uses rmdir (never rm -rf)": run in
+# test_production_contracts.py test_cleanup_each_layer_alone_keeps_a_populated_directory
+# (rmdir alone, without the empty checks, must keep populated directories).
+# "pre-existing cleanup gated on untracked (git ls-files)": run in
+# test_production_contracts.py test_cleanup_git_preserves_tracked_and_hidden_content
+# (an empty directory still tracked in the index).
+# "pre-existing cleanup gated on emptiness (ls -A)": run in
+# test_production_contracts.py test_cleanup_each_layer_alone_keeps_a_populated_directory,
+# which also covers rmdir on the parent path.
 
 # Cleanup fixtures execute the production loop in test_production_contracts.py.
 
@@ -2515,10 +2496,9 @@ check "validation rejects shell metas in SANDY_SCREENSHOT_DIR" \
     bash -c 'echo "$2" | grep -q "shell metacharacters"' -- "$_SS_VAL_RC" "$_SS_VAL_OUT"
 check "shell-meta rejection exits non-zero" test "$_SS_VAL_RC" -ne 0
 
-# $HOME: hard-error (too broad).
-_SS_VAL_OUT2="$(trap - ERR; SANDY_SCREENSHOT_DIR="$HOME" bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC2=0 || _SS_VAL_RC2=$?
-check "validation rejects \$HOME as SANDY_SCREENSHOT_DIR" \
-    bash -c 'echo "$1" | grep -q "too broad"' -- "$_SS_VAL_OUT2"
+# "validation rejects $HOME as SANDY_SCREENSHOT_DIR": run in
+# test_screenshot_directory_rejects_home_through_symlink_aliases ($HOME, a
+# symlink alias of it, and /; mutation X3).
 
 # Missing dir: warn-and-skip (does not hard-error; leaves env unset).
 # The validation sets SANDY_SCREENSHOT_DIR="" on missing dir, so the
@@ -3360,10 +3340,9 @@ check "multi-agent combo selects the sandy-full image" \
     bash -c 'awk "/\\\$_SANDY_IS_MULTI\" = true/{f=1} f&&/IMAGE_NAME=\"sandy-full\"/{print;exit}" "$1" | grep -q sandy-full' -- "$SANDY_SCRIPT"
 
 # (b) Headless multi-agent routes to the FIRST agent only (no tmux panes in -p).
-check "headless multi-agent routes to first agent (comment present)" \
-    grep -q 'Headless mode with multi-agent: route to first agent only' "$SANDY_SCRIPT"
-check "headless multi-agent builds the cmd for _SANDY_AGENTS[0]" \
-    bash -c 'awk "/route to first agent only/{f=1} f&&/_first=\"\\\$\{_SANDY_AGENTS\[0\]\}\"/{print;exit}" "$1" | grep -q _SANDY_AGENTS' -- "$SANDY_SCRIPT"
+# "headless multi-agent routes to first agent" and "...builds the cmd for
+# _SANDY_AGENTS[0]": run, not grepped, in
+# test_multi_agent_headless_dispatches_to_first_agent (mutation X1).
 
 # (c) Interactive multi-agent builds a distinct per-pane command (cmd0 + split).
 check "interactive multi-agent builds per-pane commands (_cmd0, split-window)" \
@@ -4471,11 +4450,10 @@ _SA_EMPTY_OUT="$(SA_EMPTY=1 PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all -
 check "--stop-all with no daemon sessions exits 0" test "$_SA_EMPTY_RC" -eq 0
 check "--stop-all with no daemon sessions says so" \
     bash -c 'printf "%s" "$1" | grep -q "No daemon sessions"' -- "$_SA_EMPTY_OUT"
-# structural: composes the per-session --stop verbatim (DEC-U2) + cli_flags
+# structural: composes the per-session --stop verbatim (DEC-U2)
 check "--stop-all composes \"\$0\" --stop --workspace per session" \
     grep -qF '"$0" --stop --workspace "${_sa_ws[$_sa_i]}"' "$_SA_SANDY"
-check "--print-schema cli_flags includes --stop-all" \
-    bash -c 'grep -q "\"--stop-all\"" "$1"' -- "$_SCHEMA_CACHE"
+# "--print-schema cli_flags includes --stop-all": §91(1).
 rm -rf "$_SA_BIN"
 
 # ============================================================
@@ -5311,9 +5289,7 @@ SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2
 check "--reset-sandbox refuses under a live workspace lock (exit 1)" test "$_RSB_LOCK_RC" -eq 1
 check "--reset-sandbox under a live lock removes nothing (pip survives)" test -d "$_RSB_SB2/pip"
 rm -rf "$_RSB_FH2" "$_RSB_WS2"
-# cli_flags advertises it
-check "--print-schema cli_flags includes --reset-sandbox" \
-    bash -c 'grep -q "\"--reset-sandbox\"" "$1"' -- "$_SCHEMA_CACHE"
+# "--print-schema cli_flags includes --reset-sandbox": §91(1).
 
 # ============================================================
 echo ""
@@ -7186,9 +7162,7 @@ check "§99(16) nonexistent --sandbox target -> exit 1" test "$_S99_NOEXIST_RC" 
 check "§99(16) nonexistent --sandbox target -> error names it" \
     bash -c 'printf "%s" "$1" | grep -q "nosuchsandbox123"' -- "$_S99_NOEXIST_OUT"
 
-# --- (17) --print-schema advertises --remove-sandbox ---
-check "§99(17) --print-schema cli_flags includes --remove-sandbox" \
-    grep -q '"--remove-sandbox"' "$_SCHEMA_CACHE"
+# "§99(17) --print-schema cli_flags includes --remove-sandbox": §91(1).
 
 # --- (2) real removal: A is gone ---
 PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
@@ -7937,9 +7911,7 @@ check "§101(h) regen-doctor.sh --check FAILS when the heredoc is edited without
 rm -rf "$_S101_SCRATCH"
 
 # --- (i) introspection ---
-
-check "--print-schema cli_flags includes --doctor" \
-    bash -c 'grep -q "\"--doctor\"" "$1"' -- "$_SCHEMA_CACHE"
+# "--print-schema cli_flags includes --doctor": §91(1).
 
 # ============================================================
 section "§102: sandy --provision — non-interactive sandbox creation via the real launch path (#177)"
@@ -11317,7 +11289,7 @@ _s121_run() {
         set -u
         RUN_FLAGS=()
         _sandy_add_secret_env() { :; }
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
+        unset CLAUDE_CODE_MAX_OUTPUT_TOKENS   # the 128000 default must come from sandy, not here
         eval "$S121_BLK"
         for _f in "${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}"; do printf "%s\n" "$_f"; done
     ' 2>/dev/null
@@ -11537,7 +11509,9 @@ _S123_D="$(trap - ERR; _s123_resolve noexec '')"
 check "§123(4) an entry that exists but is NOT executable FAILS THE LAUNCH — never silently 'absent', which is the no-op this design exists to retire (got: $_S123_D)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_D"
 
-_S123_E="$(trap - ERR; _s123_resolve exec   '/workspace/.sandy/relay.sh')"
+# No slot entry here: with one, the slot refusal fires too, and (5) passed with
+# the operator-key refusal deleted.
+_S123_E="$(trap - ERR; _s123_resolve none   '/workspace/.sandy/relay.sh')"
 check "§123(5) an operator-set SANDY_HANDOFF_RELAY now FAILS THE LAUNCH — removed as a configuration key in 2.2.0 (#354), naming the manifest entry that replaces it. Since 2.6.0 sandy never sets the variable itself (the internal channel is gone, #382), so any value can only have come from an operator (got: $_S123_E)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_E"
 
@@ -11730,19 +11704,17 @@ exit 3')"
 exit 0')"
     check "§123(27) a relay that exits ZERO does NOT fail the session — a relay is allowed to be a one-shot (got: $_S123_W2)" \
         bash -c '[ "$1" = "rc=0" ]' -- "$_S123_W2"
-    _S123_W3="$(trap - ERR; _s123_window '#!/bin/sh
-sleep 30')"
-    check "§123(28) a relay that stays up does NOT fail the session — the window must not false-positive on a healthy relay (got: $_S123_W3)" \
-        bash -c '[ "$1" = "rc=0" ]' -- "$_S123_W3"
-    # (28b)/(28c): nothing (26)-(28) started outlives them. The supervisor loop
+    # "§123(28) a relay that stays up does NOT fail the session": run with two
+    # entries that stay up in §172(4a).
+    # (28b)/(28c): nothing (26)-(27) started outlives them. The supervisor loop
     # is a fork of this suite, so its command line is just
     # `bash test/run-tests.sh`; it is identified by what it holds instead.
-    # Before the fix every host run left three loops behind (parent 1,
+    # Before the fix every host run left a loop per window behind (parent 1,
     # SANDY_TEST_CHILD=1, fd 9 on a deleted .sandy-entry-w.lock, a `sleep`
     # child), restarting their relays for ever and holding process slots.
     # The fixture dir reaches the probes through the environment, not argv,
     # so the probing bash cannot match its own command line.
-    check "§123(28b) no supervisor loop or relay from (26)-(28) is still running: all three fixture entry locks are free and no process has a fixture path in its command line (mutation: cleaning up the relay alone, as before, leaves every lock held)" \
+    check "§123(28b) no supervisor loop or relay from (26)-(27) is still running: both fixture entry locks are free and no process has a fixture path in its command line (mutation: cleaning up the relay alone, as before, leaves every lock held)" \
         env S123D="$_S123_DIR" bash -c '
             n=0
             for l in "$S123D"/w.*/.sandy-entry-w.lock; do
@@ -11750,7 +11722,7 @@ sleep 30')"
                 n=$((n + 1))
                 flock -n "$l" true || { echo "still held: $l"; exit 1; }
             done
-            [ "$n" -eq 3 ] || { echo "expected 3 fixture locks, probed $n"; exit 1; }
+            [ "$n" -eq 2 ] || { echo "expected 2 fixture locks, probed $n"; exit 1; }
             if pgrep -f "$S123D/w[.]" >/dev/null 2>&1; then
                 echo "processes with a fixture path in argv:"; pgrep -lf "$S123D/w[.]"; exit 1
             fi'
@@ -11759,7 +11731,7 @@ sleep 30')"
     # (28b)'s lock probe sees it; everything the loop execs (relays, their
     # children, its backoff sleeps) shows the fixture HOME, which (28c) sees
     # even when its command line names no fixture path.
-    check "§123(28c) no process exec'd under a (26)-(28) fixture HOME is still running: relays, their own children, and the loop's backoff sleeps (Linux only: needs /proc/<pid>/environ; macOS has no /proc, and (28b) is its coverage there)" \
+    check "§123(28c) no process exec'd under a (26)-(27) fixture HOME is still running: relays, their own children, and the loop's backoff sleeps (Linux only: needs /proc/<pid>/environ; macOS has no /proc, and (28b) is its coverage there)" \
         env S123D="$_S123_DIR" bash -c '
             [ -r /proc/self/environ ] || { echo "no /proc/<pid>/environ on this host"; exit 77; }
             # The probe must be able to see an environment at all: its own.
@@ -11800,7 +11772,7 @@ else
     skip "§123(26-31) startup-window behaviour — no flock on this host, so the supervisor cannot run"
 fi
 rm -rf "$_S123_DIR"
-unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
+unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2
 
 # ============================================================
 section "§124: the handoff pair — classification, --print-state reporting, and --provision --all (#265)"
@@ -15447,7 +15419,7 @@ printf '#!/bin/sh\n' > "$_S149_H/features/amap/payload/relay"; chmod +x "$_S149_
 # narrower range produced an unbound-variable abort that the checks below read
 # as an empty result rather than as a red.
 _S149_BLK="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"/,/^# END relay capability/' "$_S149_SANDY")"
-check "§149(pre-8) the relay capability block was extracted (mutation: rename its first line and (8)-(10) go vacuous)" \
+check "§149(pre-8) the relay capability block was extracted (mutation: rename its first line and (10) goes vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q "relay-bin"' _ "$_S149_BLK"
 _s149_src() {   # $1 = install slot entry?  $2 = explicit value -> "resolved" or ""
     bash -c '
@@ -15472,14 +15444,13 @@ _s149_src() {   # $1 = install slot entry?  $2 = explicit value -> "resolved" or
         echo resolved
     ' _ "$_S149_BLK" "$_S149_H/probe$$_$RANDOM" "$1" "$2" 2>/dev/null
 }
-check "§149(8) no slot entry and no operator key -> resolves, refusing nothing (got: $(_s149_src noinstall ''))" \
-    test "$(_s149_src noinstall '')" = "resolved"
-# (9) and (10) INVERTED by #354: both producers they asserted are removed, and
-# the replacement behaviour is a refusal rather than a different winner. A
-# deleted check would leave the removal unguarded; these assert that the block
-# REFUSES rather than silently resolving to something else.
-check "§149(9) a leftover relay-bin entry REFUSES the launch — the slot was removed in 2.2.0, and ignoring an entry would start the wrong relay, or none, without saying so (got: $(_s149_src install ''))" \
-    test "$(_s149_src install '')" = ""
+# "§149(8) no slot entry and no operator key -> resolves": run on the same
+# block in §123(1).
+# "§149(9) a leftover relay-bin entry REFUSES the launch": run on the same
+# block in §123(2).
+# (10) INVERTED by #354: the producer it asserted is removed, and the
+# replacement behaviour is a refusal rather than a different winner. It asserts
+# that the block REFUSES rather than silently resolving to something else.
 check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as a configuration key. Since 2.6.0 (#382) the host never sets the variable itself (entries pass via SANDY_FEATURE_ENTRIES), so a value present at THIS point can only be an operator's (got: $(_s149_src noinstall /x/relay))" \
     test "$(_s149_src noinstall /x/relay)" = ""
 
@@ -18293,7 +18264,7 @@ EOF
         bash -c 'grep -q "^state=started" "$1"' _ "$_S172_D/fs/alpha/.state"
     check "§172(4d) fs/beta/.state ALSO reports started -- this is the check that fails on the silently-dropped-second-entry bug" \
         bash -c 'grep -q "^state=started" "$1"' _ "$_S172_D/fs/beta/.state"
-    check "§172(4e) each entry's own process sees its OWN SANDY_FEATURE_STATE" \
+    check "§172(4e) each entry's own process sees its OWN SANDY_FEATURE_STATE (mutation M1: restoring a designated branch in a template copy points one of them at relay-state instead)" \
         bash -c 'grep -qF "/fs/alpha" "$1" && grep -qF "/fs/beta" "$2"' _ "$_S172_D/env-a" "$_S172_D/env-b"
     check "§172(4f) two DISTINCT lock files are genuinely held (a foreign flock -n on each fails)" \
         bash -c '
@@ -18313,6 +18284,16 @@ EOF
         bash -c 'grep -q "^restarts=[1-9]" "$1"' _ "$_S172_D/fs/alpha/.state"
     check "§172(4i) ...and beta is COMPLETELY untouched: same pid, restarts=0 (killing one entry must not affect the other)" \
         bash -c 'test "$(wc -l < "$1" | tr -d " ")" -eq 1 && grep -q "^restarts=0" "$2"' _ "$_S172_D/pid-b" "$_S172_D/fs/beta/.state"
+    # (4j)/(4k) were §176(e2c)/(e2d) (2.6.0, #382), which ran a second,
+    # identical two-entry launch to assert them.
+    check "§172(4j) supervisor.log lines start '[sandy-entry <f>]' for both, never '[sandy-relay]'" \
+        bash -c '
+            grep -q "^\[sandy-entry alpha\]" "$1" || exit 1
+            grep -q "^\[sandy-entry beta\]" "$2" || exit 1
+            ! grep -q "sandy-relay" "$1" && ! grep -q "sandy-relay" "$2"
+        ' _ "$_S172_D/fs/alpha/supervisor.log" "$_S172_D/fs/beta/supervisor.log"
+    check "§172(4k) NOTHING was ever written at \$D/relay-state -- no code path left creates it" \
+        bash -c '[ ! -e "$1/relay-state" ]' _ "$_S172_D"
 
     # cleanup: kill every recorded pid directly first (pid-a/pid-b accumulate
     # one line per (re)start, including alpha's post-restart pid the (4g) kill
@@ -20101,7 +20082,7 @@ _S175_L_INIT="$(grep -m1 -n '^RUN_FLAGS+=(--init)$' "$_S175_SANDY" | cut -d: -f1
 _S175_L_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_S175_SANDY" | tail -1 | cut -d: -f1 || true)"
 _S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit 512)$' "$_S175_SANDY" | cut -d: -f1 || true)"
 check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every per-mode RUN_FLAGS=(...) reset, beside --pids-limit (init=${_S175_L_INIT:-?} last-reset=${_S175_L_LASTSET:-?} pids=${_S175_L_PIDS:-?})" \
-    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
 unset _S175_MISS _s175_t
 
 # ============================================================
@@ -20501,7 +20482,6 @@ check "§176(g3) SPECIFICATION.md Appendix A no longer contains the sandy-handof
 # --- (e) every entry's state dir is feature-state/<f>; leftover relay-state/
 #     is removed at launch with one info line (decisions 4-5) ---------------
 _S176E_SANDY="$SANDY_SCRIPT"
-_S176E_TMPL="$(cd "$(dirname "$0")" && pwd)/../templates/user-setup.sh.tmpl"
 
 # (e1) STATIC: the real RUN_FLAGS feature-entries block, run standalone with a
 # two-entry list, mounts BOTH entries from feature-state/<f> and NOTHING else.
@@ -20525,59 +20505,15 @@ check "§176(e1) both -v mounts source \$SANDBOX_DIR/feature-state/<f> targeting
     ' _ "$_S176E_RF"
 unset _S176E_RFBLK _S176E_RF
 
-# (e2) DYNAMIC (reap-run): run the REAL _sandy_start_entries call chain from
-# the template with two entries and no designation of any kind. Both must
-# reach .state=started under their OWN feature-state/<f>, each child must see
-# its OWN SANDY_FEATURE_STATE, and nothing must ever be written at
-# $D/relay-state -- there is no code path left that would create it.
-if command -v flock >/dev/null 2>&1 && [ -f "$_S176E_TMPL" ]; then
-    _S176E_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S176E_TMPL")"
-    _S176E_D="$(cd "$(mktemp -d)" && pwd -P)"
-    mkdir -p "$_S176E_D/fs/one" "$_S176E_D/fs/two" "$_S176E_D/home" "$_S176E_D/ws" "$_S176E_D/x" "$_S176E_D/y"
-    cat > "$_S176E_D/x/entry.sh" <<EOF
-#!/bin/sh
-echo "\$\$" >> "$_S176E_D/pid-x"
-printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S176E_D/env-x"
-exec sleep 30
-EOF
-    cat > "$_S176E_D/y/entry.sh" <<EOF
-#!/bin/sh
-echo "\$\$" >> "$_S176E_D/pid-y"
-printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S176E_D/env-y"
-exec sleep 30
-EOF
-    chmod +x "$_S176E_D/x/entry.sh" "$_S176E_D/y/entry.sh"
-    _S176E_RC=0
-    ( HOME="$_S176E_D/home" WORKSPACE="$_S176E_D/ws" bash -c '
-        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE SANDY_HANDOFF_RELAY SANDY_RELAY_STATE
-        sandy_log(){ :; }; sandy_err(){ echo "ERR:$*" >&2; }
-        SANDY_FEATURE_ENTRIES="one='"$_S176E_D"'/x/entry.sh two='"$_S176E_D"'/y/entry.sh"
-        SANDY_FEATURE_STATE_ROOT="'"$_S176E_D"'/fs"
-        '"$_S176E_FNS"'
-        _sandy_start_entries
-    ' ) >/dev/null 2>&1 || _S176E_RC=$?
-    sleep 0.5
-    check "§176(e2a) both entries reach .state=started under their OWN feature-state/<f> (got rc=$_S176E_RC)" \
-        bash -c 'test "$1" -eq 0 && grep -q "^state=started" "$2" && grep -q "^state=started" "$3"' _ "$_S176E_RC" "$_S176E_D/fs/one/.state" "$_S176E_D/fs/two/.state"
-    check "§176(e2b) each child saw its OWN SANDY_FEATURE_STATE (mutation M1: restoring a designated branch in a template copy makes one of these point at the other's dir or at relay-state instead)" \
-        bash -c 'grep -qF "/fs/one" "$1" && grep -qF "/fs/two" "$2"' _ "$_S176E_D/env-x" "$_S176E_D/env-y"
-    check "§176(e2c) supervisor.log lines start '[sandy-entry <f>]' for both, never '[sandy-relay]'" \
-        bash -c '
-            grep -q "^\[sandy-entry one\]" "$1" || exit 1
-            grep -q "^\[sandy-entry two\]" "$2" || exit 1
-            ! grep -q "sandy-relay" "$1" && ! grep -q "sandy-relay" "$2"
-        ' _ "$_S176E_D/fs/one/supervisor.log" "$_S176E_D/fs/two/supervisor.log"
-    check "§176(e2d) NOTHING was ever written at \$D/relay-state -- no code path left creates it" \
-        bash -c '[ ! -e "$1/relay-state" ]' _ "$_S176E_D"
-    for _s176e_p in $(cat "$_S176E_D/pid-x" "$_S176E_D/pid-y" 2>/dev/null); do
-        kill -9 "$_s176e_p" >/dev/null 2>&1 || true
-    done
-    command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S176E_D/" >/dev/null 2>&1 || true
-    rm -rf "$_S176E_D"
-    unset _S176E_FNS _S176E_D _S176E_RC _s176e_p
-else
-    skip "§176(e2) dynamic per-entry state test (flock or templates/user-setup.sh.tmpl unavailable)"
-fi
+# (e2) used to run the REAL _sandy_start_entries chain from the template a
+# second time, with the same two-entry fixture as §172(4).
+# "§176(e2a) both entries reach .state=started under their OWN
+# feature-state/<f>": run in §172(4a), (4c), (4d).
+# "§176(e2b) each child saw its OWN SANDY_FEATURE_STATE": run in §172(4e),
+# which mutation M1 (restoring a designated branch) turns red.
+# "§176(e2c) supervisor.log lines start '[sandy-entry <f>]'" and "§176(e2d)
+# NOTHING was ever written at relay-state": run on that fixture as §172(4j),
+# (4k).
 
 # (e3) the leftover relay-state removal block, driven directly.
 _S176E_LEFT="$(sed -n '/^# --- Leftover relay-state (retired 2.6.0, #382) ---/,/^fi$/p' "$_S176E_SANDY")"
@@ -20622,7 +20558,7 @@ check "§176(e4) no host-side line OUTSIDE the leftover-removal block creates or
 rm -f "$_S176E_RESTF"
 unset _S176E_RESTF
 
-unset _S176E_SANDY _S176E_TMPL
+unset _S176E_SANDY
 
 # --- (f) the stale-image warning names EVERY entry, not "all but the
 #     designated one" (decision 5) -----------------------------------------
@@ -23213,8 +23149,7 @@ check "§195(8) the internal carrier refuses a value other than codex, before an
     bash -c 'case "$1" in "1|"*"not supported"*) exit 0 ;; esac; exit 1' _ "$(_s195_carrier gemini --build-only)"
 check "§195(9) ...and refuses a login session combined with -p (a login is foreground and interactive)" \
     bash -c 'case "$1" in "1|"*"cannot be combined"*) exit 0 ;; esac; exit 1' _ "$(_s195_carrier codex -p hi)"
-check "§195(10) --print-schema advertises --login" \
-    bash -c 'grep -qF "\"name\":\"--login\"" "$1"' _ "$_SCHEMA_CACHE"
+# "§195(10) --print-schema advertises --login": §91(1).
 rm -rf "$_S195_D"
 unset _S195_D
 unset -f _s195 _s195_carrier 2>/dev/null || true
@@ -23291,8 +23226,7 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
 else
     skip "§196(11) needs both jq and node to compare the projectors"
 fi
-check "§196(12) --print-schema advertises --accounts" \
-    bash -c 'grep -qF "\"name\":\"--accounts\"" "$1"' _ "$_SCHEMA_CACHE"
+# "§196(12) --print-schema advertises --accounts": §91(1).
 # Multi-agent sandboxes, in their own SANDY_HOME so the counts above stand.
 # --accounts used to read only Claude Code: a claude,codex sandbox showed one
 # Claude row and nothing of codex, and a profileFetchedAt written as epoch
@@ -23434,8 +23368,9 @@ check "§196(30) codex on its ephemeral API-key auth.json is recorded as api-key
     "$(_s196_cq "$(_s196_cred "$_S196_D/c-new" claude,codex none OPENAI_API_KEY="$_S196_T2" CODEX_CRED_TMPDIR=/x)" "C['codex']['kind']+'|'+C['codex']['fingerprint']")" "$_S196_FP2"
 _s196_rc=0; printf 'x' | bash "$SANDY_SCRIPT" --fingerprint-token extra >/dev/null 2>&1 || _s196_rc=$?
 _s196_rc2=0; bash "$SANDY_SCRIPT" --fingerprint-token </dev/null >/dev/null 2>&1 || _s196_rc2=$?
-check "§196(31) --fingerprint-token refuses an argument (a secret in argv) and empty stdin, and is in --print-schema" \
-    bash -c '[ "$1" = 1 ] && [ "$2" = 1 ] && grep -qF "\"name\":\"--fingerprint-token\"" "$3"' _ "$_s196_rc" "$_s196_rc2" "$_SCHEMA_CACHE"
+# "...and is in --print-schema" was also asserted here: §91(1).
+check "§196(31) --fingerprint-token refuses an argument (a secret in argv) and empty stdin" \
+    bash -c '[ "$1" = 1 ] && [ "$2" = 1 ]' _ "$_s196_rc" "$_s196_rc2"
 # ...and end to end through the REAL marker writer (the §177 extraction), so
 # the block's output reaches /etc/sandy-session.json as valid JSON.
 _S196_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^_sandy_session_final="\$\{_sandy_session_file%\.sandy-tmp\.\*\}"$/{exit}' "$SANDY_SCRIPT")"
@@ -26338,6 +26273,12 @@ check "§222(1) SANDY_SKILL_PACKS + codex stops before any Docker work (integrat
 _s222_launch packs-opencode SANDY_AGENT=opencode SANDY_SKILL_PACKS=gstack bash "$SANDY_SCRIPT" -p test
 check "§222(2) SANDY_SKILL_PACKS + opencode stops before any Docker work" \
     _s222_stopped packs-opencode "$_S222_MSG_PACKS"
+# Every other non-claude agent and a non-claude combo (mutation C20i: the guard
+# narrowed to codex and opencode).
+for _S222_A in gemini grok mirror codex,gemini; do
+    _s222_launch "packs-$_S222_A" SANDY_AGENT="$_S222_A" SANDY_SKILL_PACKS=gstack bash "$SANDY_SCRIPT" -p test
+    check "§222(2b) SANDY_SKILL_PACKS + $_S222_A stops before any Docker work" _s222_stopped "packs-$_S222_A" "$_S222_MSG_PACKS"
+done
 for _S222_A in codex gemini opencode claude,gemini; do
     _s222_launch "remote-$_S222_A" SANDY_AGENT="$_S222_A" bash "$SANDY_SCRIPT" --remote
 done
@@ -26356,6 +26297,9 @@ check "§222(7) SANDY_CHANNELS=discord + codex stops before any Docker work (mut
     _s222_stopped discord-codex "$_S222_MSG_DISCORD"
 check "§222(8) SANDY_CHANNELS=discord + opencode stops before any Docker work" \
     _s222_stopped discord-opencode "$_S222_MSG_DISCORD"
+_s222_launch discord-claude,gemini SANDY_AGENT=claude,gemini SANDY_CHANNELS=discord bash "$SANDY_SCRIPT" -p test
+check "§222(8b) SANDY_CHANNELS=discord + claude,gemini (multi-agent) stops before any Docker work (mutation: the guard's multi-agent half deleted)" \
+    _s222_stopped discord-claude,gemini "$_S222_MSG_DISCORD"
 _s222_launch both SANDY_AGENT=both bash "$SANDY_SCRIPT" -p test
 check "§222(9) the removed SANDY_AGENT=both alias errors with the migration hint, not a silent claude,gemini" \
     _s222_stopped both "SANDY_AGENT=both is no longer supported"
