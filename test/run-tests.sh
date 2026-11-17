@@ -26404,12 +26404,39 @@ cat > "$_S224_D/bin/gh" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$STUB_DIR/gh.argv"
 echo STUB-CHATTER; echo STUB-CHATTER >&2
+# gh's config dir, resolved the way gh resolves it. hosts.yml holds one
+# "acct <user> <token>" line per login and "user: <active>"; like gh, every
+# login makes its own account active. Written by rename, so a reader never
+# sees half a file.
+dir="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
+_hosts() {   # $1 = the account to make active
+    mkdir -p "$dir"
+    { grep '^acct ' "$dir/hosts.yml" 2>/dev/null; printf 'user: %s\n' "$1"; } > "$dir/hosts.yml.$$"
+    mv -f "$dir/hosts.yml.$$" "$dir/hosts.yml"
+    printf 'v: 1\n' > "$dir/config.yml"
+}
 case "$1 $2" in
     "auth login")
         tok="$(cat)"
+        ps -axww -o args= >> "$STUB_DIR/ps.snap" 2>/dev/null || true
         sleep "${STUB_LOGIN_SLEEP:-0}"
+        user="$tok"
+        case ",${TOKMAP:-}," in *",$tok="*) user="${TOKMAP#*$tok=}"; user="${user%%,*}" ;; esac
+        mkdir -p "$dir"
+        { grep '^acct ' "$dir/hosts.yml" 2>/dev/null | grep -v "^acct $user "; printf 'acct %s %s\n' "$user" "$tok"; } > "$dir/acct.$$"
+        { cat "$dir/acct.$$"; printf 'user: %s\n' "$user"; } > "$dir/hosts.yml.$$"; rm -f "$dir/acct.$$"
+        mv -f "$dir/hosts.yml.$$" "$dir/hosts.yml"; printf 'v: 1\n' > "$dir/config.yml"
         printf 'login %s\n' "$tok" >> "$STUB_DIR/events" ;;
-    "auth switch") printf 'switch %s\n' "$4" >> "$STUB_DIR/events" ;;
+    "auth switch")
+        _hosts "$4"
+        printf 'switch %s\n' "$4" >> "$STUB_DIR/events" ;;
+    "auth git-credential")
+        # Answers with the active account's token, or nothing before a login.
+        cat > /dev/null
+        u="$(sed -n 's/^user: //p' "$dir/hosts.yml" 2>/dev/null)"
+        [ -n "$u" ] || exit 0
+        t="$(sed -n "s/^acct $u //p" "$dir/hosts.yml")"
+        printf 'username=%s\npassword=%s\n' "$u" "$t" ;;
     "auth setup-git")
         # Like gh: --force needs a new enough gh; without --hostname it needs a login.
         if [ "${3:-}" = --hostname ]; then
@@ -26441,6 +26468,7 @@ if ! command -v timeout >/dev/null 2>&1; then
     printf '#!/bin/sh\nexec perl -e %s "$@"\n' "'\$t=shift; alarm \$t; exec @ARGV or exit 127'" > "$_S224_D/bin/timeout"
     chmod +x "$_S224_D/bin/timeout"
 fi
+_S224_TOKMAP="x224a=alice,x224b=bob,x224c=carol,x224g=gee,t1=a,t2=b"
 _S224_BASE='!f() { echo username=x-access-token; echo "password=${GIT_TOKEN}"; }; f'
 # _s224_run NAME CODE [NAME=VALUE...]: a fresh HOME and logs, run CODE the way
 # user-setup does (set -e + an ERR trap), then `wait`. Stdout, stderr and an
@@ -26449,10 +26477,10 @@ _S224_BASE='!f() { echo username=x-access-token; echo "password=${GIT_TOKEN}"; }
 # only when it left no child of its own. Seconds taken go to NAME.secs.
 _s224_run() {
     local _n="$1" _code="$2" _t0; shift 2
-    rm -rf "$_S224_D/home" "$_S224_D/events" "$_S224_D/gh.argv" "$_S224_D/git.argv" "$_S224_D/file.argv"
+    rm -rf "$_S224_D/home" "$_S224_D/events" "$_S224_D/gh.argv" "$_S224_D/git.argv" "$_S224_D/file.argv" "$_S224_D/ps.snap"
     mkdir -p "$_S224_D/home"
     _t0=$(date +%s)
-    { env -i PATH="$_S224_D/bin:$PATH" HOME="$_S224_D/home" STUB_DIR="$_S224_D" "$@" \
+    { env -i PATH="$_S224_D/bin:$PATH" HOME="$_S224_D/home" STUB_DIR="$_S224_D" TOKMAP="$_S224_TOKMAP" "$@" \
         bash -c 'set -e; trap "echo \"ERR at \$LINENO: \$BASH_COMMAND\" >&2" ERR; sandy_log() { :; }; eval "$1"; wait' _ "$_code" \
         2>&1 7>&1 || echo "rc=$?"; } | cat > "$_S224_D/$_n.out"
     echo $(( $(date +%s) - _t0 )) > "$_S224_D/$_n.secs"
@@ -26491,7 +26519,7 @@ if [ -z "$_S224_GIT" ]; then
     check "§224 git-auth checks (no git on this host)" sh -c 'exit 77'
 else
     # Two accounts whose logins take 2 s each: 4 s of network the launch used to wait for.
-    _s224_run multi "$_S224_GH" GH_ACCOUNTS=alice:tokA1,bob:tokB2 GIT_TOKEN=tokB2 SANDY_GH_ACTIVE=alice STUB_LOGIN_SLEEP=2
+    _s224_run multi "$_S224_GH" GH_ACCOUNTS=alice:x224a,bob:x224b GIT_TOKEN=x224b SANDY_GH_ACTIVE=alice STUB_LOGIN_SLEEP=2
     _s224_wait_for "switch alice" || true
     _s224_ev="$(cat "$_S224_D/events" 2>/dev/null || true)"
     check "§224(1) the launch returns before the logins finish (took $(cat "$_S224_D/multi.secs")s against 4s of logins), with no login done yet, nothing left holding its output or fd 7, and no child left to reap" \
@@ -26499,42 +26527,78 @@ else
     check "§224(2) git's credential helpers for github.com are complete when the launch returns: reset, gh, then the baseline (git works from the first second)" \
         bash -c '[ "$(cat "$1/multi.helpers0")" = "$2" ]' _ "$_S224_D" "$_S224_WANT_HELPERS"
     check "§224(3) after the job: gh's helper written first (no network), then every account logged in, in order, then the switch to the host's choice; helpers unchanged" \
-        bash -c '[ "$1" = "$(printf "setup-git auth setup-git --hostname github.com --force\nlogin tokA1\nlogin tokB2\nswitch alice")" ] && [ "$(HOME="$2/home" "$3" config --global --get-all credential.https://github.com.helper)" = "$4" ]' \
+        bash -c '[ "$1" = "$(printf "setup-git auth setup-git --hostname github.com --force\nlogin x224a\nlogin x224b\nswitch alice")" ] && [ "$(HOME="$2/home" "$3" config --global --get-all credential.https://github.com.helper)" = "$4" ]' \
         _ "$_s224_ev" "$_S224_D" "$_S224_GIT" "$_S224_WANT_HELPERS"
     check "§224(4) the job prints nothing over the agent's TUI (gh's own output is discarded)" \
         bash -c '! grep -q STUB-CHATTER "$1/multi.out"' _ "$_S224_D"
-    check "§224(5) no token is ever an argument to gh or git, and no file in the agent home holds one" \
-        bash -c '[ -s "$1/gh.argv" ] && [ -s "$1/git.argv" ] && ! grep -qE "tokA1|tokB2" "$1/gh.argv" "$1/git.argv" && ! grep -rqE "tokA1|tokB2" "$1/home"' _ "$_S224_D"
+    # A process list taken INSIDE each stub login (while the job's own
+    # pipeline is alive) catches a token on any process's command line, e.g.
+    # `bash -c "echo $tok | gh ..."`; the stub's own argv log catches gh's.
+    # gh's config (hosts.yml) holds the tokens by design, as with the real gh.
+    check "§224(5) no token is ever an argument: not to gh, not to git, not on any process's command line during the logins; nothing outside gh's config holds one" \
+        bash -c '[ -s "$1/gh.argv" ] && [ -s "$1/git.argv" ] && ! grep -qE "x224a|x224b" "$1/gh.argv" "$1/git.argv" && { ! command -v ps >/dev/null 2>&1 || { [ -s "$1/ps.snap" ] && ! grep -qE "x224a|x224b" "$1/ps.snap"; }; } && ! grep -rqE "x224a|x224b" --exclude=hosts.yml "$1/home"' _ "$_S224_D"
+    # ...and statically: every login line hands the token to gh through the
+    # printf BUILTIN (no process, so no command line), never `echo` the
+    # binary, a here-string file, or an argument.
+    cat > "$_S224_D/login.want" <<'WANT'
+printf '%s\n' "${_pair#*:}" | gh auth login --with-token
+printf '%s\n' "$GIT_TOKEN" | gh auth login --with-token
+WANT
+    check "§224(5b) every gh login line passes the token only via the printf builtin on a pipe (exactly these two lines)" \
+        bash -c '[ "$(grep "gh auth login" <<< "$1" | grep -v "^[[:space:]]*#" | sed "s/^[[:space:]]*//")" = "$(cat "$2")" ]' _ "$_S224_GH" "$_S224_D/login.want"
     # A gh too old for --force: setup-git waits for the logins, as before, and
     # the baseline helper it removes is put back after it.
-    _s224_run noforce "$_S224_GH" GH_ACCOUNTS=alice:tokA1,bob:tokB2 GIT_TOKEN=tokB2 SANDY_GH_ACTIVE=bob STUB_NOFORCE=1 STUB_LOGIN_SLEEP=1
+    _s224_run noforce "$_S224_GH" GH_ACCOUNTS=alice:x224a,bob:x224b GIT_TOKEN=x224b SANDY_GH_ACTIVE=bob STUB_NOFORCE=1 STUB_LOGIN_SLEEP=1
     _s224_wait_helpers 3 || true
     check "§224(6) a gh without --force: only the baseline helper at return; the job logs in, switches, then runs setup-git, and the baseline ends up last again" \
-        bash -c '[ "$(cat "$1/noforce.helpers0")" = "$2" ] && [ "$(cat "$1/events")" = "$(printf "login tokA1\nlogin tokB2\nswitch bob\nsetup-git auth setup-git")" ] && [ "$(HOME="$1/home" "$3" config --global --get-all credential.https://github.com.helper)" = "$4" ]' \
+        bash -c '[ "$(cat "$1/noforce.helpers0")" = "$2" ] && [ "$(cat "$1/events")" = "$(printf "login x224a\nlogin x224b\nswitch bob\nsetup-git auth setup-git")" ] && [ "$(HOME="$1/home" "$3" config --global --get-all credential.https://github.com.helper)" = "$4" ]' \
         _ "$_S224_D" "$_S224_BASE" "$_S224_GIT" "$_S224_WANT_HELPERS"
-    _s224_run single "$_S224_GH" GIT_TOKEN=tokG STUB_LOGIN_SLEEP=0
-    _s224_wait_for "login tokG" || true
+    _s224_run single "$_S224_GH" GIT_TOKEN=x224g STUB_LOGIN_SLEEP=0
+    _s224_wait_for "login x224g" || true
     check "§224(7) no GH_ACCOUNTS: GIT_TOKEN alone is logged in, on stdin, with no switch" \
-        bash -c '[ "$(cat "$1/events")" = "$(printf "setup-git auth setup-git --hostname github.com --force\nlogin tokG")" ] && ! grep -q tokG "$1/gh.argv"' _ "$_S224_D"
+        bash -c '[ "$(cat "$1/events")" = "$(printf "setup-git auth setup-git --hostname github.com --force\nlogin x224g")" ] && ! grep -q x224g "$1/gh.argv"' _ "$_S224_D"
     _s224_run unfwd "$_S224_GH" GH_ACCOUNTS=a:t1,b:t2 GIT_TOKEN=t1 SANDY_GH_ACTIVE=zz
     _s224_wait_for "login t2" || true
     sleep 0.5
     check "§224(8) an active account that was not forwarded is still reported on the console at launch, and nothing is switched" \
         bash -c 'grep -q "gh account zz was chosen but not forwarded" "$1/unfwd.out" && ! grep -q "^switch" "$1/events" && grep -qx "login t2" "$1/events"' _ "$_S224_D"
+    # Three accounts, the chosen one in the middle, the host's GIT_TOKEN being
+    # the chosen account's (the host sends it so, see (16)). Sample gh's REAL
+    # config and what git would send, every 0.1 s, from the moment the launch
+    # returns until the job is done.
+    _s224_run stage "$_S224_GH" GH_ACCOUNTS=bob:x224b,alice:x224a,carol:x224c GIT_TOKEN=x224a SANDY_GH_ACTIVE=alice STUB_LOGIN_SLEEP=0.4
+    : > "$_S224_D/seen"; _s224_i=0; _s224_done=0
+    while [ "$_s224_i" -lt 150 ] && [ "$_s224_done" -lt 3 ]; do
+        printf 'user=%s pw=%s\n' "$(sed -n 's/^user: //p' "$_S224_D/home/.config/gh/hosts.yml" 2>/dev/null || true)" \
+            "$(printf 'protocol=https\nhost=github.com\npath=o/r.git\n\n' | env -i PATH="$_S224_D/bin:$PATH" HOME="$_S224_D/home" STUB_DIR="$_S224_D" GIT_TOKEN=x224a GIT_TERMINAL_PROMPT=0 "$_S224_GIT" credential fill 2>/dev/null | sed -n 's/^password=//p')" >> "$_S224_D/seen"
+        if grep -qx "switch alice" "$_S224_D/events" 2>/dev/null; then _s224_done=$((_s224_done + 1)); fi
+        sleep 0.1; _s224_i=$((_s224_i + 1))
+    done
+    check "§224(9b) during the job gh's real config never has any account but the chosen one active, git sends the chosen account's token at every moment, and it ends on the chosen account (samples: $(wc -l < "$_S224_D/seen" | tr -d ' '))" \
+        bash -c '[ "$(wc -l < "$1/seen" | tr -d " ")" -ge 5 ] && ! grep -v "^user=\(alice\)\{0,1\} pw=x224a$" "$1/seen" && grep -q "^user= " "$1/seen" && [ "$(tail -n 1 "$1/seen")" = "user=alice pw=x224a" ] && grep -qx "switch alice" "$1/events"' _ "$_S224_D"
+    check "§224(9c) the staging dir is gone afterwards and gh's config is in its real place" \
+        bash -c '[ "$(cd "$1/home/.config" && ls -A)" = gh ] && [ -f "$1/home/.config/gh/hosts.yml" ] && [ -f "$1/home/.config/gh/config.yml" ]' _ "$_S224_D"
+    # A GH_CONFIG_DIR already set is where gh's config ends up, not ~/.config/gh.
+    _s224_run ghdir "$_S224_GH" GH_ACCOUNTS=bob:x224b,alice:x224a GIT_TOKEN=x224a SANDY_GH_ACTIVE=alice GH_CONFIG_DIR="$_S224_D/home/custom-gh"
+    _s224_wait_for "switch alice" || true
+    sleep 0.3
+    check "§224(9d) a GH_CONFIG_DIR set beforehand is respected: the result lands there, with the chosen account active, and nowhere else" \
+        bash -c 'grep -qx "user: alice" "$1/home/custom-gh/hosts.yml" && [ ! -e "$1/home/.config/gh" ] && [ "$(cd "$1/home" && ls -A | grep -v "^.gitconfig$")" = custom-gh ]' _ "$_S224_D"
     _s224_run notok "$_S224_GH" SANDY_SSH=token
     check "§224(9) with no token there is no job, no gh helper and no baseline helper (as before: setup-git failed without a login)" \
         bash -c '[ ! -s "$1/events" ] && [ -z "$(cat "$1/notok.helpers0")" ]' _ "$_S224_D"
 fi
-# F7: the native-addon probe. pnpm puts a scoped package's addon at depth 8
-# under node_modules (.pnpm/@s+p@1/node_modules/@s/p/build/Release/x.node).
+# F7: the native-addon probe. node-pre-gyp's binding dir inside a pnpm scoped
+# package is depth 9 under node_modules
+# (.pnpm/@s+p@1/node_modules/@s/p/lib/binding/<abi>/x.node).
 _S224_WS="$_S224_D/ws"
 _s224_addon() { mkdir -p "$(dirname "$1")"; printf '%s' "${2:-MZ-not-elf}" > "$1"; }
 mkdir -p "$_S224_WS/node_modules"
-_s224_addon "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/build/Release/x.node"
+_s224_addon "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/lib/binding/node-v115-linux-x64/x.node"
 _s224_run nat "$_S224_NATIVE" WORKSPACE="$_S224_WS"
-check "§224(10) a foreign native addon at pnpm's depth (8) still gets the warning, and file(1) is asked about exactly that one path" \
+check "§224(10) a foreign native addon at pnpm + node-pre-gyp depth (9) still gets the warning, and file(1) is asked about exactly that one path" \
     bash -c 'grep -q "native addons built for a different platform" "$1/nat.out" && [ "$(cat "$1/file.argv")" = "$2" ]' \
-    _ "$_S224_D" "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/build/Release/x.node"
+    _ "$_S224_D" "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/lib/binding/node-v115-linux-x64/x.node"
 rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
 _s224_addon "$_S224_WS/node_modules/good/build/Release/x.node" "$(printf '\177ELF\002\001\001')"
 _s224_run natelf "$_S224_NATIVE" WORKSPACE="$_S224_WS"
@@ -26548,7 +26612,7 @@ done
 _s224_run natmany "$_S224_NATIVE" WORKSPACE="$_S224_WS"
 check "§224(12) with many addons the probe stops at the first: file(1) is asked about one existing path, not a list" \
     bash -c '[ "$(wc -l < "$1/file.argv" | tr -d " ")" = 1 ] && [ -f "$(cat "$1/file.argv")" ] && grep -q "native addons" "$1/natmany.out"' _ "$_S224_D"
-# Deeper than the bound: the documented trade (the walk stops at depth 8).
+# Deeper than the bound: the documented trade (the walk stops at depth 9).
 rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
 _s224_addon "$_S224_WS/node_modules/a/b/c/d/e/f/g/h/i/x.node"
 _s224_run natdeep "$_S224_NATIVE" WORKSPACE="$_S224_WS"
@@ -26579,8 +26643,85 @@ _s224_run lfs "$_S224_LFS" WORKSPACE="$_S224_WS"
 PATH="$_S224_PATH0"
 check "§224(15) the LFS probe reads the workspace's .gitattributes files but none under node_modules, and still runs git lfs install" \
     bash -c 'grep -qxF "$2/.gitattributes" "$1/grep.argv" && grep -qxF "$2/sub/.gitattributes" "$1/grep.argv" && ! grep -q node_modules "$1/grep.argv" && grep -qx "lfs install" "$1/git.argv"' _ "$_S224_D" "$_S224_WS"
+# --- Host side: the token sandy forwards as GIT_TOKEN is the CHOSEN account's,
+# so git's no-network fallback helper in the container signs as the account gh
+# will be switched to (and stays so if every login there fails). The pick's
+# rule 5 still compares against the host's ACTIVE token. Drives the real
+# launcher (-p, egress off, offline) against stubs, like §215, and reads the
+# agent's docker run: its argv and a copy of its --env-file.
+mkdir -p "$_S224_D/hbin"
+cat > "$_S224_D/hbin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
+    "network inspect "*Gateway*) echo 172.30.0.1 ;;
+    "network inspect "*bridge.name*) echo br-sdy-224 ;;
+esac
+if [ "${1:-}" = run ]; then
+    _prev=""; _agent=0; _env=""
+    for _a in "$@"; do
+        if [ "$_prev" = --env-file ]; then _env="$_a"; fi
+        case "$_prev" in --name) case "$_a" in sandy-*) _agent=1 ;; esac ;; esac
+        _prev="$_a"
+    done
+    if [ "$_agent" = 1 ]; then
+        printf '%s\n' "$@" > "$H224_LOG/agent.args"
+        if [ -n "$_env" ]; then cp "$_env" "$H224_LOG/agent.envfile"; fi
+    fi
+fi
+exit 0
+EOF
+# gh: the host's accounts are H224_ACCOUNTS ("user:token,..."), the active
+# one's token is H224_ACTIVE_TOK. Anything else (gh api) fails.
+cat > "$_S224_D/hbin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    "auth token") printf '%s\n' "$H224_ACTIVE_TOK"; exit 0 ;;
+    "auth status")
+        IFS=',' read -ra _p <<< "$H224_ACCOUNTS"
+        for _x in "${_p[@]}"; do printf '  - Logged in to github.com account %s (keyring)\n' "${_x%%:*}"; done
+        exit 0 ;;
+    "auth token --user "*)
+        IFS=',' read -ra _p <<< "$H224_ACCOUNTS"
+        for _x in "${_p[@]}"; do [ "${_x%%:*}" = "$4" ] && { printf '%s\n' "${_x#*:}"; exit 0; }; done
+        exit 1 ;;
+esac
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$_S224_D/hbin/curl"
+printf '#!/bin/sh\nexit 0\n' > "$_S224_D/hbin/sudo"
+printf '#!/bin/sh\nexit 44\n' > "$_S224_D/hbin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S224_D/hbin/uname"
+chmod +x "$_S224_D/hbin/docker" "$_S224_D/hbin/gh" "$_S224_D/hbin/curl" "$_S224_D/hbin/sudo" "$_S224_D/hbin/security" "$_S224_D/hbin/uname"
+# _s224_host CASE [VAR=value ...]: one launch; CASE/ is $HOME, CASE/ws the
+# workspace (no git repo, so no origin: the pick is rule 1, 2 or 5). Every
+# SANDY_*/credential variable of the launching shell is removed first.
+_s224_host() {
+    local c="$_S224_D/$1"; shift
+    rm -rf "$c"; mkdir -p "$c/ws" "$c/sh"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*|GIT_TOKEN|GH_ACCOUNTS) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$c/ws" && env PATH="$_S224_D/hbin:$PATH" HOME="$c" SANDY_HOME="$c/sh" H224_LOG="$c" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 "$@" bash "$SANDY_SCRIPT" -p fixture </dev/null >"$c/out" 2>&1
+    ) || echo "rc=$?" >> "$_S224_D/$1/out"
+}
+_s224_host hchosen H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224b SANDY_GH_ACCOUNT=alice
+_s224_host hnopick H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224z
+_s224_host hrule5 H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224b
+check "§224(16) the host forwards the CHOSEN account's token as GIT_TOKEN (chosen alice, host-active bob), with SANDY_GH_ACTIVE=alice, every account still in GH_ACCOUNTS, and the gh info line as before" \
+    bash -c 'e="$1/hchosen/agent.envfile"; [ "$(grep -c "^GIT_TOKEN=" "$e")" = 1 ] && grep -qx "GIT_TOKEN=h224a" "$e" && grep -qx "GH_ACCOUNTS=alice:h224a,bob:h224b" "$e" && grep -qx "SANDY_GH_ACTIVE=alice" "$1/hchosen/agent.args" && grep -q "Git auth: GitHub token via gh CLI" "$1/hchosen/out" && ! grep -q "h224[ab]" "$1/hchosen/agent.args"' _ "$_S224_D"
+check "§224(17) with nothing picked (the host-active token is no forwarded account's) GIT_TOKEN is the host-active token, and nothing is switched" \
+    bash -c 'e="$1/hnopick/agent.envfile"; grep -qx "GIT_TOKEN=h224z" "$e" && [ "$(grep -c "^GIT_TOKEN=" "$e")" = 1 ] && ! grep -q "^SANDY_GH_ACTIVE=" "$1/hnopick/agent.args"' _ "$_S224_D"
+check "§224(18) rule 5 still sees the host-ACTIVE token: with no other rule it picks bob, and GIT_TOKEN is bob's" \
+    bash -c 'grep -qx "SANDY_GH_ACTIVE=bob" "$1/hrule5/agent.args" && grep -qx "GIT_TOKEN=h224b" "$1/hrule5/agent.envfile"' _ "$_S224_D"
+unset -f _s224_host
 rm -rf "$_S224_D"
-unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _s224_ev _s224_i
+unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _s224_ev _s224_i _s224_done
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
 
 # BEGIN SUMMARY

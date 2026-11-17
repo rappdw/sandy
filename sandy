@@ -10878,12 +10878,13 @@ fi
 if [ -d "$WORKSPACE/node_modules" ]; then
     # Check for .node files — if any exist, verify they are Linux ELF binaries.
     # Bounded (optimization pass F7): `-print -quit` stops at the first hit
-    # instead of walking the whole tree into `head`, the depth bound covers a
-    # nested node_modules (node_modules/a/node_modules/b/build/Release/x.node
-    # is depth 6), and `timeout 3` caps a huge tree. It is a warning only, so a
-    # timeout just skips it: a .node file deeper than 6 or in a tree too big
-    # to scan in 3 s goes unreported.
-    BAD_NATIVE="$(timeout 3 find "$WORKSPACE/node_modules" -maxdepth 8 -name "*.node" -type f -print -quit 2>/dev/null || true)"
+    # instead of walking the whole tree into `head`, the depth bound covers
+    # pnpm's scoped layout with node-pre-gyp's binding dir
+    # (.pnpm/@s+p@1/node_modules/@s/p/lib/binding/<abi>/x.node is depth 9),
+    # and `timeout 3` caps a huge tree. It is a warning only, so a timeout
+    # just skips it: a .node file deeper than 9 or in a tree too big to scan
+    # in 3 s goes unreported.
+    BAD_NATIVE="$(timeout 3 find "$WORKSPACE/node_modules" -maxdepth 9 -name "*.node" -type f -print -quit 2>/dev/null || true)"
     if [ -n "$BAD_NATIVE" ] && ! file "$BAD_NATIVE" 2>/dev/null | grep -q "ELF"; then
         printf "\033[0;33m⚠ node_modules/ contains native addons built for a different platform\033[0m\n"
         printf "\033[0;33m  Fix: npm rebuild\033[0m\n"
@@ -10916,10 +10917,14 @@ sandy_log "Configuring git auth"
 #   from the first second: before the logins land, gh's helper answers nothing
 #   and git falls through to the baseline helper (GIT_TOKEN, the host's active
 #   account); after they land, gh's helper answers with the active account.
-#   BACKGROUND (one job, in order): the logins, then `gh auth switch`. The job
-#   writes only gh's own config (~/.config/gh), never ~/.gitconfig, so it
-#   cannot race a git write. Trade: a `gh` command (not git) issued in the
-#   first second or so can run before gh is logged in or switched.
+#   BACKGROUND (one job, in order): the logins, then `gh auth switch`, in a
+#   staging copy of gh's config dir that is renamed into place at the end, so
+#   no account but the chosen one is ever active there. The job writes only
+#   gh's own config (~/.config/gh), never ~/.gitconfig, so it cannot race a
+#   git write. The host forwards the CHOSEN account's token as GIT_TOKEN, so
+#   the baseline helper signs as the same account gh will. Trade: a `gh`
+#   command (not git) issued in the first second or so can run before gh is
+#   logged in or switched.
 # Tokens reach gh on stdin from a builtin, never argv, never a file.
 _sandy_gh_pairs=()
 _sandy_gh_login=false       # is there a token to log gh in with?
@@ -10974,7 +10979,8 @@ fi
 # GIT_TOKEN was forwarded. Append a direct helper: git tries credential
 # helpers in order, so gh's multi-account helper still wins when it's healthy,
 # and this is the fallback (also for the first second, before the logins in
-# the job below land). It supplies the forwarded token for github.com with NO
+# the job below land; the host sends the CHOSEN account's token as
+# GIT_TOKEN). It supplies the forwarded token for github.com with NO
 # network round-trip and reads $GIT_TOKEN from the container env at call time
 # (the literal ${GIT_TOKEN} is stored in .gitconfig, not the value). Always
 # emits creds (git ignores helper output on store/erase), sidestepping the
@@ -11009,6 +11015,23 @@ if [ "$_sandy_gh_login" = true ]; then
                 case "$_fd" in ''|*[!0-9]*) continue ;; esac
                 [ "$_fd" -gt 2 ] && eval "exec ${_fd}>&-" 2>/dev/null
             done
+            # Log in and switch in a private stage, then rename the result
+            # into gh's real config dir: each `gh auth login` makes ITS account
+            # active, so logging in in place would let gh's git helper sign as
+            # every account in turn (measured: bob, alice, carol, alice over
+            # 1.3 s). With the stage, the real config goes from no login (git
+            # falls through to the baseline helper, GIT_TOKEN = the chosen
+            # account) straight to the chosen account. Same filesystem, so
+            # each mv is a rename. A stage that cannot be made logs in in place.
+            _sandy_gh_had_dir="${GH_CONFIG_DIR+set}"; _sandy_gh_old_dir="${GH_CONFIG_DIR:-}"
+            _sandy_gh_dir="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
+            _sandy_gh_stage=""
+            if mkdir -p "${_sandy_gh_dir%/*}" && _sandy_gh_stage="$(mktemp -d "$_sandy_gh_dir.stage.XXXXXX")"; then
+                cp -p "$_sandy_gh_dir/config.yml" "$_sandy_gh_dir/hosts.yml" "$_sandy_gh_stage/" 2>/dev/null
+                export GH_CONFIG_DIR="$_sandy_gh_stage"
+            else
+                _sandy_gh_stage=""
+            fi
             if [ "${#_sandy_gh_pairs[@]}" -gt 0 ]; then
                 for _pair in "${_sandy_gh_pairs[@]}"; do
                     printf '%s\n' "${_pair#*:}" | gh auth login --with-token
@@ -11016,6 +11039,13 @@ if [ "$_sandy_gh_login" = true ]; then
                 [ -n "$_sandy_gh_switch" ] && gh auth switch --user "$_sandy_gh_switch"
             else
                 printf '%s\n' "$GIT_TOKEN" | gh auth login --with-token
+            fi
+            if [ -n "$_sandy_gh_stage" ]; then
+                mkdir -p "$_sandy_gh_dir"
+                [ -f "$_sandy_gh_stage/config.yml" ] && mv -f "$_sandy_gh_stage/config.yml" "$_sandy_gh_dir/config.yml"
+                [ -f "$_sandy_gh_stage/hosts.yml" ] && mv -f "$_sandy_gh_stage/hosts.yml" "$_sandy_gh_dir/hosts.yml"
+                rm -rf "$_sandy_gh_stage"
+                if [ -n "$_sandy_gh_had_dir" ]; then export GH_CONFIG_DIR="$_sandy_gh_old_dir"; else unset GH_CONFIG_DIR; fi
             fi
             if [ "$_sandy_gh_setup_git_late" = true ] && gh auth setup-git \
                 && [ "$_sandy_git_add_baseline" = true ]; then
@@ -20950,8 +20980,10 @@ _sandy_gh_can_push() {
 #   3. the account named like origin's owner (case-insensitive);
 #   4. the first account GitHub says can push to origin -- what an org-owned
 #      repo needs, since no account is named like an org (skipped offline);
-#   5. the host's active account: the one whose token is GIT_TOKEN, which is
-#      also what git's fallback credential helper in the container sends.
+#   5. the host's active account: the one whose token is GIT_TOKEN. GIT_TOKEN
+#      is still the host's active token while this runs; only afterwards is it
+#      reassigned to the chosen account's token (see below), which is what
+#      git's fallback credential helper in the container sends.
 # Before 2.9.0 only rule 3 existed, run in the container, so an org repo got
 # whichever account `gh auth login` ran last there.
 _sandy_gh_pick_account() {
@@ -21002,7 +21034,11 @@ _sandy_gh_pick_account() {
     return 1
 }
 # Collect gh CLI tokens for all authenticated accounts.
-# GIT_TOKEN carries the active account's token (fallback for gh auth when GH_ACCOUNTS is empty).
+# GIT_TOKEN starts as the host's active account's token (rule 5 of the pick
+# compares against it, and it is gh's login when GH_ACCOUNTS is empty). Once an
+# account is picked below, GIT_TOKEN becomes THAT account's token before it is
+# forwarded, so git's no-network fallback helper in the container signs as the
+# chosen account from the first second, not as the host's active one.
 # GH_ACCOUNTS carries all accounts as "user:token" pairs (used for gh CLI auth).
 GIT_TOKEN=""
 GH_ACCOUNTS=""
@@ -21019,7 +21055,6 @@ if command -v gh &>/dev/null; then
     done < <(gh auth status 2>&1 | grep 'account ' | sed 's/.*account //;s/ .*//')
 fi
 if [ -n "$GIT_TOKEN" ]; then
-    _sandy_add_secret_env GIT_TOKEN "$GIT_TOKEN"
     if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
         info "Git auth: GitHub token via gh CLI (HTTPS)"
     fi
@@ -21053,6 +21088,24 @@ if [ -n "$GH_ACCOUNTS" ]; then
     fi
     unset _sandy_gh_origin _sandy_gh_pick
 fi
+# Only now, after the pick (whose rule 5 needed the host's active token):
+# forward the CHOSEN account's token as GIT_TOKEN. In the container, git falls
+# back to GIT_TOKEN while gh's logins are still running in the background, and
+# if every login there fails; sending the host's active account then would push
+# as the wrong account. Which tokens are forwarded is unchanged: the chosen
+# token is already in GH_ACCOUNTS, and GIT_TOKEN is still sent only when the
+# host had one.
+if [ -n "$GIT_TOKEN" ] && [ -n "$_SANDY_GH_ACTIVE" ]; then
+    IFS=',' read -ra _sandy_gh_fwd <<< "$GH_ACCOUNTS"
+    for _sandy_gh_p in "${_sandy_gh_fwd[@]}"; do
+        if [ "${_sandy_gh_p%%:*}" = "$_SANDY_GH_ACTIVE" ] && [ -n "${_sandy_gh_p#*:}" ]; then
+            GIT_TOKEN="${_sandy_gh_p#*:}"
+            break
+        fi
+    done
+    unset _sandy_gh_fwd _sandy_gh_p
+fi
+if [ -n "$GIT_TOKEN" ]; then _sandy_add_secret_env GIT_TOKEN "$GIT_TOKEN"; fi
 # cross_session_inbound (1.10.0): the crossSessionInbound value actually written
 # (see the "BEGIN cross-session inbound" block above); null when not written.
 #
