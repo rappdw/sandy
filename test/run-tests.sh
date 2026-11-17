@@ -505,9 +505,8 @@ info "23. Container hardening flags"
 # "pids-limit is configured": the agent's --pids-limit 512 is asserted by
 # §175(6) (mutation C06).
 
-# Static analysis: verify cap-drop ALL is set
-check "cap-drop ALL is configured" \
-    grep -q 'cap-drop ALL' "$SCRIPT"
+# "cap-drop ALL is configured": run, not grepped, on the agent's recorded
+# docker run in §225 (and on the proxy's in §207(4)).
 
 # Static analysis: verify GPU passthrough support.
 # "SANDY_GPU config variable supported": covered by the --gpus check below
@@ -3096,17 +3095,9 @@ check "proxy boots on the egress network for internet" \
     bash -c 'grep -q -- "--network \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 check "proxy attaches the sidecar with a fixed --ip" \
     bash -c 'grep -q "docker network connect --ip \"\$PROXY_IP\" \"\$SIDECAR_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
-check "proxy runs hardened (--read-only --cap-drop ALL)" \
-    bash -c 'grep -q -- "--cap-drop ALL" "$1"' -- "$_PX_SCRIPT"
-# HF-incident Issue 2: the proxy is the dual-homed bridge whose compromise
-# reproduces the incident, so it carries no-new-privileges + resource caps that
-# bound a connection storm (backstop to the in-proxy connection semaphore).
-check "proxy hardened with no-new-privileges (Issue 2)" \
-    bash -c 'grep -q -- "--security-opt no-new-privileges:true" "$1"' -- "$_PX_SCRIPT"
-check "proxy carries a --pids-limit (Issue 2)" \
-    bash -c 'grep -qE -- "--pids-limit [0-9]+" "$1"' -- "$_PX_SCRIPT"
-check "proxy carries a --memory cap (Issue 2)" \
-    bash -c 'grep -qE -- "--memory [0-9]+m" "$1"' -- "$_PX_SCRIPT"
+# "proxy runs hardened (--read-only --cap-drop ALL)", "...no-new-privileges",
+# "...--pids-limit" and "...--memory cap" (HF-incident Issue 2): run, not
+# grepped, on the proxy's recorded docker run in §207(4).
 check "cleanup removes proxy container before networks" \
     bash -c 'grep -q "docker rm -f \"\$PROXY_CONTAINER\"" "$1" && grep -q "docker network rm \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 
@@ -24859,6 +24850,40 @@ section "§207: #461 — the egress proxy can read its config under any umask, a
 # "permission denied" and the launch failed on `docker network connect` with
 # "network sandbox ... not found" and no logs. Runs the REAL start_proxy_sidecar
 # under umask 077 against a stub docker that records calls and can fail the attach.
+#
+# The same run asserts the proxy's container hardening (HF-incident Issue 2,
+# SPECIFICATION.md §8) on the argv the stub recorded for its `docker run`. The
+# proxy-section greps this replaces matched the whole of sandy, so a comment or
+# the AGENT's own flag satisfied them with the proxy's flag deleted.
+#
+# _hardening_unmet ARGS-FILE PIDS MEMORY ALLOWED-CAPS prints every hardening
+# property the recorded docker-run argv (one element per line) fails, and
+# nothing when it holds them all. MEMORY "-" accepts any non-empty value.
+# Shared with §225 (the agent's run), which unsets it.
+_hardening_unmet() {
+    [ -s "$1" ] || { echo "no docker run argv recorded"; return 0; }
+    awk -v pids="$2" -v mem="$3" -v allowed=" $4 " '
+        p == "--cap-drop" && $0 == "ALL" { cd = 1 }
+        p == "--security-opt" && $0 == "no-new-privileges:true" { nnp = 1 }
+        p == "--security-opt" && index($0, "unconfined") { bad = bad " --security-opt " $0 }
+        p == "--pids-limit" { pl = $0 }
+        p == "--memory" { m = $0 }
+        p == "--cap-add" && !index(allowed, " " $0 " ") { bad = bad " --cap-add " $0 }
+        index($0, "--cap-add=") == 1 || index($0, "--privileged") == 1 { bad = bad " " $0 }
+        (p == "--pid" || p == "--ipc" || p == "--uts" || p == "--userns" || p == "--network") && $0 == "host" { bad = bad " " p " host" }
+        $0 ~ /^--(pid|ipc|uts|userns|network|net)=host$/ { bad = bad " " $0 }
+        $0 == "--read-only" { ro = 1 }
+        { p = $0 }
+        END {
+            if (!ro) printf " no --read-only"
+            if (!cd) printf " no --cap-drop ALL"
+            if (!nnp) printf " no --security-opt no-new-privileges:true"
+            if (pl != pids) printf " --pids-limit is [%s], want %s", pl, pids
+            if (mem == "-" && m == "") printf " no --memory value"
+            if (mem != "-" && m != mem) printf " --memory is [%s], want %s", m, mem
+            if (bad != "") printf " loosened by:%s", bad
+        }' "$1"
+}
 _S207_FN="$(sed -n '/^_sandy_launch_dir()/p' "$SANDY_SCRIPT")
 $(sed -n '/^start_proxy_sidecar() {/,/^}$/p' "$SANDY_SCRIPT")"
 _S207_D="$(cd "$(mktemp -d)" && pwd -P)"
@@ -24869,6 +24894,7 @@ case "$1 $2" in
     "network connect") [ -n "${S207_ATTACH_FAIL:-}" ] && { echo "Error response from daemon: network sandbox for container x not found" >&2; exit 1; } ; exit 0 ;;
 esac
 case "$1" in
+    run) printf '%s\n' "$@" > "$S207_ARGV" ;;
     inspect)
         case "$*" in
             *Health*) echo healthy ;;
@@ -24884,7 +24910,7 @@ chmod +x "$_S207_D/bin/docker"
 # $1 = attach outcome (ok|fail) -> "rc|config-mode-string|stderr"
 _s207() {
     local sb="$_S207_D/sb-$1"; rm -rf "$sb"; mkdir -p "$sb"
-    env -i PATH="$_S207_D/bin:$PATH" HOME="$_S207_D" S207_ATTACH_FAIL="$([ "$1" = fail ] && echo 1)" \
+    env -i PATH="$_S207_D/bin:$PATH" HOME="$_S207_D" S207_ARGV="$sb/proxy.args" S207_ATTACH_FAIL="$([ "$1" = fail ] && echo 1)" \
         bash -c '
             umask 077
             info() { :; }; warn() { echo "WARN: $*" >&2; }; error() { echo "ERROR: $*" >&2; }
@@ -24909,8 +24935,14 @@ check "§207(2) a failed sidecar attach exits non-zero, naming the attach and th
     bash -c 'case "$1" in 0\|*) exit 1 ;; esac; case "$1" in *"Could not attach the egress proxy"*"exited (exit 2"*) exit 0 ;; esac; exit 1' _ "$_S207_FAIL"
 check "§207(3) ...and prints the proxy logs before cleanup can erase them" \
     bash -c 'case "$1" in *S207-PROXY-LOG*) exit 0 ;; esac; exit 1' _ "$_S207_FAIL"
+# The recorded run must be the proxy's own (its image is the last argument),
+# so a probe that recorded nothing, or some other run, cannot pass vacuously.
+_S207_ARGS="$_S207_D/sb-ok/proxy.args"
+_S207_WHY="$(_hardening_unmet "$_S207_ARGS" 128 256m '')"
+check "§207(4) the proxy's docker run is hardened: --read-only, --cap-drop ALL and no --cap-add, no-new-privileges, --pids-limit 128, --memory 256m (unmet:${_S207_WHY:- none})" \
+    bash -c 'test -z "$1" && test "$(tail -n 1 "$2")" = sandy-proxy' _ "$_S207_WHY" "$_S207_ARGS"
 rm -rf "$_S207_D"
-unset _S207_FN _S207_D _S207_OK _S207_FAIL
+unset _S207_FN _S207_D _S207_OK _S207_FAIL _S207_ARGS _S207_WHY
 unset -f _s207
 
 
@@ -25543,7 +25575,8 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219 (removed at the end of §219):
+# The stubs, shared by 215-219 and 225 (removed at the end of §225, which
+# follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
 #             copy of its --env-file, under runs/; for the agent's run (the one
@@ -25904,6 +25937,22 @@ check "§219(1) at exit the empty mount point sandy's session created is gone, a
     bash -c 'test ! -e "$1/.claude/commands" && test -d "$1/.claude" && test ! -e "$2/.session-created-stubs"' _ "$_A6_DIR/stubs/ws" "$(_a6_sandbox stubs)"
 check "§219(2) ...while the one the agent wrote into is kept, with its file, and the launch says why" \
     bash -c 'test -f "$1/.claude/agents/agent-file" && grep -qF "$1/.claude/agents: not empty" "$2"' _ "$_A6_DIR/stubs/ws" "$_A6_DIR/stubs/out"
+
+section "§225: the agent's docker run is hardened the way SPECIFICATION.md §18 says"
+# ============================================================
+# §23's "cap-drop ALL is configured" grepped the whole of sandy, so it passed
+# with both the agent's and the proxy's --cap-drop deleted: a comment matched.
+# This drives a real foreground launch (the §215 harness) and asserts on the
+# argv the agent's `docker run` received. The proxy's own run is §207(4); this
+# launch is egress-off, so no proxy run is recorded here to blur the two.
+_a6_launch hardening SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_A6_A="$(_a6_agent_args hardening)"
+[ "$_A6_RC" = 0 ] && [ -n "$_A6_A" ] || _a6_diag "§225" hardening
+_A6_WHY="$(_hardening_unmet "$_A6_A" 512 - 'SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL')"
+check "§225(1) the agent's docker run: --read-only, --cap-drop ALL adding back only SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL, no-new-privileges, --pids-limit 512, a --memory cap, --init (rc ${_A6_RC:-none}; unmet:${_A6_WHY:- none})" \
+    bash -c 'test "$1" = 0 && test -n "$2" && test -z "$3" && grep -qx -- "--init" "$2" && grep -qx -- "--cpus" "$2"' _ "$_A6_RC" "$_A6_A" "$_A6_WHY"
+unset _A6_A _A6_WHY
+unset -f _hardening_unmet
 
 rm -rf "$_A6_DIR"
 unset _A6_DIR _A6_SCRIPT _A6_RC
