@@ -1,6 +1,6 @@
 # Design: cross-session agent messaging over the handoff substrate
 
-> **Historical design record (status as of 2026-11-17).** Its Layer 1 substrate, `SANDY_HANDOFF_DIRS` and the `~/.handoff/{inbox,outbox,peer,relay}` tree, shipped in 1.7.0 and was **removed in 2.2.0** (#355, #359); `SANDY_HANDOFF_PEERS` and Layers 2–3 were never built. Read the "SHIPPED" and "covered" markers below as true of 1.7.0–2.1.x only. Current truth: feature-manifest `mounts` and `receives` (`docs/design/FEATURE-MANIFEST.md`, `docs/guide/features.md`) and `docs/security/CROSS_SESSION_INBOUND.md`.
+> **Historical design record (status as of 2026-11-17).** Its Layer 1 substrate, `SANDY_HANDOFF_DIRS` and the `~/.handoff/` tree (`inbox`/`outbox` in 1.7.0, `peer`/`relay` added in 1.10.0), was **removed in 2.2.0** (#355, #359); `SANDY_HANDOFF_PEERS` and Layers 2–3 were never built. Read the "SHIPPED" and "covered" markers below as true of 1.7.0–2.1.x only. Current truth: feature-manifest `mounts` and `receives` (`docs/design/FEATURE-MANIFEST.md`, `docs/guide/features.md`) and `docs/security/CROSS_SESSION_INBOUND.md`.
 
 **For:** #132 (cross-workspace session handoff) — this is #132's relay layer, specified.
 **Status:** design; **nothing below is built**. Layer 1 (the mailbox pair) ships in `1.7.0`; Layers 2–3 are unbuilt and gated on `SANDY_HANDOFF_PEERS` (privileged, unshipped).
