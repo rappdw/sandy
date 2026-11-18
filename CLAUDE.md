@@ -87,7 +87,7 @@ bash test/lint-bash32.sh            # bash-3.2 / BSD portability lint (also run 
 
 Acceptance harnesses (`test/acceptance-*.sh`) run against an isolated `$SANDY_HOME` (`test/lib-isolated-home.sh`). Fixtures in a real home look exactly like real sandboxes. `docs/TESTING_PLAN.md` covers manual TUI checks.
 
-The integration runner also isolates `$SANDY_HOME`, seeding only the build cache. It discovers credential environment variables and the original `$SANDY_HOME/.secrets` before isolation, and preserves `$HOME` for OAuth discovery. Host features, config, approvals, and sandboxes are not imported. The OpenCode smoke project selects a model for an available API key (an explicit `OPENCODE_MODEL` wins); its Google configuration references `GEMINI_API_KEY` without copying the secret into the project. Answer checks strip terminal controls but still require a successful exit and the requested answer; provider errors and timeouts alone cannot count as success.
+The integration runner isolates `$SANDY_HOME` too; what it imports and what counts as success: `docs/TESTING_PLAN.md`.
 
 Use `--only harness,contracts` for focused feedback and `--list` for groups. Both runners write logs under the ignored workspace `.test_output/`, keeping at most three runs; `.test_output/latest/` points to the newest. `--log-dir PATH` overrides the main suite's log root; `SANDY_INTEG_LOG_DIR` overrides the integration log root, with the same rotation. CI uses `--require-tools` so a missing declared dependency is a failure. A group with skipped checks is reported as partial, not fully passed. Section numbers in the legacy host suite remain stable for incident references; removed sections point to their replacements.
 
@@ -98,6 +98,9 @@ How to write tests here:
 - **Assert the property, not the presence of a mechanism.** Run the thing and check the outcome, then mutation-test the guard: break it in a temp copy and confirm the check fails. Also confirm the probe actually ran, since `set -u` has silently killed probe subshells and made checks pass vacuously.
 - **Don't anchor a JSON assertion on a field's neighbours** (`"name":"X"[^}]*"relay"…`). It breaks once someone inserts a nested object between them. Use one sandbox per fixture `$SANDY_HOME`, or slice the object with `awk` `index`/`substr` written on one line. (§88b ratchets this.)
 - New sections must survive `set -euo pipefail` plus the ERR trap.
+- A check of `--print-schema` content reads the cached run in `$_SCHEMA_CACHE`; only checks of the invocation itself run it live.
+- Assert a `docker run` flag on the argv the docker stub recorded for that container (`_hardening_unmet`, `_a6_agent_args`), never a grep of `sandy`: a comment or the other container's flag satisfies a grep.
+- `.test_output/latest/host.log` has a `TIMING` line per section; check it before and after touching a slow section.
 
 ## Portability: CI is Linux/bash 5, the maintainer is macOS/bash 3.2/BSD
 
@@ -123,6 +126,10 @@ Other macOS traps: `mktemp -d` returns a symlinked path, so canonicalize it (`D=
   - `git reset --hard` fails when `.github/workflows/` is tracked (protected dir). Use a mixed `git reset <ref>`.
   - `git gc`, `pack-refs`, and deleting packed refs fail.
 - `main` is protected, so every change goes through a PR. The HEAD-preserving pattern: commit → `git branch -f <feature> HEAD` → `git push origin <feature>` → `git reset origin/main` → `gh pr create --head <feature> --base main`.
+- The workspace is usually the maintainer's host checkout. Don't switch, reset or stash in it while tests may be running (a switch once caused 25 false failures); use a `git worktree`, and no `gh pr merge --delete-branch` (it switches the checkout).
+- On a reported failure, first compare the host-group footer's `commit` with the branch head. Check out with `git fetch origin <b> && git switch -C <b> FETCH_HEAD`; `origin/<b>` without a fresh fetch once left a reviewer on an old commit.
+- Mutation-test on a scratch copy of `sandy`, never in the repo; a rejected tool call once left a mutant in it.
+- The container has a 512-pid limit: one `test/run-tests.sh` at a time, no `xargs -P` fan-out (seven at once took a session down).
 - Protected workspace paths (shell rc files, `.git/hooks`, `.github/workflows/`, `.vscode/`, `.sandy/`, `.claude/settings*.json`, …) are read-only in-container when they exist on the host. The full list is in SPECIFICATION.md.
 
 ## Subsystem pointers
