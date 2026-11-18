@@ -12203,19 +12203,28 @@ _sandy_ew_write() {
     rm -f "$_t" 2>/dev/null || true
     return 1
 }
+# The verdict's first line: only from a regular file, at most 4096 bytes (the
+# agent can replace it, and a FIFO would block a plain read forever).
+_sandy_ew_line() {
+    if [ -f "$_SANDY_EW_FILE" ] && [ ! -p "$_SANDY_EW_FILE" ]; then
+        head -c 4096 "$_SANDY_EW_FILE" 2>/dev/null | head -n 1
+    fi
+    return 0
+}
 # The verdict's first field (pending | passed | failed), or empty.
 _sandy_ew_state() {
-    local _v=""
-    IFS= read -r _v 2>/dev/null < "$_SANDY_EW_FILE" || true
+    local _v
+    _v="$(_sandy_ew_line)"
     printf '%s' "${_v%%$'\t'*}"
 }
-# The failure message (fourth field), with control characters removed: the
-# agent can write this file, and it is printed on the user's terminal.
+# The failure message (fourth field), reduced to printable ASCII (other bytes
+# become ?): the agent can write this file, it is printed on the user's
+# terminal, and UTF-8 C1 controls (U+009B, U+009D) act like ESC there.
 _sandy_ew_message() {
-    local _v=""
-    IFS= read -r _v 2>/dev/null < "$_SANDY_EW_FILE" || true
+    local _v
+    _v="$(_sandy_ew_line)"
     _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"
-    printf '%s' "$_v" | tr -d '\000-\037\177'
+    printf '%s' "$_v" | LC_ALL=C tr -c '\040-\176' '?'
 }
 # Teardown, in this order (B5 section 2): TERM each pane's process group (the
 # signal docker stop and --stop send, so the agent's own exit handlers run);
@@ -12924,8 +12933,14 @@ fi
 #     session, so "session exists" alone still means ready for it.
 # No output means no session yet. The verdict is a report the agent could
 # forge, like .sandy-sessions.tsv: it decides an exit code, never what runs.
-# The probe script takes the verdict path as $1.
-_SANDY_EW_PROBE_SH='v="$(cat "$1" 2>/dev/null)" || v=none
+# The probe script takes the verdict path as $1. It reads only a REGULAR file,
+# and at most 4096 bytes of it: the agent can replace the file, and a FIFO
+# there would block a plain cat forever (the client, the supervisor and the
+# already-running check would all hang past their budgets). Anything else that
+# exists is `malformed`, which classifies as not ready.
+_SANDY_EW_PROBE_SH='if [ -f "$1" ] && [ ! -p "$1" ]; then v="$(head -c 4096 "$1" 2>/dev/null | head -n 1)"
+elif [ -e "$1" ] || [ -L "$1" ]; then v=malformed
+else v=none; fi
 case "$v" in failed*) printf "%s\n" "$v"; exit 0 ;; esac
 tmux has-session -t sandy 2>/dev/null || exit 1
 printf "%s\n" "$v"'
@@ -12943,12 +12958,15 @@ _sandy_ew_classify() {
         *) echo wait ;;
     esac
 }
-# The message field of a `failed` verdict, control characters removed (the
-# container wrote it, and it is printed on the caller's terminal).
+# The message field of a `failed` verdict, reduced to printable ASCII: every
+# other byte becomes `?` (the container wrote it, and it is printed on the
+# caller's terminal). Deleting only \000-\037 and \177 would let UTF-8 C1
+# controls through (U+009B CSI and U+009D OSC are \302\233 and \302\235),
+# which a UTF-8 terminal honours like ESC [ and ESC ].
 _sandy_ew_failure_text() {
     local _v="${1%%$'\n'*}"
     _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"
-    printf '%s' "$_v" | tr -d '\000-\037\177'
+    printf '%s' "$_v" | LC_ALL=C tr -c '\040-\176' '?'
 }
 # Print a `failed` verdict's message on stderr. The text is agent-controlled,
 # so it is printed as a printf %s ARGUMENT, never through error(): that is
@@ -13057,6 +13075,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # the client loop's own 600s budget, then 8. wait with NO session for
         # 5 polls -> the zombie path below, as before.
         _sandy_session_live=0
+        _sandy_d6_orphan=0
         _sandy_d6_nosess=0
         _sandy_d6_waited=0
         _sandy_d6_out=""
@@ -13065,9 +13084,20 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
             case "$(_sandy_ew_classify "$_sandy_d6_out")" in
                 ready) _sandy_session_live=1; break ;;
                 fatal)
-                    _sandy_ew_report "$_sandy_d6_out"
-                    error "The daemon session for $WORK_DIR is being torn down; run 'sandy --start' again once the entry is fixed."
-                    exit 6 ;;
+                    # A live supervisor is tearing it down: report what the
+                    # first --start reports. No live supervisor (the container
+                    # came back after a reboot or a docker restart) means
+                    # nothing ever will: reap it and start fresh below, as for
+                    # a zombie, so a fixed entry actually gets relaunched.
+                    _sandy_d6_sup="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_existing" 2>/dev/null)" || _sandy_d6_sup=""
+                    case "$_sandy_d6_sup" in ''|*[!0-9]*) _sandy_d6_sup="" ;; esac
+                    if [ -n "$_sandy_d6_sup" ] && kill -0 "$_sandy_d6_sup" 2>/dev/null; then
+                        _sandy_ew_report "$_sandy_d6_out"
+                        error "The daemon session for $WORK_DIR is being torn down; run 'sandy --start' again once the entry is fixed."
+                        exit 6
+                    fi
+                    _sandy_d6_orphan=1
+                    break ;;
             esac
             if [ -z "$_sandy_d6_out" ]; then
                 _sandy_d6_nosess=$((_sandy_d6_nosess + 1))
@@ -13082,11 +13112,15 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
             info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
             exit 0
         fi
-        if [ -n "$_sandy_d6_out" ]; then
+        if [ "$_sandy_d6_orphan" = 1 ]; then
+            warn "Found an unsupervised daemon container for $WORK_DIR whose feature entry failed its startup window (container ${_sandy_daemon_existing:0:12}, restarted after a reboot or docker restart) — reaping it and starting fresh."
+            _sandy_ew_report "$_sandy_d6_out"
+        elif [ -n "$_sandy_d6_out" ]; then
             error "Daemon session for $WORK_DIR exists but its feature-entry window never finished within 600s."
             exit 8
+        else
+            warn "Found a daemon container with no live session for $WORK_DIR (agent exited; container ${_sandy_daemon_existing:0:12}) — reaping it and starting fresh."
         fi
-        warn "Found a daemon container with no live session for $WORK_DIR (agent exited; container ${_sandy_daemon_existing:0:12}) — reaping it and starting fresh."
         "$0" --stop --workspace "$WORK_DIR" >/dev/null 2>&1 || true
         # fall through to a fresh --start below
     fi

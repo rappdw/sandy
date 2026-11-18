@@ -26867,7 +26867,7 @@ awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT"
 grep -E '^(info|error)\(\) \{' "$SANDY_SCRIPT" >> "$_S226_D/host.sh"
 # A forged verdict: literal backslash-033 text (inert unless something runs it
 # through echo -e) and real ESC/BEL bytes (inert only if stripped).
-_S226_FORGED="$(printf 'failed\tsandy-entry w\t3\tforged \\033]52;c;ZQ==\\007 \033]52;c;ZQ==\007 \033[2J end')"
+_S226_FORGED="$(printf 'failed\tsandy-entry w\t3\tforged \\033]52;c;ZQ==\\007 \033]52;c;ZQ==\007 \033[2J \302\2332J \302\23552;c;ZQ==\007 end')"
 # nocontrol.py FILE [STRIP...]: no ESC or BEL byte in FILE once each STRIP
 # literal (sandy's own colour codes) has been removed.
 _S226_NC="$_S226_D/nocontrol.py"
@@ -26876,7 +26876,9 @@ import sys
 data = open(sys.argv[1], "rb").read()
 for literal in sys.argv[2:]:
     data = data.replace(literal.encode().decode("unicode_escape").encode("latin-1"), b"")
-bad = [b for b in (b"\x1b", b"\x07") if b in data]
+# ESC, BEL, and the C1 controls CSI (0x9b) and OSC (0x9d), raw or as the
+# second byte of their UTF-8 encoding.
+bad = [b for b in (b"\x1b", b"\x07", b"\x9b", b"\x9d") if b in data]
 if bad:
     print("control bytes present:", bad, data[-400:])
     sys.exit(1)
@@ -27086,9 +27088,28 @@ _sandy_claude_sessions_up() { printf "sessions_up\n" >> "$S226_LOG"; }
 '"$_S226_TAILRUN"
     check "§226(W8b) named sessions active and the entry fails in the blocking window: no session comes up, no new-session, exit 1 with the message (mutation: the window failure ignored)" \
         bash -c '[ "$(cat "$1/rc")" = 1 ] && ! grep -q "^sessions_up" "$1/log" && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry w exited 3" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w8b"
+    # --- W7d (R10): the REAL interactive launch tail, entry fails ----------
+    # Not the hold alone: the launch gate must write `pending` for an
+    # interactive launch too, or the hold starts no watcher and the failure
+    # is never noticed. The stub attach returns when the pane exits.
+    _s226_case w7d '#!/bin/sh
+sleep 0.5; exit 3' "$_S226_PANE"'
+export S226_ATTACH_PID="$(cat "$HOME/pane.pid")"
+'"$_S226_TAILRUN"
+    check "§226(W7d) interactive launch tail, entry exits 3 while attached: pending before new-session, the pane is torn down, exit 1 with the message once (mutation: pending written only for daemon launches)" \
+        bash -c '[ "$(cat "$1/rc")" = 1 ] && [ "$(grep -m1 "^new-session" "$1/log")" = "new-session verdict=pending" ] && grep -q "^pane TERM$" "$1/log" && grep -q "^kill-server" "$1/log" \
+            && [ "$(grep -c "sandy-entry w exited 3 within 5s of starting" "$1/err")" = 1 ] || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w7d"
 else
     skip "§226(W1-W4c, W7, W8b) entry-window behaviour: needs flock, python3 and pgrep on this host"
 fi
+
+# --- W7e: a FIFO at the verdict path cannot hang the container side --------
+_s226_case w7e '' 'mkfifo "$HOME/.sandy-entry-window"
+( _sandy_ew_state > "$HOME/st.out"; _sandy_ew_message >> "$HOME/st.out"; echo done >> "$HOME/st.out" ) & _p=$!
+_i=0; while kill -0 "$_p" 2>/dev/null && [ "$_i" -lt 30 ]; do sleep 0.1; _i=$((_i + 1)); done
+kill -9 "$_p" 2>/dev/null; cat "$HOME/st.out" 2>/dev/null'
+check "§226(W7e) a FIFO planted at the verdict path reads as no verdict at once on the container side (mutation: a plain read, which blocks the hold forever)" \
+    bash -c '[ "$(cat "$1/out")" = done ] || { cat "$1/out"; exit 1; }' _ "$_S226_D/w7e"
 
 # --- W7c: the container prints a forged verdict inertly ---------------------
 _s226_case w7c '' 'printf "%s\n" "$_S226_FORGED" > "$HOME/.sandy-entry-window"
@@ -27134,22 +27155,42 @@ _s226_w5_verdict() {
     case "$1" in
         absent) ;;
         failed) printf 'failed\tsandy-entry w\t3\tboom\n' > "$2" ;;
+        empty) : > "$2" ;;
+        fifo) mkfifo "$2" ;;
+        big) { printf passed; head -c 1048576 /dev/zero | tr '\0' x; } > "$2" ;;
         *) printf '%s\n' "$1" > "$2" ;;
     esac
+}
+# _s226_w5_probe <session 0|1> <file>: run the real probe under a 3s
+# watchdog; prints its output, or HANG.
+_s226_w5_probe() {
+    local o="$_S226_D/w5.out" p i=0
+    rm -f "$o"
+    ( S226_SESSION="$1" PATH="$_S226_D/bin5:$PATH" exec sh -c "$_SANDY_EW_PROBE_SH" _ "$2" > "$o" 2>/dev/null ) &
+    p=$!
+    while kill -0 "$p" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+    if kill -0 "$p" 2>/dev/null; then kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; echo HANG; return 0; fi
+    wait "$p" 2>/dev/null
+    cat "$o"
 }
 _S226_W5="$(
     trap - ERR; set +e
     . "$_S226_D/host.sh"
-    for row in "0 absent" "0 pending" "1 pending" "1 passed" "1 absent" "1 failed" "0 failed" "0 passed"; do
+    for row in "0 absent" "0 pending" "1 pending" "1 passed" "1 absent" "1 failed" "0 failed" "0 passed" \
+               "1 garbage" "1 empty" "1 fifo" "1 big"; do
         sess="${row%% *}"; st="${row#* }"; f="$_S226_D/w5.verdict"
         _s226_w5_verdict "$st" "$f"
-        out="$(S226_SESSION="$sess" PATH="$_S226_D/bin5:$PATH" sh -c "$_SANDY_EW_PROBE_SH" _ "$f" 2>/dev/null)"
-        printf '%s:%s=%s\n' "$sess" "$st" "$(_sandy_ew_classify "$out")"
+        out="$(_s226_w5_probe "$sess" "$f")"
+        if [ "$out" = HANG ]; then c=HANG; else c="$(_sandy_ew_classify "$out")"; fi
+        [ "${#out}" -le 4097 ] || c="$c(long:${#out})"
+        printf '%s:%s=%s\n' "$sess" "$st" "$c"
     done
+    rm -f "$_S226_D/w5.verdict"
 )"
-check "§226(W5) --start readiness = session AND (passed or no file); pending and no-session wait; failed is fatal with or without a session (mutations: pending ready, failed not fatal, none not ready)" \
+check "§226(W5) --start readiness = session AND (passed or no file); pending, no session, and an unrecognised, empty, FIFO or oversized verdict all wait (never ready, never a hang, at most 4096 bytes read); failed is fatal with or without a session (mutations: pending ready, failed not fatal, none not ready, unrecognised ready, plain cat)" \
     bash -c '[ "$1" = "$2" ] || { printf "got:\n%s\n" "$1"; exit 1; }' _ "$_S226_W5" \
-    "$(printf '%s\n' '0:absent=wait' '0:pending=wait' '1:pending=wait' '1:passed=ready' '1:absent=ready' '1:failed=fatal' '0:failed=fatal' '0:passed=wait')"
+    "$(printf '%s\n' '0:absent=wait' '0:pending=wait' '1:pending=wait' '1:passed=ready' '1:absent=ready' '1:failed=fatal' '0:failed=fatal' '0:passed=wait' \
+        '1:garbage=wait' '1:empty=wait' '1:fifo=wait' '1:big=wait')"
 
 # --- W6: the supervisor turns `failed` into the .fatal marker and a teardown --
 # Stub docker: inspect says running, exec runs the real probe script against
@@ -27160,7 +27201,7 @@ cat > "$_S226_D/bin6/docker" <<'S226D6'
 #!/bin/sh
 printf 'docker %s\n' "$*" >> "$S226_LOG"
 case "$1" in
-    inspect) echo true ;;
+    inspect) echo "${S226_RUNNING:-true}" ;;
     exec)
         shift 3   # exec -u <uid>; $1 is now the container
         shift
@@ -27179,7 +27220,7 @@ _s226_sup() {
     [ -n "$2" ] && printf '%s\n' "$2" > "$h/verdict"
     (
         trap - ERR; set +e
-        export PATH="$_S226_D/bin6:$PATH" S226_LOG="$h/log" S226_VFILE="$h/verdict" S226_SESSION="$3"
+        export PATH="$_S226_D/bin6:$PATH" S226_LOG="$h/log" S226_VFILE="$h/verdict" S226_SESSION="$3" S226_RUNNING="${S226_RUNNING:-true}"
         SANDY_DAEMON_LOG="$h/daemon.log"
         RED=""; NC=""; GREEN=""
         . "$_S226_D/host.sh"
@@ -27204,6 +27245,9 @@ check "§226(W6a) supervisor poll, verdict failed: returns non-zero, writes the 
 _s226_sup w6d "$_S226_FORGED" 0 fn
 check "§226(W6d) supervisor poll, forged failed verdict: the daemon log gets the message with no ESC or BEL byte (mutations: printed through error(), which is echo -e; the host-side strip dropped)" \
     bash -c '[ "$(cat "$1/rc")" != 0 ] && python3 "$2" "$1/err"' _ "$_S226_D/w6d" "$_S226_NC"
+S226_RUNNING=false _s226_sup w6e "$(printf 'failed\tsandy-entry w\t3\tx')" 0 fn
+check "§226(W6e) supervisor poll, container already stopped: returns 0 to the watch loop (which tears down) and writes no .fatal, even with a failed verdict on disk (mutation: a stopped container treated as failed)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S226_D/w6e"
 _s226_sup w6b passed 1 fn
 check "§226(W6b) supervisor poll, verdict passed with the session up: returns 0 and writes no .fatal" \
     bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S226_D/w6b"
@@ -27222,7 +27266,10 @@ cat > "$_S226_D/bin9/docker" <<'S226D9'
 printf 'docker %s\n' "$*" >> "$S226_LOG"
 case "$1" in
     ps) [ -e "$S226_UP" ] && echo c226abcdef12 ;;
-    inspect) case "$*" in *RestartCount*) echo 0 ;; *State.Running*) echo true ;; esac ;;
+    inspect) case "$*" in *RestartCount*) echo 0 ;; *State.Running*) echo true ;; *daemon_pid*) echo "${S226_SUP_PID:-}" ;; esac ;;
+    rm|stop|kill)
+        rm -f "$S226_UP"
+        if [ -n "${S226_ON_RM:-}" ]; then printf '%s\n' "$S226_ON_RM" > "$S226_VFILE"; fi ;;
     exec) case "$*" in *sandy-entry-window*) cat "$S226_VFILE" ;; *sandy-sessions*) echo inactive ;; *has-session*) exit 0 ;; esac ;;
     logs) echo "container log" ;;
 esac
@@ -27230,7 +27277,15 @@ exit 0
 S226D9
 printf '#!/bin/sh\necho nohup >> "$S226_LOG"\n: > "$S226_UP"\nexit 0\n' > "$_S226_D/bin9/nohup"
 chmod +x "$_S226_D/bin9/docker" "$_S226_D/bin9/nohup"
+# bin9f: the same, plus a sleep that returns at once, so a 600-poll budget
+# runs out in seconds.
+mkdir -p "$_S226_D/bin9f"
+cp "$_S226_D/bin9/docker" "$_S226_D/bin9/nohup" "$_S226_D/bin9f/"
+printf '#!/bin/sh\nexit 0\n' > "$_S226_D/bin9f/sleep"; chmod +x "$_S226_D/bin9f/sleep"
 # _s226_client <name> <verdict> <already-up 0|1> [<verdict after 2s>]
+# Optional env: S226_C_BIN (stub dir, default bin9), S226_C_DEADLINE (tenths
+# of a second, default 200), S226_C_SUP_PID (the sandy.daemon_pid label),
+# S226_C_ON_RM (the verdict once the container is removed).
 _s226_client() {
     local h="$_S226_D/$1" pid i=0 t0
     rm -rf "$h"; mkdir -p "$h/ws" "$h/home"; : > "$h/log"
@@ -27238,11 +27293,12 @@ _s226_client() {
     [ "$3" = 1 ] && : > "$h/up"
     if [ -n "${4:-}" ]; then ( sleep 2; printf '%s\n' "$4" > "$h/verdict.n"; mv -f "$h/verdict.n" "$h/verdict" ) & fi
     t0=$(date +%s)
-    ( cd "$h/ws" && exec env -i PATH="$_S226_D/bin9:$PATH" HOME="$h/home" SANDY_HOME="$h/home/.sandy" TERM=dumb \
-        S226_LOG="$h/log" S226_UP="$h/up" S226_VFILE="$h/verdict" bash "$SANDY_SCRIPT" --start --workspace "$h/ws" ) \
+    ( cd "$h/ws" && exec env -i PATH="$_S226_D/${S226_C_BIN:-bin9}:$PATH" HOME="$h/home" SANDY_HOME="$h/home/.sandy" TERM=dumb \
+        S226_LOG="$h/log" S226_UP="$h/up" S226_VFILE="$h/verdict" S226_SUP_PID="${S226_C_SUP_PID:-}" S226_ON_RM="${S226_C_ON_RM:-}" \
+        bash "$SANDY_SCRIPT" --start --workspace "$h/ws" ) \
         </dev/null >"$h/out" 2>&1 &
     pid=$!
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "${S226_C_DEADLINE:-200}" ]; do sleep 0.1; i=$((i + 1)); done
     if kill -0 "$pid" 2>/dev/null; then
         pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
         echo timeout > "$h/rc"
@@ -27261,12 +27317,31 @@ check "§226(W9b) the --start client, verdict pending then passed after 2s: exit
 _s226_client w10a pending 1 passed
 check "§226(W10a) a second --start while the running session is still in its window: it waits for passed, then exits 0 as already running, and starts nothing (mutation: has-session alone counted as live)" \
     bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] && grep -q "already running" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S226_D/w10a"
-_s226_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
+# A stand-in live supervisor: its own process, never this suite's shell, since
+# a regression that reaps would --stop (TERM) whatever pid the label names.
+sleep 60 & _S226_SUP=$!
+S226_C_SUP_PID=$_S226_SUP _s226_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
+kill "$_S226_SUP" 2>/dev/null || true; wait "$_S226_SUP" 2>/dev/null || true; unset _S226_SUP
 check "§226(W10b) a second --start while the running session's window has failed: exit 6 with the message, and starts nothing" \
-    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "sandy-entry w exited 3" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S226_D/w10b"
+    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "sandy-entry w exited 3" "$1/out" && ! grep -q "^nohup" "$1/log" && ! grep -qE "^docker (rm|stop|kill)" "$1/log" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S226_D/w10b"
+# (c) reviewer repro: the same failed window in a container NO supervisor
+# watches (its sandy.daemon_pid is dead: it came back after a reboot). It
+# must be reaped and a fresh session started, or every --start is 6 forever.
+# A pid known to be dead (a child that has exited and been reaped), never a
+# fixed number some unrelated process could hold.
+sleep 0 & _S226_DEAD=$!; wait "$_S226_DEAD" 2>/dev/null || true
+S226_C_SUP_PID=$_S226_DEAD S226_C_ON_RM=passed _s226_client w10c "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
+unset _S226_DEAD
+check "§226(W10c) a second --start over an UNSUPERVISED container whose window failed: it is reaped (--stop removes it) and a fresh session starts and comes up, exit 0 (mutation: never reap, exit 6 forever)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && grep -q "unsupervised daemon container" "$1/out" && grep -qE "^docker (rm|stop|kill)" "$1/log" && grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/out" "$1/log"; exit 1; }' _ "$_S226_D/w10c"
+# (d) pending past the D6 budget (600 polls, with a sleep that returns at
+# once): exit 8, and the running session is neither reaped nor replaced.
+S226_C_BIN=bin9f S226_C_DEADLINE=900 _s226_client w10d pending 1
+check "§226(W10d) a second --start over a session whose window never finishes: exit 8 once the budget is spent, nothing reaped, nothing started (mutation: fall through to the zombie reap)" \
+    bash -c '[ "$(cat "$1/rc")" = 8 ] && ! grep -q "^nohup" "$1/log" && ! grep -qE "^docker (rm|stop|kill)" "$1/log" || { cat "$1/rc" "$1/out"; tail -5 "$1/log"; exit 1; }' _ "$_S226_D/w10d"
 unset -f _s226_client
 
-unset -f _s226_case _s226_kill_tree _s226_sup _s226_w5_verdict
+unset -f _s226_case _s226_kill_tree _s226_sup _s226_w5_verdict _s226_w5_probe
 rm -rf "$_S226_D"
 unset _S226_D _S226_TMPL _S226_PANE _S226_TAILRUN _S226_W5 _S226_FORGED _S226_T0 _S226_EL _S226_NC
 

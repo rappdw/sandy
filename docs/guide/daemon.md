@@ -45,7 +45,10 @@ not executable) still exits `7`. A second `--start` during the first one's
 window waits for the same verdict rather than reporting "already running" at
 once. A daemon container that comes back on its own (after a reboot or a
 Docker restart, with no `sandy --start` watching it) and whose entry fails
-idles for 60s, then exits so Docker's restart policy tries again. See
+idles for 60s, then exits so Docker's restart policy tries again; the next
+`sandy --start` for that workspace sees no supervisor behind it, removes it and
+starts a fresh session (with a supervisor still alive, it exits `6` instead).
+See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,
