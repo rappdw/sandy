@@ -143,6 +143,116 @@ else:
         finally:
             subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=30)
 
+    # B5: the feature-entry startup window runs alongside the agent. Measured
+    # with a real image and a real tmux; the agent is a stand-in (the project
+    # image replaces claude) that records when its pane started.
+    ENTRY_FAIL_START_BOUND = 8   # seconds, design B5 section 8
+
+    def entry_window_fixture(self, entry_body):
+        project = self.home / 'entrywin'
+        if not project.exists():
+            project.mkdir()
+            self.command('entrywin-git-init', ['git', 'init', '-q'], project)
+            context = project / '.sandy'
+            context.mkdir()
+            (context / 'fake-agent').write_text(
+                '#!/bin/sh\n'
+                'case "${1:-}" in plugin|mcp|config|update|doctor|--version|-v) exit 0 ;; esac\n'
+                'date +%s > "$PWD/.agent-started"\n'
+                'exec sleep 600\n')
+            (context / 'Dockerfile').write_text(
+                'ARG BASE_IMAGE=sandy-claude-code\nFROM ${BASE_IMAGE}\nUSER root\n'
+                'COPY fake-agent /usr/local/bin/sandy-fake-agent\n'
+                'RUN chmod 755 /usr/local/bin/sandy-fake-agent && rm -f /usr/local/bin/claude '
+                '&& ln -s /usr/local/bin/sandy-fake-agent /usr/local/bin/claude\n')
+        feature = self.home / '.sandy' / 'features' / 'ew'
+        (feature / 'payload').mkdir(parents=True, exist_ok=True)
+        (feature / 'payload' / 'entry').write_text('#!/bin/sh\n' + entry_body)
+        (feature / 'payload' / 'entry').chmod(0o755)
+        (feature / 'feature.json').write_text(json.dumps({
+            'sandboxes': {'include': ['*']}, 'agents': {'include': ['*']},
+            'mounts': [{'name': 'payload', 'from': 'payload'}], 'entry': 'payload/entry'}))
+        (project / '.agent-started').unlink(missing_ok=True)
+        return project
+
+    def workspace_containers(self, project):
+        return subprocess.run(['docker', 'ps', '-aq', '--filter', 'label=sandy.workspace_path=' + str(project)],
+                              capture_output=True, text=True, timeout=30).stdout.split()
+
+    def check_entry_window(self):
+        import pty
+        import select
+        feature = self.home / '.sandy' / 'features' / 'ew'
+        self.addCleanup(shutil.rmtree, feature, True)
+        # (1) interactive, on a pty: the entry exits 3 two seconds after it
+        # starts. The agent's pane must already be running by then, the launch
+        # exits 1, and the entry's message is printed once, after tmux has
+        # left the alternate screen.
+        project = self.entry_window_fixture('date +%s > "$SANDY_FEATURE_STATE/exited"\nsleep 2\nexit 3\n')
+        master, slave = pty.openpty()
+        process = subprocess.Popen(['bash', str(ROOT / 'sandy')], stdin=slave, stdout=slave, stderr=slave,
+                                   cwd=str(project), env={**self.env, 'TERM': 'xterm'})
+        os.close(slave)
+        output = b''
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            ready, _, _ = select.select([master], [], [], 30)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        rc = process.wait(timeout=60)
+        os.close(master)
+        text = output.decode(errors='replace')
+        (self.logs / 'entry-window-pty.log').write_text(text)
+        message = 'sandy-entry ew exited 3 within 5s of starting'
+        self.assertEqual(rc, 1, 'interactive launch with a failing entry: ' + text[-3000:])
+        self.assertEqual(text.count(message), 1, text[-3000:])
+        self.assertIn(message, text.rsplit('\x1b[?1049l', 1)[-1], 'the message must follow tmux leaving the screen')
+        started = project / '.agent-started'
+        exited = list((self.home / '.sandy/sandboxes').glob('entrywin-*/feature-state/ew/exited'))
+        self.assertTrue(started.exists(), 'the agent pane never started')
+        self.assertEqual(len(exited), 1, exited)
+        self.assertLessEqual(int(started.read_text()), int(exited[0].read_text()) + 2,
+                             'the agent must start while the window is still open')
+        print('PASS entry window: interactive failure tears down, exits 1, message after tmux', flush=True)
+        # (2) --start with the same entry: exit 6, quickly, and nothing left.
+        t0 = time.time()
+        run = subprocess.run(['bash', str(ROOT / 'sandy'), '--start', '--workspace', str(project)],
+                             env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
+        elapsed = time.time() - t0
+        (self.logs / 'entry-window-start-fail.log').write_text(run.stdout + run.stderr)
+        self.assertEqual(run.returncode, 6, run.stdout[-3000:] + run.stderr[-3000:])
+        self.assertIn(message, run.stdout + run.stderr)
+        self.assertLess(elapsed, self.ENTRY_FAIL_START_BOUND, 'took %.1fs' % elapsed)
+        for _ in range(15):
+            if not self.workspace_containers(project):
+                break
+            time.sleep(1)
+        self.assertEqual(self.workspace_containers(project), [], 'a failed --start left a container')
+        print('PASS entry window: --start failure exits 6 in %.1fs and leaves nothing' % elapsed, flush=True)
+        # (3) --start with an entry that stays up: exit 0, the verdict is
+        # passed, and the window ended at least 4s after the agent started.
+        project = self.entry_window_fixture('exec sleep 600\n')
+        try:
+            self.command('entry-window-start-ok', ['bash', str(ROOT / 'sandy'), '--start', '--workspace', str(project)],
+                         self.home, 600)
+            container = self.workspace_containers(project)[0]
+            verdict = subprocess.run(['docker', 'exec', '-u', str(os.getuid()), container, 'sh', '-c',
+                                      'cat /home/sandy/.sandy-entry-window; stat -c %Y /home/sandy/.sandy-entry-window'],
+                                     capture_output=True, text=True, timeout=30).stdout.split()
+            self.assertEqual(verdict[0], 'passed', verdict)
+            self.assertGreaterEqual(int(verdict[1]) - int((project / '.agent-started').read_text()), 4, verdict)
+            print('PASS entry window: a long-running entry -> ready only after the 5s window, agent already up', flush=True)
+        finally:
+            subprocess.run(['bash', str(ROOT / 'sandy'), '--stop', '--workspace', str(project)],
+                           env=self.env, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+
     def command(self, name, args, cwd, timeout=600):
         log = self.logs / (name + '.log')
         with log.open('w') as output:
@@ -306,6 +416,7 @@ else:
         self.launch(other, other_protected, 'isolated')
         self.check_gemini_refresh_mounts()
         self.check_tini_forwards_signals_to_the_dropped_child()
+        self.check_entry_window()
 
 
 if __name__ == '__main__':

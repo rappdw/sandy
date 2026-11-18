@@ -10383,6 +10383,8 @@ if [ -f "$_S114_TMPL" ]; then
     # the others). Bounded by the third column-0 closing brace after the
     # first function's opener, since the three are adjacent in the heredoc.
     _S114_ENTRY_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S114_TMPL")"
+    # B5: the startup window runs after the panes exist, from its own block.
+    _S114_EW_FNS="$(sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S114_TMPL")"
     check "§114(15pre) extracted _sandy_supervise_entry from templates/user-setup.sh.tmpl (proves the heredoc/template mirror stayed in sync, and regen-template.sh --check is the drift gate; SANDY_FEATURE_STATE is the #381 marker that this is the generalized function, not a stale copy)" \
         bash -c 'printf "%s" "$1" | grep -q SANDY_FEATURE_STATE' -- "$_S114_SUP_FN"
     check "§114(15a) single column-0 closing brace (clean extraction)" \
@@ -10491,8 +10493,9 @@ exit 7
 S114_RELAY_EOF
     chmod +x "$_S114_RF/ws/.sandy/relay-fail.sh"
     # As of 1.11.0 (#258) this fixture entry — which exits 7 immediately — trips
-    # the bounded STARTUP WINDOW, so _sandy_start_entries now returns non-zero
-    # instead of returning 0 and leaving the session up. That is the point of
+    # the bounded STARTUP WINDOW, which returns non-zero instead of leaving the
+    # session up. Since B5 the window is _sandy_entry_window, run after
+    # _sandy_start_entries (in production, after the panes exist). That is the point of
     # the window (an entry that dies at startup on every launch must fail the
     # session rather than crash-loop unnoticed for 35 hours), and it is
     # asserted as a property in (16z) below rather than merely tolerated here.
@@ -10513,12 +10516,15 @@ S114_RELAY_EOF
         unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE SANDY_HANDOFF_RELAY SANDY_RELAY_STATE SANDY_FEATURE_ENTRIES
         sandy_log(){ :; }
         SANDY_FEATURE_ENTRIES='r=.sandy/relay-fail.sh'
+        tmux() { :; }
         $_S114_ENTRY_FNS
+        $_S114_EW_FNS
         _sandy_start_entries
+        _sandy_entry_window
     " ) >/dev/null 2>&1 || _S114_RF_RC=$?
     sleep 4
-    check "§114(16z) an entry that dies at startup makes the supervisor function FAIL, so the session does not come up with nothing delivering (#258 startup window; got rc=$_S114_RF_RC)" \
-        bash -c '[ "$1" -ne 0 ]' -- "$_S114_RF_RC"
+    check "§114(16z) an entry that dies at startup makes the startup window FAIL, so the session does not come up with nothing delivering (#258 startup window, run by _sandy_entry_window since B5; got rc=$_S114_RF_RC)" \
+        bash -c '[ "$1" -ne 0 ] && grep -q "^failed	sandy-entry r	7	" "$2"' -- "$_S114_RF_RC" "$_S114_RF/home/.sandy-entry-window"
     _S114_LOOP_PID="$(cat "$_S114_RF/fs/r/loop.pid" 2>/dev/null || true)"
     # Freeze the loop FIRST so it cannot respawn, then kill its current child
     # (the backoff `sleep`), then the loop -- killing the loop alone leaves that
@@ -10565,8 +10571,15 @@ S114_RELAY_LONG_EOF
         _sandy_start_entries
         _sandy_start_entries
         _sandy_start_entries
-        sleep 2
     " ) >/dev/null 2>&1
+    # B5: _sandy_start_entries no longer blocks for the startup window, so
+    # wait (bounded) for the winner to start and both losers to log.
+    _S114_I=0
+    while [ "$_S114_I" -lt 50 ]; do
+        if [ -s "$_S114_RF2/fs/r/instances" ] && [ "$(grep -c "already running (lock held)" "$_S114_RF2/fs/r/supervisor.log" 2>/dev/null || true)" = 2 ]; then break; fi
+        sleep 0.1; _S114_I=$((_S114_I + 1))
+    done
+    sleep 0.5; unset _S114_I
     _S114_LOCK="$_S114_RF2/home/.sandy-entry-r.lock"
     _S114_FLOCK_RC=0
     flock -n "$_S114_LOCK" true >/dev/null 2>&1 || _S114_FLOCK_RC=$?
@@ -11424,11 +11437,15 @@ sed -n '/^# BEGIN relay capability/,/^# END relay capability/p' "$SANDY_SCRIPT" 
 # together, bounded by the third column-0 closing brace after the first
 # function's opener (they are adjacent in the heredoc).
 awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
+# B5: the window now runs separately, after the panes exist
+# (_sandy_entry_window, between the BEGIN/END entry window markers), so
+# (26)/(27) drive start + window rather than _sandy_start_entries alone.
+sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$SANDY_SCRIPT" >> "$_S123_DIR/supervisor.sh"
 
 check "§123(pre-a) the resolution block was extracted (mutation: renaming the BEGIN/END markers empties it and would make every resolution check below vacuous)" \
     bash -c 'grep -q "_sandy_relay_slot_dir=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
-check "§123(pre-b) the supervisor function was extracted" \
-    bash -c 'grep -q "flock -n 9" "$1" && [ "$(grep -c . "$1")" -gt 30 ]' -- "$_S123_DIR/supervisor.sh"
+check "§123(pre-b) the supervisor function was extracted, with the entry-window block (B5)" \
+    bash -c 'grep -q "flock -n 9" "$1" && [ "$(grep -c . "$1")" -gt 30 ] && grep -q "^_sandy_entry_window() {" "$1"' -- "$_S123_DIR/supervisor.sh"
 
 # --- resolution: what the slot resolves to, driven through the real block ----
 # Each case runs the SHIPPED block against a real sandbox directory and reports
@@ -11644,7 +11661,7 @@ if command -v flock >/dev/null 2>&1; then
         done
     }
     _s123_window() {
-        # _s123_window <relay body> -> "rc=<n>"
+        # _s123_window <relay body> -> "rc=<n> <verdict state>"
         #
         # 2.6.0 (#382, decisions 4-5): the legacy SANDY_HANDOFF_RELAY-with-no-
         # entries-list fallback this used to exercise is GONE -- with it
@@ -11675,25 +11692,30 @@ if command -v flock >/dev/null 2>&1; then
             # subshell leaves through the window's `exit 1` (the relay that
             # exits 3), so that loop was never killed on macOS (#521).
             disown() { printf '%s\n' "${!:-}" > "$h/loop.pid"; builtin disown "$@"; }
-            # Same capture rule as _s123_resolve: the function's refusal is an
-            # `exit 1` that kills this subshell, so the status is read outside
-            # it rather than echoed from within (which would never run).
+            # The teardown a failed window runs must never reach a real tmux.
+            tmux() { :; }
+            # Same capture rule as _s123_resolve: the status is read outside
+            # the subshell. B5: start, then the window that now runs
+            # alongside the agent; the subshell's status is the window's.
             _sandy_start_entries
+            _sandy_entry_window
         ) >/dev/null 2>&1 || rc=$?
         _s123_stop_supervisor "$h"
-        echo "rc=$rc"
+        local _v=""
+        IFS= read -r _v 2>/dev/null < "$h/.sandy-entry-window" || true
+        echo "rc=$rc ${_v%%$'\t'*}"
         return 0
     }
     _S123_W1="$(trap - ERR; _s123_window '#!/bin/sh
 exit 3')"
-    check "§123(26) a relay that exits NON-ZERO inside the startup window fails the session — the 'died at startup on every launch' case, which a launch-time check alone never caught (got: $_S123_W1)" \
-        bash -c '[ "$1" = "rc=1" ]' -- "$_S123_W1"
+    check "§123(26) a relay that exits NON-ZERO inside the startup window fails the session — the 'died at startup on every launch' case, which a launch-time check alone never caught; B5: the window returns 1 and the verdict is failed (got: $_S123_W1)" \
+        bash -c '[ "$1" = "rc=1 failed" ]' -- "$_S123_W1"
     _S123_W2="$(trap - ERR; _s123_window '#!/bin/sh
 exit 0')"
-    check "§123(27) a relay that exits ZERO does NOT fail the session — a relay is allowed to be a one-shot (got: $_S123_W2)" \
-        bash -c '[ "$1" = "rc=0" ]' -- "$_S123_W2"
-    # "§123(28) a relay that stays up does NOT fail the session": run with two
-    # entries that stay up in §172(4a).
+    check "§123(27) a relay that exits ZERO does NOT fail the session — a relay is allowed to be a one-shot; B5: the verdict is passed (got: $_S123_W2)" \
+        bash -c '[ "$1" = "rc=0 passed" ]' -- "$_S123_W2"
+    # "§123(28) a relay that stays up does NOT fail the session": since B5 that
+    # is §226(W2), which runs the window over an entry that stays up.
     # (28b)/(28c): nothing (26)-(27) started outlives them. The supervisor loop
     # is a fork of this suite, so its command line is just
     # `bash test/run-tests.sh`; it is identified by what it holds instead.
@@ -17989,20 +18011,27 @@ if [ -f "$_S171_TMPL" ]; then
 
     _S171_D_NS="$(_s171_row_contains "$_S171_SA_FILE" 'tmux new-session' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
     _S171_D_OPT="$(_s171_row_contains "$_S171_SA_FILE" 'set-option -p' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
-    _S171_D_EXIT="$(_s171_row_contains "$_S171_SA_FILE" 'exec tail -f /dev/null' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
-    check "§171(9a) daemon path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes exec tail -f /dev/null -- mutation (a)" \
+    # B5: both paths now end in _sandy_hold_session (the entry window, then
+    # exec tail -f /dev/null or tmux attach -t sandy); (11) below runs it.
+    _S171_D_EXIT="$(_s171_row_contains "$_S171_SA_FILE" '_sandy_hold_session' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
+    check "§171(9a) daemon path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes _sandy_hold_session (which execs tail -f /dev/null) -- mutation (a)" \
         bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
         _ "$_S171_D_NS" "$_S171_D_OPT" "$_S171_D_EXIT"
 
     _S171_F_NS="$(_s171_row_contains "$_S171_SA_FILE" 'tmux new-session' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
     _S171_F_OPT="$(_s171_row_contains "$_S171_SA_FILE" 'set-option -p' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
-    _S171_F_ATTACH="$(_s171_row_contains "$_S171_SA_FILE" 'tmux attach -t sandy' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
-    check "§171(9b) foreground path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes tmux attach -t sandy -- mutation (b)" \
+    _S171_F_ATTACH="$(_s171_row_contains "$_S171_SA_FILE" '_sandy_hold_session' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
+    check "§171(9b) foreground path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes _sandy_hold_session (which runs tmux attach -t sandy) -- mutation (b)" \
         bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
         _ "$_S171_F_NS" "$_S171_F_OPT" "$_S171_F_ATTACH"
 
     check "§171(9c) the single-agent block never execs the attach directly -- mutation (c), the exact EXIT-trap/palette regression d164091 fixed" \
         bash -c '! grep -q "exec tmux attach" "$1"' _ "$_S171_SA_FILE"
+    # ...nor does the hold the block now ends in (B5).
+    _S171_EW_FILE="$_S171_DIR/ew_block.sh"
+    sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S171_TMPL" > "$_S171_EW_FILE"
+    check "§171(9d) the entry-window block (with _sandy_hold_session) was extracted, and its hold runs a plain tmux attach -t sandy, never exec tmux attach" \
+        bash -c 'grep -q "^_sandy_hold_session() {" "$1" && grep -q "^    tmux attach -t sandy" "$1" && ! grep -q "exec tmux attach" "$1"' _ "$_S171_EW_FILE"
 
     # --- (11) DYNAMIC PROPERTY: RUN the single-agent block, don't just read
     # it as text. (8)/(9) only prove a `set-option` line exists and sits in
@@ -18037,7 +18066,7 @@ if [ -f "$_S171_TMPL" ]; then
     cat > "$_S171_DIR/sa_harness.sh" <<'S171HARNESS'
 #!/bin/bash
 set -eu
-_SNIPPET="$1"; _AGENT="$2"; _DAEMON="$3"; _CALL_LOG_FILE="$4"
+_SNIPPET="$1"; _AGENT="$2"; _DAEMON="$3"; _CALL_LOG_FILE="$4"; _EW="$5"
 : > "$_CALL_LOG_FILE"
 tmux() {
     case "$1" in
@@ -18049,11 +18078,19 @@ tmux() {
     return 0
 }
 exec() {
-    if [ "${1:-}" = "tail" ]; then printf 'exectail\n' >> "$_CALL_LOG_FILE"
+    # exec never returns: the stub ends the harness the way the real one
+    # ends the shell.
+    if [ "${1:-}" = "tail" ]; then printf 'exectail\n' >> "$_CALL_LOG_FILE"; exit 0
     else printf 'exec:%s\n' "${1:-}" >> "$_CALL_LOG_FILE"; fi
     return 0
 }
 sandy_log() { :; }
+sandy_err() { printf 'err:%s\n' "$*" >> "$_CALL_LOG_FILE"; }
+# The REAL hold (B5), with no verdict file in this fixture HOME, so it goes
+# straight to its terminal call.
+HOME="$(dirname "$_CALL_LOG_FILE")/home-$_DAEMON"; mkdir -p "$HOME"
+# shellcheck disable=SC1090
+. "$_EW"
 _sandy_build_agent_cmd() { printf 'fakecmd'; }
 _SANDY_AGENTS=("$_AGENT")
 _sandy_is_headless=false
@@ -18077,7 +18114,7 @@ S171HARNESS
 
     _S171_D_LOG="$_S171_DIR/sa_calls_daemon.log"
     _S171_D_HRC=0
-    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 1 "$_S171_D_LOG" || _S171_D_HRC=$?
+    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 1 "$_S171_D_LOG" "$_S171_EW_FILE" || _S171_D_HRC=$?
     _S171_D_CALLS="$(cat "$_S171_D_LOG" 2>/dev/null)" || true
     check "§171(11a-rc) daemon harness ran cleanly (SANDY_DAEMON=1)" \
         bash -c '[ "$1" -eq 0 ]' _ "$_S171_D_HRC"
@@ -18086,7 +18123,7 @@ S171HARNESS
 
     _S171_F_LOG="$_S171_DIR/sa_calls_fg.log"
     _S171_F_HRC=0
-    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 0 "$_S171_F_LOG" || _S171_F_HRC=$?
+    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 0 "$_S171_F_LOG" "$_S171_EW_FILE" || _S171_F_HRC=$?
     _S171_F_CALLS="$(cat "$_S171_F_LOG" 2>/dev/null)" || true
     check "§171(11b-rc) foreground harness ran cleanly (SANDY_DAEMON=0)" \
         bash -c '[ "$1" -eq 0 ]' _ "$_S171_F_HRC"
@@ -18094,10 +18131,10 @@ S171HARNESS
         _s171_calls_ok "$_S171_F_CALLS" attach
 
     unset -f _s171_row_exact _s171_row_contains _s171_calls_ok
-    rm -f "$_S171_SA_FILE" "$_S171_SA_RUN" "$_S171_DIR/sa_harness.sh" "$_S171_D_LOG" "$_S171_F_LOG"
+    rm -f "$_S171_SA_FILE" "$_S171_SA_RUN" "$_S171_DIR/sa_harness.sh" "$_S171_D_LOG" "$_S171_F_LOG" "$_S171_EW_FILE"
     unset _S171_SA_FILE _S171_ROW_ELIF _S171_ROW_ELSE _S171_ROW_FI \
         _S171_D_NS _S171_D_OPT _S171_D_EXIT _S171_F_NS _S171_F_OPT _S171_F_ATTACH \
-        _S171_SA_RUN _S171_D_LOG _S171_D_HRC _S171_D_CALLS _S171_F_LOG _S171_F_HRC _S171_F_CALLS
+        _S171_SA_RUN _S171_D_LOG _S171_D_HRC _S171_D_CALLS _S171_F_LOG _S171_F_HRC _S171_F_CALLS _S171_EW_FILE
 else
     skip "§171(4) templates/user-setup.sh.tmpl not found -- producer/consumer agreement not checked"
     skip "§171(8) templates/user-setup.sh.tmpl not found -- single-agent pane-tagging structure not checked"
@@ -18211,6 +18248,8 @@ _s172_kill_loops() {
 # same discipline as §114(16).
 if command -v flock >/dev/null 2>&1 && [ -f "$_S172_TMPL" ]; then
     _S172_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S172_TMPL")"
+    # B5: the startup window, run after the panes exist in production.
+    _S172_EWFNS="$(sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S172_TMPL")"
     _S172_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
     mkdir -p "$_S172_D/fs/alpha" "$_S172_D/fs/beta" "$_S172_D/home" "$_S172_D/ws" "$_S172_D/a" "$_S172_D/b"
     # `exec sleep 30` as the LAST line, not a plain `sleep 30`: a plain sleep
@@ -18243,7 +18282,16 @@ EOF
         '"$_S172_FNS"'
         _sandy_start_entries
     ' ) >/dev/null 2>&1 || _S172_RC=$?
-    sleep 0.5
+    # B5: _sandy_start_entries no longer blocks for the 5s window, so wait
+    # (bounded) for both entries to record a pid and their state.
+    _S172_I=0
+    while [ "$_S172_I" -lt 50 ]; do
+        if [ -s "$_S172_D/pid-a" ] && [ -s "$_S172_D/pid-b" ] \
+           && grep -q "^state=started" "$_S172_D/fs/alpha/.state" 2>/dev/null \
+           && grep -q "^state=started" "$_S172_D/fs/beta/.state" 2>/dev/null; then break; fi
+        sleep 0.1; _S172_I=$((_S172_I + 1))
+    done
+    sleep 0.5; unset _S172_I
     check "§172(4a) _sandy_start_entries returns 0 when both entries start cleanly (got rc=$_S172_RC)" \
         test "$_S172_RC" -eq 0
     check "§172(4b) both entries' pidfiles got a pid" \
@@ -18315,14 +18363,19 @@ EOF
         sandy_log(){ :; }; sandy_err(){ echo "ERR:$*" >&2; }
         SANDY_FEATURE_ENTRIES="alpha='"$_S172_D2"'/a/entry.sh beta='"$_S172_D2"'/b/entry.sh"
         SANDY_FEATURE_STATE_ROOT="'"$_S172_D2"'/fs"
+        tmux() { :; }
         '"$_S172_FNS"'
+        '"$_S172_EWFNS"'
         _sandy_start_entries
+        _sandy_entry_window
     ' ) > "$_S172_OUT5F" 2>&1 || _S172_RC5=$?
-    _S172_OUT5="$(cat "$_S172_OUT5F")"; rm -f "$_S172_OUT5F"
-    check "§172(5a) the SECOND entry dying at startup fails the whole session (got rc=$_S172_RC5)" \
-        test "$_S172_RC5" -ne 0
-    check "§172(5b) ...and names beta, not alpha, as the one that failed" \
-        bash -c 'printf "%s" "$1" | grep -q beta' _ "$_S172_OUT5"
+    # B5: the window reports through the verdict file; the launch tail prints
+    # its message (after tmux exits, or to the daemon log).
+    _S172_OUT5="$(cat "$_S172_D2/home/.sandy-entry-window" 2>/dev/null || true)"; rm -f "$_S172_OUT5F"
+    check "§172(5a) the SECOND entry dying at startup fails the whole session: the window returns non-zero and the verdict is failed (got rc=$_S172_RC5)" \
+        bash -c '[ "$1" -ne 0 ] && case "$2" in failed*) true ;; *) false ;; esac' _ "$_S172_RC5" "$_S172_OUT5"
+    check "§172(5b) ...and names beta, not alpha, as the one that failed (label field, and the message)" \
+        bash -c 'printf "%s" "$1" | cut -f2 | grep -qx "sandy-entry beta" && printf "%s" "$1" | cut -f4 | grep -q "sandy-entry beta exited 3" && ! printf "%s" "$1" | grep -q alpha' _ "$_S172_OUT5"
     for _s172_p in $(cat "$_S172_D2/pid-a" 2>/dev/null); do
         kill -9 "$_s172_p" >/dev/null 2>&1 || true
     done
@@ -18332,7 +18385,7 @@ EOF
     # it needs the same loop+backoff-child reaping as alpha's.
     _s172_kill_loops "$_S172_D2/"
     rm -rf "$_S172_D2"
-    unset _S172_OUT5 _S172_RC5 _S172_FNS _S172_OUT5F _s172_p
+    unset _S172_OUT5 _S172_RC5 _S172_FNS _S172_EWFNS _S172_OUT5F _s172_p
 else
     skip "§172(4)-(5) dynamic per-feature supervision (flock or templates/user-setup.sh.tmpl unavailable)"
 fi
@@ -24504,8 +24557,8 @@ check "§204(12a) active: the session data is mounted read-only from this launch
 check "§204(12b) inactive: the flag is still forwarded as 0 (a forged env is always overwritten) and nothing is mounted" \
     bash -c 'printf "%s\n" "$1" | grep -qx "SANDY_CLAUDE_SESSIONS_ACTIVE=0" && ! printf "%s\n" "$1" | grep -q opt/sandy/sessions' -- "$(_s204_rf 0)"
 _S204_GUARD='if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then'
-check "§204(12c) container side: sessions come up BEFORE the pane is created, gated on the flag and never headless or --remote" \
-    awk -v g="$_S204_GUARD" 'index($0, g) == 1 {gl = NR} $0 == "    _sandy_claude_sessions_up" && gl == NR - 1 {u = NR} index($0, "if [ \"$_SANDY_IS_MULTI\" = false ]; then") == 1 && !m {m = NR} END {exit !(u && m && u < m)}' "$SANDY_SCRIPT"
+check "§204(12c) container side: sessions come up BEFORE the pane is created, gated on the flag and never headless or --remote, right after the blocking entry window (B5)" \
+    awk -v g="$_S204_GUARD" 'index($0, g) == 1 {gl = NR} $0 == "    _sandy_entry_window || _sandy_ew_fail_exit" && gl == NR - 1 {w = NR} $0 == "    _sandy_claude_sessions_up" && w == NR - 1 {u = NR} index($0, "if [ \"$_SANDY_IS_MULTI\" = false ]; then") == 1 && !m {m = NR} END {exit !(u && m && u < m)}' "$SANDY_SCRIPT"
 check "§204(12d) the host relay stands down while a named session receives channels (agent view cannot take keystrokes)" \
     bash -c 'grep -A1 "Launch host-side channel relay" "$1" >/dev/null && awk "/^CHANNEL_RELAY_PID=\"\"\$/{p=1} p&&/_SANDY_CS_ACTIVE:-0}\" != 1/{f=1} p&&/^    case /{exit} END{exit !f}" "$1"' -- "$SANDY_SCRIPT"
 rm -rf "$_S204_D"
@@ -26787,6 +26840,321 @@ unset -f _s224_host
 rm -rf "$_S224_D"
 unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
+
+# ============================================================
+section "§226: the feature-entry window runs alongside the agent, and its verdict decides --start (B5)"
+# ============================================================
+# B5 moved the 5s entry startup window from before the first pane to after
+# it. A verdict file carries the result: `pending` before the first
+# new-session, then `passed`, or `failed<TAB>label<TAB>rc<TAB>msg` written only
+# after the panes are torn down. These checks run the SHIPPED code (the
+# user-setup entry-window block, the launch tail, and the host probe and
+# supervisor poll) against stub tmux and docker executables on PATH. No real
+# tmux or docker is ever run, and no pane is a real tmux pane: a "pane" is a
+# python process in its own process group, as a tmux pane is.
+_S226_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S226_TMPL="$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
+mkdir -p "$_S226_D/bin"
+awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S226_TMPL" > "$_S226_D/entries.sh"
+sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S226_TMPL" >> "$_S226_D/entries.sh"
+awk '/^cd "\$WORKSPACE"$/{f=1} f' "$_S226_TMPL" > "$_S226_D/tail.sh"
+sed -n '/^# BEGIN entry window host$/,/^# END entry window host$/p' "$SANDY_SCRIPT" > "$_S226_D/host.sh"
+awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S226_D/host.sh"
+# The supervisor tail of the launch: everything after the agent's docker run
+# (and its tty restore), to the script's last line.
+awk 'index($0,"docker run \"${RUN_FLAGS[@]}\" \"$IMAGE_NAME\" \"$@\" || _run_rc=$?")==1{f=1;next} f&&index($0,"_sandy_tty_restore"){next} f' "$SANDY_SCRIPT" > "$_S226_D/suptail.sh"
+check "§226(pre) the entry-window block, the launch tail, the host probe block and the supervisor tail were all extracted (mutation: a renamed marker empties one and its checks below go vacuous)" \
+    bash -c 'grep -q "^_sandy_entry_window() {" "$1" && grep -q "^_sandy_hold_session() {" "$1" && grep -q "^_sandy_ew_begin() {" "$1" \
+        && grep -q "_sandy_hold_session" "$2" && grep -q "^_sandy_ew_supervise() {" "$3" && grep -q "^_sandy_daemon_fatal() {" "$3" \
+        && grep -q "_sandy_ew_supervise" "$4" && grep -q "_sandy_session_gone" "$4"' \
+    _ "$_S226_D/entries.sh" "$_S226_D/tail.sh" "$_S226_D/host.sh" "$_S226_D/suptail.sh"
+
+# Stub tmux. Every call it sees is appended to $S226_LOG, with the verdict's
+# first field at that moment. list-panes prints $S226_PANES. attach returns at
+# once, or (S226_ATTACH_PID set) once that pane process has exited, which is
+# when a real attach returns: the last pane closing ends the session.
+cat > "$_S226_D/bin/tmux" <<'S226TMUX'
+#!/bin/sh
+v="$(head -n 1 "$HOME/.sandy-entry-window" 2>/dev/null | cut -f1)"
+case "$1" in
+    list-panes) cat "$S226_PANES" 2>/dev/null ;;
+    new-session) printf 'new-session verdict=%s\n' "${v:-<none>}" >> "$S226_LOG"; echo '%1' ;;
+    kill-server) printf 'kill-server verdict=%s\n' "${v:-<none>}" >> "$S226_LOG" ;;
+    attach)
+        printf 'attach verdict=%s\n' "${v:-<none>}" >> "$S226_LOG"
+        if [ -n "${S226_ATTACH_PID:-}" ]; then
+            i=0
+            while kill -0 "$S226_ATTACH_PID" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+        fi
+        exit "${S226_ATTACH_RC:-0}" ;;
+    *) printf 'tmux %s\n' "$1" >> "$S226_LOG" ;;
+esac
+exit 0
+S226TMUX
+cat > "$_S226_D/bin/tail" <<'S226TAIL'
+#!/bin/sh
+printf 'exec tail\n' >> "$S226_LOG"
+exit 0
+S226TAIL
+# A pane: its own process group (a tmux pane is a session leader), logs the
+# TERM it gets, takes $3 seconds to exit, and is never this shell's child
+# (started through a subshell that exits), so init reaps it as tmux would.
+cat > "$_S226_D/pane.py" <<'S226PANE'
+import os, signal, sys, time
+os.setpgid(0, 0)
+log, ready, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+def on_term(sig, frame):
+    with open(log, "a") as f:
+        f.write("pane TERM\n")
+    time.sleep(delay)
+    with open(log, "a") as f:
+        f.write("pane exit\n")
+    os._exit(0)
+signal.signal(signal.SIGTERM, on_term)
+with open(ready + ".tmp", "w") as f:
+    f.write(str(os.getpid()))
+os.rename(ready + ".tmp", ready)
+time.sleep(30)
+os._exit(0)
+S226PANE
+chmod +x "$_S226_D/bin/tmux" "$_S226_D/bin/tail"
+
+# _s226_kill_tree <pid>: as §123's -- stop each level before listing its
+# children, so a supervisor loop cannot respawn its entry in between.
+_s226_kill_tree() {
+    local _p="$1" _c
+    kill -STOP "$_p" 2>/dev/null || return 0
+    for _c in $(pgrep -P "$_p" 2>/dev/null || true); do _s226_kill_tree "$_c"; done
+    kill -KILL "$_p" 2>/dev/null || true
+}
+# _s226_case <name> <entry body or ""> <script>: run <script> in a fresh
+# fixture (HOME=$h, one entry "w" when a body is given) with the extracted
+# entry functions sourced, stub tmux/tail first on PATH, and the launch's
+# own ERR trap shape removed (the window is called the way user-setup calls
+# it). stdout -> $h/out, stderr -> $h/err, status -> $h/rc. Every supervisor
+# loop it forks is recorded (the disown shim, as §123) and killed after.
+_s226_case() {
+    local h="$_S226_D/$1" body="$2" script="$3" rc=0 _p
+    rm -rf "$h"; mkdir -p "$h/ws" "$h/fs/w"
+    : > "$h/log"; : > "$h/panes"; : > "$h/loops"
+    if [ -n "$body" ]; then printf '%s\n' "$body" > "$h/r.sh"; chmod +x "$h/r.sh"; fi
+    (
+        trap - ERR
+        set +e
+        unset SANDY_DAEMON SANDY_FEATURE_ENTRIES SANDY_CLAUDE_SESSIONS_ACTIVE SANDY_REMOTE_CONTROL SANDY_HANDOFF_RELAY SANDY_RELAY_STATE SANDY_VERBOSE
+        export HOME="$h" PATH="$_S226_D/bin:$PATH" S226_LOG="$h/log" S226_PANES="$h/panes"
+        WORKSPACE="$h/ws"; SANDY_FEATURE_STATE_ROOT="$h/fs"
+        [ -n "$body" ] && SANDY_FEATURE_ENTRIES="w=$h/r.sh"
+        sandy_log() { :; }
+        sandy_err() { printf '[sandy] ERROR: %s\n' "$*" >&2; }
+        . "$_S226_D/entries.sh"
+        disown() { printf '%s\n' "${!:-}" >> "$h/loops"; builtin disown "$@"; }
+        eval "$script"
+    ) >"$h/out" 2>"$h/err" </dev/null || rc=$?
+    echo "$rc" > "$h/rc"
+    while IFS= read -r _p; do [ -n "$_p" ] && _s226_kill_tree "$_p"; done < "$h/loops"
+    if [ -s "$h/pane.pid" ]; then kill -KILL "$(cat "$h/pane.pid")" 2>/dev/null || true; fi
+    return 0
+}
+# A pane started the way tmux starts one, recorded for the stub list-panes.
+_S226_PANE='( python3 "$_S226_D/pane.py" "$S226_LOG" "$HOME/pane.ready" "${S226_PANE_DELAY:-0}" & )
+_i=0; while [ ! -s "$HOME/pane.ready" ] && [ "$_i" -lt 50 ]; do sleep 0.1; _i=$((_i + 1)); done
+cat "$HOME/pane.ready" > "$HOME/pane.pid"; cat "$HOME/pane.ready" > "$S226_PANES"'
+
+if command -v flock >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
+    # --- W1: teardown order -------------------------------------------------
+    _s226_case w1 '#!/bin/sh
+exit 3' "S226_PANE_DELAY=1; $_S226_PANE"'
+_sandy_start_entries; _sandy_ew_begin
+_sandy_entry_window; echo "window=$?"'
+    check "§226(W1a) a failing entry: the pane's process group gets TERM (not KILL), the teardown waits for it to exit, THEN kill-server, and only then is the verdict failed (mutations: SIGKILL, no wait, no kill-server, failed written first)" \
+        bash -c '
+            grep -qx "window=1" "$1/out" || { echo "window rc: $(cat "$1/out")"; exit 1; }
+            t=$(grep -n -m1 "^pane TERM$" "$1/log" | cut -d: -f1)
+            x=$(grep -n -m1 "^pane exit$" "$1/log" | cut -d: -f1)
+            k=$(grep -n -m1 "^kill-server verdict=pending$" "$1/log" | cut -d: -f1)
+            cat "$1/log"
+            [ -n "$t" ] && [ -n "$x" ] && [ -n "$k" ] && [ "$t" -lt "$x" ] && [ "$x" -lt "$k" ]' _ "$_S226_D/w1"
+    check "§226(W1b) ...and the verdict, written last, is failed<TAB>sandy-entry w<TAB>3<TAB><message naming the entry and its log>" \
+        bash -c 'IFS="	" read -r a b c d < "$1/.sandy-entry-window"; [ "$a" = failed ] && [ "$b" = "sandy-entry w" ] && [ "$c" = 3 ] && printf "%s" "$d" | grep -q "sandy-entry w exited 3 within 5s of starting.*supervisor.log"' _ "$_S226_D/w1"
+
+    # --- W2: a long-running entry -------------------------------------------
+    _s226_case w2 '#!/bin/sh
+exec sleep 30' '_sandy_start_entries; _sandy_ew_begin
+_sandy_entry_window & _wp=$!
+sleep 1; _s1="$(_sandy_ew_state)"
+sleep 3.3; _s4="$(_sandy_ew_state)"
+wait "$_wp"; _rw=$?
+echo "$_s1 $_s4 $(_sandy_ew_state) $_rw"'
+    check "§226(W2) a long-running entry: pending at 1s and still pending at 4.3s, then passed with status 0 once the 5s window ends (mutation: passed written at the start)" \
+        bash -c '[ "$(cat "$1/out")" = "pending pending passed 0" ] || { cat "$1/out" "$1/err"; exit 1; }' _ "$_S226_D/w2"
+
+    # --- W3: a one-shot entry -----------------------------------------------
+    _s226_case w3 '#!/bin/sh
+exit 0' '_sandy_start_entries; _sandy_ew_begin
+_sandy_entry_window; echo "window=$? $(_sandy_ew_state)"'
+    check "§226(W3) an entry that exits 0 inside the window is settled: passed, status 0, and no teardown (mutation: rc=0 treated as a failure)" \
+        bash -c '[ "$(cat "$1/out")" = "window=0 passed" ] && ! grep -q kill-server "$1/log"' _ "$_S226_D/w3"
+
+    # --- W7: the interactive hold -------------------------------------------
+    # (a) the entry fails while attached. The stub attach returns when the
+    # pane exits, which is during the teardown, before `failed` exists: the
+    # hold must wait for the watcher, not kill it.
+    _s226_case w7a '#!/bin/sh
+sleep 0.5; exit 3' "$_S226_PANE"'
+export S226_ATTACH_PID="$(cat "$HOME/pane.pid")"
+_sandy_start_entries; _sandy_ew_begin
+_sandy_hold_session; echo "hold returned $?"'
+    check "§226(W7a) interactive: the entry fails while tmux is attached -> the hold exits 1 after attach returns, with the message on stderr exactly once, and the verdict is failed (mutations: the hold ignores the verdict; the watcher dies on the hold's TERM mid-teardown)" \
+        bash -c '
+            [ "$(cat "$1/rc")" = 1 ] || { echo "rc=$(cat "$1/rc")"; cat "$1/out" "$1/err" "$1/log"; exit 1; }
+            ! grep -q "hold returned" "$1/out" || exit 1
+            [ "$(grep -c "sandy-entry w exited 3 within 5s of starting" "$1/err")" = 1 ] || { cat "$1/err"; exit 1; }
+            head -n 1 "$1/.sandy-entry-window" | cut -f1 | grep -qx failed
+            grep -q "^attach verdict=pending$" "$1/log"' _ "$_S226_D/w7a"
+    # (b) the user detaches (or the agent exits) while the window is still
+    # pending: attach's own status comes back, at once, and the watcher is
+    # gone. "Gone" is measured by a lock only it could still hold: fd 8 is
+    # opened and locked just before the hold, so the watcher inherits it.
+    _s226_case w7b '#!/bin/sh
+exec sleep 30' '_sandy_start_entries; _sandy_ew_begin
+export S226_ATTACH_RC=3
+exec 8>"$HOME/watcher.lock"; flock 8
+_t0=$(date +%s)
+_sandy_hold_session; _r=$?
+echo "rc=$_r elapsed=$(( $(date +%s) - _t0 )) state=$(_sandy_ew_state)"'
+    check "§226(W7b) interactive: detach while pending -> the hold returns attach's own status (3) within 2s, the verdict is still pending, and no watcher outlives it (its inherited lock comes free; mutation: the watcher is left running)" \
+        bash -c '
+            o="$(cat "$1/out")"
+            case "$o" in "rc=3 elapsed="[012]" state=pending") ;; *) echo "got: $o"; cat "$1/err"; exit 1 ;; esac
+            i=0
+            until flock -n "$1/watcher.lock" true; do
+                [ "$i" -lt 10 ] || { echo "watcher lock still held 1s after the hold returned"; exit 1; }
+                sleep 0.1; i=$((i + 1))
+            done' _ "$_S226_D/w7b"
+else
+    skip "§226(W1-W3, W7) entry-window behaviour: needs flock, python3 and pgrep on this host"
+fi
+
+# --- W4: pending exists before new-session, and a failed write refuses -------
+_S226_TAILRUN='_sandy_is_headless=false; _SANDY_IS_MULTI=false; _SANDY_AGENTS=(claude); SANDY_AGENT=claude
+_sandy_build_agent_cmd() { echo fakeagent; }
+set -e
+. "$_S226_D/tail.sh"'
+_s226_case w4 '' "SANDY_DAEMON=1; $_S226_TAILRUN"
+check "§226(W4a) daemon launch tail, no entries: the stub sees new-session only once the verdict is pending, and the window then writes passed before the container idles" \
+    bash -c '
+        [ "$(cat "$1/rc")" = 0 ] || { cat "$1/err"; exit 1; }
+        [ "$(grep -m1 "^new-session" "$1/log")" = "new-session verdict=pending" ] || { cat "$1/log"; exit 1; }
+        grep -q "^exec tail$" "$1/log" && head -n 1 "$1/.sandy-entry-window" | grep -qx passed' _ "$_S226_D/w4"
+_s226_case w4b '' 'printf x > "$HOME/notadir"; export HOME="$HOME/notadir/home"
+. "$_S226_D/entries.sh"
+SANDY_DAEMON=1; '"$_S226_TAILRUN"
+check "§226(W4b) ...and with a HOME the verdict cannot be written in, the launch refuses (non-zero, naming the verdict file) and new-session is never called (mutation: the refusal dropped)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry-window" "$1/err"' _ "$_S226_D/w4b"
+
+# --- W8: named sessions run the window blocking, before they come up --------
+_s226_case w8 '' 'SANDY_DAEMON=1; SANDY_CLAUDE_SESSIONS_ACTIVE=1
+_sandy_claude_sessions_up() { printf "sessions_up verdict=%s\n" "$(_sandy_ew_state)" >> "$S226_LOG"; }
+'"$_S226_TAILRUN"
+check "§226(W8) named sessions active: _sandy_claude_sessions_up already sees passed, and new-session comes after it (mutation: the blocking window dropped)" \
+    bash -c '
+        s=$(grep -n -m1 "^sessions_up verdict=passed$" "$1/log" | cut -d: -f1)
+        n=$(grep -n -m1 "^new-session" "$1/log" | cut -d: -f1)
+        [ -n "$s" ] && [ -n "$n" ] && [ "$s" -lt "$n" ] || { cat "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w8"
+
+# --- W5: the --start client's readiness, over every probe outcome ------------
+# The REAL probe script (run by sh, as docker exec runs it) against a fixture
+# verdict file and a stub tmux whose has-session answers $S226_SESSION, then
+# the real classifier.
+cat > "$_S226_D/bin5-tmux" <<'S226T5'
+#!/bin/sh
+[ "$1" = has-session ] && [ "${S226_SESSION:-0}" = 1 ]
+S226T5
+mkdir -p "$_S226_D/bin5"; mv "$_S226_D/bin5-tmux" "$_S226_D/bin5/tmux"; chmod +x "$_S226_D/bin5/tmux"
+# _s226_w5_verdict <state> <file>: absent leaves no file.
+_s226_w5_verdict() {
+    rm -f "$2"
+    case "$1" in
+        absent) ;;
+        failed) printf 'failed\tsandy-entry w\t3\tboom\n' > "$2" ;;
+        *) printf '%s\n' "$1" > "$2" ;;
+    esac
+}
+_S226_W5="$(
+    trap - ERR; set +e
+    . "$_S226_D/host.sh"
+    for row in "0 absent" "0 pending" "1 pending" "1 passed" "1 absent" "1 failed" "0 failed" "0 passed"; do
+        sess="${row%% *}"; st="${row#* }"; f="$_S226_D/w5.verdict"
+        _s226_w5_verdict "$st" "$f"
+        out="$(S226_SESSION="$sess" PATH="$_S226_D/bin5:$PATH" sh -c "$_SANDY_EW_PROBE_SH" _ "$f" 2>/dev/null)"
+        printf '%s:%s=%s\n' "$sess" "$st" "$(_sandy_ew_classify "$out")"
+    done
+)"
+check "§226(W5) --start readiness = session AND (passed or no file); pending and no-session wait; failed is fatal with or without a session (mutations: pending ready, failed not fatal, none not ready)" \
+    bash -c '[ "$1" = "$2" ] || { printf "got:\n%s\n" "$1"; exit 1; }' _ "$_S226_W5" \
+    "$(printf '%s\n' '0:absent=wait' '0:pending=wait' '1:pending=wait' '1:passed=ready' '1:absent=ready' '1:failed=fatal' '0:failed=fatal' '0:passed=wait')"
+
+# --- W6: the supervisor turns `failed` into the .fatal marker and a teardown --
+# Stub docker: inspect says running, exec runs the real probe script against
+# the fixture verdict ($S226_VFILE) or logs a tmux has-session that fails,
+# rm is logged. A stub sleep returns at once.
+mkdir -p "$_S226_D/bin6"
+cat > "$_S226_D/bin6/docker" <<'S226D6'
+#!/bin/sh
+printf 'docker %s\n' "$*" >> "$S226_LOG"
+case "$1" in
+    inspect) echo true ;;
+    exec)
+        shift 3   # exec -u <uid>; $1 is now the container
+        shift
+        if [ "$1" = sh ]; then exec sh -c "$3" _ "$S226_VFILE"; fi
+        exit 1 ;;
+esac
+exit 0
+S226D6
+printf '#!/bin/sh\nexit 0\n' > "$_S226_D/bin6/sleep"
+printf '#!/bin/sh\n[ "$1" = has-session ] && [ "${S226_SESSION:-0}" = 1 ]\n' > "$_S226_D/bin6/tmux"
+chmod +x "$_S226_D/bin6/docker" "$_S226_D/bin6/sleep" "$_S226_D/bin6/tmux"
+# _s226_sup <name> <verdict line or ""> <session 0|1> <mode: fn|tail>
+_s226_sup() {
+    local h="$_S226_D/$1" rc=0
+    rm -rf "$h"; mkdir -p "$h"; : > "$h/log"
+    [ -n "$2" ] && printf '%s\n' "$2" > "$h/verdict"
+    (
+        trap - ERR; set +e
+        export PATH="$_S226_D/bin6:$PATH" S226_LOG="$h/log" S226_VFILE="$h/verdict" S226_SESSION="$3"
+        SANDY_DAEMON_LOG="$h/daemon.log"
+        error() { printf 'ERROR: %s\n' "$*" >&2; }
+        info() { :; }
+        . "$_S226_D/host.sh"
+        if [ "$4" = fn ]; then
+            _sandy_ew_supervise c226; exit $?
+        fi
+        # The real supervisor tail, with the real EXIT-trap shape; cleanup is
+        # reduced to the agent removal the real one starts with.
+        cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; }
+        trap 'rc=$?; cleanup; exit $rc' EXIT
+        set -euo pipefail
+        SANDY_DAEMON_SUPERVISOR=1; _run_rc=0; CONTAINER_NAME=c226
+        . "$_S226_D/suptail.sh"
+    ) >"$h/out" 2>"$h/err" </dev/null || rc=$?
+    echo "$rc" > "$h/rc"
+    return 0
+}
+_s226_sup w6a "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 0 fn
+check "§226(W6a) supervisor poll, verdict failed: returns non-zero, writes the .fatal marker the --start client exits 6 on, and names the entry (mutation: _sandy_daemon_fatal skipped)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "sandy-entry w exited 3" "$1/err"' _ "$_S226_D/w6a"
+_s226_sup w6b passed 1 fn
+check "§226(W6b) supervisor poll, verdict passed with the session up: returns 0 and writes no .fatal" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S226_D/w6b"
+_s226_sup w6c "$(printf 'failed\tsandy-entry w\t3\tboom')" 0 tail
+check "§226(W6c) the real supervisor tail, verdict failed: it exits non-zero BEFORE its 30s watch loop, and its EXIT trap removes the container (mutation: the poll's failure ignored, which falls into the watch loop and exits 0)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "^docker rm -f c226$" "$1/log" && ! grep -q "c226 tmux has-session" "$1/log" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w6c"
+
+unset -f _s226_case _s226_kill_tree _s226_sup _s226_w5_verdict
+rm -rf "$_S226_D"
+unset _S226_D _S226_TMPL _S226_PANE _S226_TAILRUN _S226_W5
 
 # BEGIN SUMMARY
 # ============================================================

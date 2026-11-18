@@ -70,6 +70,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 (`5` is additionally unreachable on the `--attach` path today — both `exit 5` sites are in `--stop` — so treating an unknown state as "attach failed" maps it onto a code `--attach` never emits.)
 
+**`--start` exit codes** are `0` ready, `6` refused before launch, `7` crash-looping, `8` timed out, `9` a named Claude session did not come up (user-facing table: `docs/guide/configuration.md`). **Changed in 2.9.0 (B5):** a feature entry that starts and then exits non-zero inside its 5s startup window now exits **`6`** (the session is torn down and nothing is left running); before 2.9.0 the container crash-looped and `--start` exited `7`. An entry that cannot start at all (missing, not executable, no state mount, no `flock`) still exits `7`. The set of codes is unchanged.
+
 - Only the **usage-error** case — `--validate-config` invoked with no PATH argument at all — departs from the JSON contract: stdout is exactly 0 bytes, stderr is non-empty and carries a `[sandy] ERROR: ...` line, and the exit code is 1. This is the one case where there is no path to validate, so there is nothing to build a JSON body around.
 - Consumers may therefore pipe the stdout of any of these four invocations directly into a strict JSON parser (`json.load`, `jq -e`) without pre-filtering: a parse failure signals a genuine sandy bug, not an expected log line sharing the stream.
 
@@ -387,6 +389,13 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > vs. detached daemon session. Both `--print-state` and `--print-state light`
 > emit all three fields identically; a client on the pre-1.1.0 shape still
 > parses (unknown fields ignored) since `id`/`name`/`image`/`started_at` are
+> unchanged.
+> Since 2.9.0 (B5) the feature-entry startup window runs after the tmux
+> session exists, so during a `--start` the daemon's `attached_clients` reads
+> `0` up to about 5s before `--start` reports ready (it used to be `null` for
+> the whole window, because the probe found no session). `0` is a true value,
+> not "unknown". **Readiness is `--start`'s exit `0`, never
+> `attached_clients != null`.** No field was added and `schema_version` is
 > unchanged.
 
 > **`updated_at`** (per `running_containers[]` entry, added additively in

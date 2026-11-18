@@ -1872,8 +1872,12 @@ _sandy_await_entries() {
                 case "$_v" in
                     already-running|rc=0) ;;   # settled: drop from the pending set
                     rc=*)
-                        sandy_err "$_label exited ${_v#rc=} within 5s of starting, on every launch this reproduces. A feature entry that cannot stay up fails the session; see $_st/supervisor.log for its own output."
-                        exit 1 ;;
+                        # Reported, not printed: the caller decides where the
+                        # message goes (B5: the watcher runs while tmux owns the
+                        # terminal, so it must never write to the tty itself).
+                        _SANDY_EW_LABEL="$_label"; _SANDY_EW_RC="${_v#rc=}"
+                        _SANDY_EW_MSG="$_label exited ${_v#rc=} within 5s of starting, on every launch this reproduces. A feature entry that cannot stay up fails the session; see $_st/supervisor.log for its own output."
+                        return 1 ;;
                     *) _next+=("$_pair") ;;
                 esac
             else
@@ -1893,8 +1897,12 @@ _sandy_await_entries() {
 }
 
 # ---- resolve SANDY_FEATURE_ENTRIES and start each, identically (#382) ----
+# B5: this only STARTS the entries. Their startup window (_sandy_await_entries,
+# over _SANDY_EW_ARGS) runs later, alongside the agent, from
+# _sandy_entry_window below.
 _sandy_start_entries() {
-    local _tok _f _p _root="${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}" _wait_args=()
+    local _tok _f _p _root="${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}"
+    _SANDY_EW_ARGS=()
     [ -n "${SANDY_FEATURE_ENTRIES:-}" ] || return 0
     for _tok in $SANDY_FEATURE_ENTRIES; do
         [ -n "$_tok" ] || continue
@@ -1906,11 +1914,150 @@ _sandy_start_entries() {
         _f="${_tok%%=*}"; _p="${_tok#*=}"
         _sandy_supervise_entry "sandy-entry $_f" "$_p" "$_root/$_f" \
             "$HOME/.sandy-entry-$_f.lock" "$_root/$_f"
-        _wait_args+=("$_root/$_f=sandy-entry $_f")
+        _SANDY_EW_ARGS+=("$_root/$_f=sandy-entry $_f")
     done
-    _sandy_await_entries ${_wait_args[@]+"${_wait_args[@]}"}
     sandy_log "Feature entries requested (${SANDY_FEATURE_ENTRIES}); outcome (started vs. already running) is in each entry's own supervisor.log"
 }
+
+# BEGIN entry window
+# ---- the startup window runs ALONGSIDE the agent (B5, decision D1 = d) ----
+#
+# Until 2.9.0 the window above ran before the first pane existed, so every
+# launch with a long-running entry waited the full 5s before the agent even
+# started. It now runs after the panes exist. Every entry still gets at least
+# 5s; the agent boots during them instead of after them.
+#
+# The result is a VERDICT FILE, $HOME/.sandy-entry-window, on the /home/sandy
+# tmpfs: container-only (the host never writes it) and fresh on every
+# container start, so a verdict from an earlier container cannot exist.
+#   pending                         written BEFORE the first new-session,
+#                                   in every interactive or daemon launch,
+#                                   with or without entries; a launch whose
+#                                   write fails refuses before tmux.
+#   passed                          the window ended with no non-zero first
+#                                   exit. Final.
+#   failed<TAB>label<TAB>rc<TAB>msg written only AFTER teardown has finished,
+#                                   so "failed" also means "the agents are
+#                                   gone; docker rm -f is safe".
+# The agent can forge it (same uid). It is a report, like .sandy-sessions.tsv:
+# it decides an exit code, never what runs. Every writer goes through a temp
+# file and mv, so a reader never sees a torn verdict.
+_SANDY_EW_FILE="$HOME/.sandy-entry-window"
+_sandy_ew_write() {
+    local _t
+    _t="$(mktemp "$_SANDY_EW_FILE.XXXXXX" 2>/dev/null)" || return 1
+    if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$_SANDY_EW_FILE" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$_t" 2>/dev/null || true
+    return 1
+}
+# The verdict's first field (pending | passed | failed), or empty.
+_sandy_ew_state() {
+    local _v=""
+    IFS= read -r _v 2>/dev/null < "$_SANDY_EW_FILE" || true
+    printf '%s' "${_v%%$'\t'*}"
+}
+# The failure message (fourth field), with control characters removed: the
+# agent can write this file, and it is printed on the user's terminal.
+_sandy_ew_message() {
+    local _v=""
+    IFS= read -r _v 2>/dev/null < "$_SANDY_EW_FILE" || true
+    _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"
+    printf '%s' "$_v" | tr -d '\000-\037\177'
+}
+# Teardown, in this order (B5 section 2): TERM each pane's process group (the
+# signal docker stop and --stop send, so the agent's own exit handlers run);
+# wait up to 3s for the groups to empty; then kill-server, which HUPs whatever
+# is left (an exit pause, a teammate pane). Runs with the agent's uid, inside
+# the container; nothing on the host signals the agent.
+_sandy_ew_teardown() {
+    local _pids _p _i=0 _alive
+    _pids="$(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null || true)"
+    for _p in $_pids; do
+        case "$_p" in ''|*[!0-9]*) continue ;; esac
+        kill -TERM -- "-$_p" 2>/dev/null || kill -TERM "$_p" 2>/dev/null || true
+    done
+    while [ "$_i" -lt 30 ]; do
+        _alive=0
+        for _p in $_pids; do
+            case "$_p" in ''|*[!0-9]*) continue ;; esac
+            if kill -0 -- "-$_p" 2>/dev/null || kill -0 "$_p" 2>/dev/null; then _alive=1; fi
+        done
+        [ "$_alive" = 0 ] && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    tmux kill-server 2>/dev/null || true
+}
+# The window itself. Returns 0 once it has written `passed`, 1 once it has
+# torn the session down and written `failed`.
+_sandy_entry_window() {
+    _SANDY_EW_LABEL=""; _SANDY_EW_RC=""; _SANDY_EW_MSG=""
+    if _sandy_await_entries ${_SANDY_EW_ARGS[@]+"${_SANDY_EW_ARGS[@]}"}; then
+        _sandy_ew_write passed || true
+        return 0
+    fi
+    # From here the teardown must finish. _sandy_hold_session sends TERM to
+    # stop a watcher whose window is still running; once teardown has begun
+    # that TERM is ignored, and the hold waits for the verdict instead. The
+    # teardown is what makes tmux attach return, so the hold reaches its
+    # TERM while this is still running.
+    trap '' TERM
+    _sandy_ew_teardown
+    _sandy_ew_write "$(printf 'failed\t%s\t%s\t%s' "$_SANDY_EW_LABEL" "$_SANDY_EW_RC" "$_SANDY_EW_MSG")" || true
+    trap - TERM
+    return 1
+}
+# After a failed window. A daemon container keeps idling: exiting would let
+# --restart unless-stopped restart it, losing the tmpfs verdict, and the
+# client would report a crash loop. The supervisor and the --start client
+# read the verdict and turn it into exit 6. Interactively, the message goes
+# to the ordinary terminal (tmux has exited) and the launch exits 1.
+_sandy_ew_fail_exit() {
+    local _m
+    _m="$(_sandy_ew_message)"
+    sandy_err "${_m:-a feature entry exited during its startup window; see its supervisor.log}"
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then exec tail -f /dev/null; fi
+    exit 1
+}
+# Replaces the three launch tails (single-agent foreground and daemon, combo).
+# Runs the window unless it has already run (named sessions run it blocking,
+# before the session exists), then attaches or keeps the container alive.
+_sandy_hold_session() {
+    local _w="" _rc=0
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        if [ "$(_sandy_ew_state)" = pending ]; then
+            _sandy_entry_window || _sandy_ew_fail_exit
+        fi
+        exec tail -f /dev/null
+    fi
+    if [ "$(_sandy_ew_state)" = pending ]; then
+        # The watcher. It never writes to the tty (tmux owns it), and it
+        # survives user-setup's set -e and ERR trap.
+        ( set +e; trap - ERR; _sandy_entry_window ) </dev/null >>"$_SANDY_EW_FILE.log" 2>&1 &
+        _w=$!
+    fi
+    tmux attach -t sandy || _rc=$?
+    if [ -n "$_w" ]; then
+        # Still in its window (the user detached, or the agent exited): this
+        # stops it. Already tearing down: it ignores the TERM, and wait
+        # returns once `failed` is written.
+        kill -TERM "$_w" 2>/dev/null || true
+        wait "$_w" 2>/dev/null || true
+    fi
+    if [ "$(_sandy_ew_state)" = failed ]; then _sandy_ew_fail_exit; fi
+    return "$_rc"
+}
+# The `pending` write. Refuses the launch when it fails, so a session never
+# exists without the file.
+_sandy_ew_begin() {
+    if ! _sandy_ew_write pending; then
+        sandy_err "could not write $_SANDY_EW_FILE (the feature-entry startup verdict); refusing to start the session without it."
+        exit 1
+    fi
+}
+# END entry window
 
 cd "$WORKSPACE"
 
@@ -1921,12 +2068,21 @@ cd "$WORKSPACE"
 # for both, so this gate is the in-container half of the same decision, not
 # the only half.
 if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
+# The entry-window verdict starts as `pending`, before any new-session,
+# on exactly the launches that start entries (and on those with none). Headless
+# and --remote write no verdict: they exec before any tmux branch.
+if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_ew_begin; fi
 
 # Named Claude sessions come up BEFORE the pane, so `claude agents` shows them
 # and --start's readiness check (which waits for the tmux session) finds the
 # status file already written. The host sets SANDY_CLAUDE_SESSIONS_ACTIVE only
 # for interactive and --start launches; this gate is the in-container half.
+# The entry window runs BLOCKING here, before the sessions (B5 Q2): a failing
+# entry must not interrupt the resume prompts and jobs they create, and a
+# torn-down launch would send each resume prompt again next time. So it is
+# `passed` before new-session, and these launches save nothing.
 if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then
+    _sandy_entry_window || _sandy_ew_fail_exit
     _sandy_claude_sessions_up
 fi
 
@@ -1980,7 +2136,7 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
             exit 1
         }
         tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
-        exec tail -f /dev/null
+        _sandy_hold_session
     else
         # Foreground: create detached, tag the pane, THEN attach in this
         # process — the exact pattern the multi-agent path below already
@@ -2009,12 +2165,13 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
         # Do NOT `exec` the attach: this process still needs its EXIT trap
         # (the ANSI color-4 palette remap earlier in this script) to run
         # after the session ends, and `exec` replaces the shell without
-        # running EXIT traps. Plain `tmux attach -t sandy` returns instead of
-        # replacing the process — same as the multi-agent branch below —
-        # which is what lets that trap fire and restore the palette.
+        # running EXIT traps. _sandy_hold_session runs a plain `tmux attach
+        # -t sandy`, which returns instead of replacing the process — same as
+        # the multi-agent branch below — which is what lets that trap fire
+        # and restore the palette.
         _p_id="$(tmux new-session -d -P -F '#{pane_id}' -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1")"
         tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
-        tmux attach -t sandy
+        _sandy_hold_session
     fi
 else
     # --- Multi-agent launch (2-4 panes) ---
@@ -2076,12 +2233,10 @@ else
     fi
 
     tmux select-pane -t sandy.0
-    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
-        # Daemon mode: session already created detached above (-d); keep
-        # the container's main process alive without attaching. See the single-agent branch above
-        # for the full explanation.
-        exec tail -f /dev/null
-    else
-        tmux attach -t sandy
-    fi
+    # Daemon mode: the session was created detached above (-d), and the hold
+    # keeps the container's main process alive without attaching; see the
+    # single-agent branch above. The entry window starts only here, after
+    # the last split and select-pane, so a teardown never races pane
+    # creation.
+    _sandy_hold_session
 fi
