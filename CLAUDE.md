@@ -85,9 +85,7 @@ bash test/run-integration-tests.sh  # headless end-to-end (API keys); SANDY_INTE
 bash test/lint-bash32.sh            # bash-3.2 / BSD portability lint (also run by §89)
 ```
 
-Acceptance harnesses (`test/acceptance-*.sh`) run against an isolated `$SANDY_HOME` (`test/lib-isolated-home.sh`). Fixtures in a real home look exactly like real sandboxes. `docs/TESTING_PLAN.md` covers manual TUI checks.
-
-Integration-runner isolation and success rules: `docs/TESTING_PLAN.md`.
+Acceptance harnesses (`test/acceptance-*.sh`) run against an isolated `$SANDY_HOME` (`test/lib-isolated-home.sh`). Fixtures in a real home look exactly like real sandboxes. `docs/TESTING_PLAN.md` covers manual TUI checks and the integration runner's isolation and success rules.
 
 Use `--only harness,contracts` for focused feedback and `--list` for groups. Both runners write logs under the ignored workspace `.test_output/`, keeping at most three runs; `.test_output/latest/` points to the newest. `--log-dir PATH` overrides the main suite's log root; `SANDY_INTEG_LOG_DIR` overrides the integration log root, with the same rotation. CI uses `--require-tools` so a missing declared dependency is a failure. A group with skipped checks is reported as partial, not fully passed. Section numbers in the legacy host suite remain stable for incident references; removed sections point to their replacements.
 
@@ -95,12 +93,12 @@ The main runner labels each group and prints individual Python test names and ou
 
 How to write tests here:
 
-- **Assert the property, not the presence of a mechanism.** Run the thing and check the outcome, then mutation-test the guard: break it in a temp copy and confirm the check fails. Also confirm the probe actually ran, since `set -u` has silently killed probe subshells and made checks pass vacuously.
+- **Assert the property, not the presence of a mechanism.** Run the thing and check the outcome, then mutation-test the guard: break it in a scratch copy of `sandy`, never the repo (a rejected tool call once left a mutant), and confirm the check fails. Also confirm the probe actually ran, since `set -u` has silently killed probe subshells and made checks pass vacuously.
 - **Don't anchor a JSON assertion on a field's neighbours** (`"name":"X"[^}]*"relay"…`). It breaks once someone inserts a nested object between them. Use one sandbox per fixture `$SANDY_HOME`, or slice the object with `awk` `index`/`substr` written on one line. (§88b ratchets this.)
 - New sections must survive `set -euo pipefail` plus the ERR trap.
-- A check of `--print-schema` content reads the cached run in `$_SCHEMA_CACHE`; only checks of the invocation itself (§92, §93, §100, §185) or of a modified copy of `sandy` run it live.
-- Assert an agent `docker run` flag on the stub-recorded argv: add a case to the `_a6_launch` harness (§215–§225), read it with `_a6_agent_args` + `_a6_pair` (hardening: `_hardening_unmet`; proxy: §207). A grep of `sandy` matches comments and the other container; grep only for a run no stub launches (daemon, §225(2)).
-- `.test_output/latest/host.log` has a `TIMING` line per section; compare it before and after editing a slow section.
+- Schema-content checks read `$_SCHEMA_CACHE`; only invocation checks (§92, §93, §100, §185; §46 and §114(17a) via `regen-config-docs.sh`) and checks of a modified `sandy` run `--print-schema` live.
+- Assert an agent `docker run` flag on the stub-recorded argv: add an `_a6_launch` case (§215–§219, §225; unset before §220), read it with `_a6_agent_args` + `_a6_pair` (hardening: `_hardening_unmet`; proxy: §207). Grep `sandy` (comments and the other container match) only for the daemon run no stub launches (§225(2)).
+- `.test_output/latest/host.log` has per-section `TIMING` lines: compare before and after editing a slow one.
 
 ## Portability: CI is Linux/bash 5, the maintainer is macOS/bash 3.2/BSD
 
@@ -121,16 +119,15 @@ Other macOS traps: `mktemp -d` returns a symlinked path, so canonicalize it (`D=
 ## Working inside sandy (you probably are)
 
 - **Never run `tmux`, `docker`, or `sandy --start|--stop|--attach` here.** They share the live session's tmux server and kill it. Write a harness and have the user run it on the host.
-- The workspace is usually the maintainer's host checkout. Don't switch, reset or stash in it while tests may be running (one switch caused 25 false failures); branch in a `git worktree`. On the PR's branch, `gh pr merge --delete-branch` checks out `main`.
-- `.git/config`, `packed-refs`, `hooks/`, and `info/` are `:ro`, worktrees included, so:
-  - `git push -u` reports a config-write error *after a successful push*. Use `git push origin <branch>:<branch>`.
-  - `git switch -c <b> origin/main` without `--no-track` prints config-write errors and claims tracking it did not set.
-  - `git reset --hard` fails in the main checkout, whose `.github/workflows/` is protected; a worktree's is writable.
-  - `git gc`, `pack-refs`, and deleting packed refs fail.
-- `main` is protected; every change is a PR: `git fetch origin main`, then in a worktree `git switch -c <feature> --no-track origin/main` → commit → `git push origin <feature>:<feature>` → `gh pr create --head <feature> --base main`.
-- On a reported failure, first compare the host-group footer's `commit` with the branch head. Check out with `git fetch origin <b> && git switch -C <b> FETCH_HEAD`; a stale `origin/<b>` once left a reviewer on an old commit.
-- Mutation-test on a scratch copy of `sandy`, never in the repo (a rejected tool call once left a mutant).
-- 512-pid limit: one `test/run-tests.sh` at a time, no `xargs -P` fan-out (seven at once took a session down).
+- The workspace is usually the maintainer's host checkout. Don't switch, reset or stash there while tests may run (a switch once gave 25 false failures); branch in a `git worktree`. Don't run `gh pr merge --delete-branch` there: on the PR's branch it switches to `main`.
+- `.git/config`, `packed-refs`, `hooks/`, and `info/` are `:ro`, in worktrees too:
+  - `git push -u` reports a config-write error *after a successful push*. Use `git push origin <b>:<b>`.
+  - Branching from `origin/*` (`switch -c`, `checkout -b`, `worktree add -b`) needs `--no-track`, else git prints config-write errors and claims tracking.
+  - `git reset --hard` can fail in the main checkout (protected `.github/workflows/`), not in a worktree.
+  - `git gc`, `pack-refs`, and deleting packed refs fail; `git branch -D` warns harmlessly.
+- `main` is protected, so: `git fetch origin main && git worktree add --no-track -b <b> <dir> origin/main` (in a worktree: `git switch -c <b> --no-track origin/main`) → commit → `git push origin <b>:<b>` → `gh pr create --head <b> --base main`.
+- On a reported failure, compare the host-group footer's `commit` with the branch head. For the maintainer's review checkout give `git fetch origin <b> && git switch -C <b> FETCH_HEAD` (a stale `origin/<b>` once misled a reviewer); yourself, `git switch --detach FETCH_HEAD` in a worktree.
+- 512-pid limit: one `test/run-tests.sh` at a time, no `xargs -P` fan-out (seven at once killed a session).
 - Protected workspace paths (shell rc files, `.git/hooks`, `.github/workflows/`, `.vscode/`, `.sandy/`, `.claude/settings*.json`, …) are read-only in-container when they exist on the host. The full list is in SPECIFICATION.md.
 
 ## Subsystem pointers
