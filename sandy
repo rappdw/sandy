@@ -12260,16 +12260,28 @@ _sandy_entry_window() {
     trap - TERM
     return 1
 }
-# After a failed window. A daemon container keeps idling: exiting would let
-# --restart unless-stopped restart it, losing the tmpfs verdict, and the
-# client would report a crash loop. The supervisor and the --start client
-# read the verdict and turn it into exit 6. Interactively, the message goes
-# to the ordinary terminal (tmux has exited) and the launch exits 1.
+# After a failed window. A daemon container keeps idling, for a bounded
+# time: exiting at once would let --restart unless-stopped restart it, losing
+# the tmpfs verdict, and the client would report a crash loop. A supervisor
+# (sandy --start) polls the verdict every 0.25s and removes the container
+# within about a second, so the client exits 6. With NO supervisor (the
+# container came back after a host reboot or a docker restart, under its
+# restart policy) nothing ever would: the container would idle sessionless
+# forever. So after _SANDY_EW_IDLE_S seconds still alive, it exits 1, and the
+# restart policy retries the launch, as it did before 2.9.0. The container
+# cannot see whether a supervisor exists (its pid is a host-side label); the
+# supervisor's removal of the container IS the acknowledgement.
+# Interactively, the message goes to the ordinary terminal (tmux has exited)
+# and the launch exits 1.
+_SANDY_EW_IDLE_S=60
 _sandy_ew_fail_exit() {
     local _m
     _m="$(_sandy_ew_message)"
     sandy_err "${_m:-a feature entry exited during its startup window; see its supervisor.log}"
-    if [ "${SANDY_DAEMON:-0}" = "1" ]; then exec tail -f /dev/null; fi
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        sleep "$_SANDY_EW_IDLE_S" || true
+        sandy_err "no supervisor removed this container within ${_SANDY_EW_IDLE_S}s of the failed feature-entry window (it was restarted without one, e.g. after a reboot); exiting so the restart policy retries the launch."
+    fi
     exit 1
 }
 # Replaces the three launch tails (single-agent foreground and daemon, combo).
@@ -12938,6 +12950,13 @@ _sandy_ew_failure_text() {
     _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"
     printf '%s' "$_v" | tr -d '\000-\037\177'
 }
+# Print a `failed` verdict's message on stderr. The text is agent-controlled,
+# so it is printed as a printf %s ARGUMENT, never through error(): that is
+# `echo -e`, which would turn a literal backslash-033 back into a real ESC
+# after _sandy_ew_failure_text removed the control bytes.
+_sandy_ew_report() {
+    printf "${RED:-}[sandy]${NC:-} %s\n" "A feature entry exited during its startup window: $(_sandy_ew_failure_text "$1")" >&2
+}
 # Supervisor half: after `docker run -d`, poll the verdict every 0.25s, for at
 # most 120s and only while the container runs. Returns 1 on `failed`, after
 # printing the message to the daemon log (which the --start client tails) and
@@ -12952,7 +12971,7 @@ _sandy_ew_supervise() {
         case "$(_sandy_ew_classify "$_out")" in
             ready) return 0 ;;
             fatal)
-                error "A feature entry exited during its startup window: $(_sandy_ew_failure_text "$_out")"
+                _sandy_ew_report "$_out"
                 _sandy_daemon_fatal
                 return 1 ;;
         esac
@@ -13027,17 +13046,45 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # running" and block the restart. Probe the session, retrying briefly so
         # a container that is merely mid-startup (session not created yet) is not
         # misread as a zombie and reaped out from under a concurrent start.
+        #
+        # B5: "live" is the same readiness the client loop below uses
+        # (_sandy_ew_probe + _sandy_ew_classify), not has-session alone, so a
+        # second --start during the first one's feature-entry window cannot
+        # report ready while the verdict is still pending. ready -> 0. fatal
+        # (the entry failed in that window) -> 6, exactly what the first
+        # --start reports; its supervisor removes the container, so nothing is
+        # reaped here. wait with a session (pending) -> keep polling, within
+        # the client loop's own 600s budget, then 8. wait with NO session for
+        # 5 polls -> the zombie path below, as before.
         _sandy_session_live=0
-        for _sandy_probe in 1 2 3 4 5; do
-            if docker exec -u "$(id -u)" "$_sandy_daemon_existing" tmux has-session -t sandy >/dev/null 2>&1; then
-                _sandy_session_live=1
-                break
+        _sandy_d6_nosess=0
+        _sandy_d6_waited=0
+        _sandy_d6_out=""
+        while [ "$_sandy_d6_waited" -lt 600 ]; do
+            _sandy_d6_out="$(_sandy_ew_probe "$_sandy_daemon_existing")"
+            case "$(_sandy_ew_classify "$_sandy_d6_out")" in
+                ready) _sandy_session_live=1; break ;;
+                fatal)
+                    _sandy_ew_report "$_sandy_d6_out"
+                    error "The daemon session for $WORK_DIR is being torn down; run 'sandy --start' again once the entry is fixed."
+                    exit 6 ;;
+            esac
+            if [ -z "$_sandy_d6_out" ]; then
+                _sandy_d6_nosess=$((_sandy_d6_nosess + 1))
+                [ "$_sandy_d6_nosess" -ge 5 ] && break
+            else
+                _sandy_d6_nosess=0
             fi
             sleep 1
+            _sandy_d6_waited=$((_sandy_d6_waited + 1))
         done
         if [ "$_sandy_session_live" = 1 ]; then
             info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
             exit 0
+        fi
+        if [ -n "$_sandy_d6_out" ]; then
+            error "Daemon session for $WORK_DIR exists but its feature-entry window never finished within 600s."
+            exit 8
         fi
         warn "Found a daemon container with no live session for $WORK_DIR (agent exited; container ${_sandy_daemon_existing:0:12}) — reaping it and starting fresh."
         "$0" --stop --workspace "$WORK_DIR" >/dev/null 2>&1 || true
@@ -13262,7 +13309,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # 1 remains the catch-all for anything not classified above.
         _sandy_start_rc=1
         if [ "$_sandy_ew_fatal" = "true" ]; then
-            error "A feature entry exited during its startup window: $(_sandy_ew_failure_text "$_sandy_ew_out")"
+            _sandy_ew_report "$_sandy_ew_out"
             _sandy_start_rc=6
         elif [ "$_sandy_sup_fatal" = "true" ]; then
             error "Daemon startup was refused before it could become ready (see the guidance above)."

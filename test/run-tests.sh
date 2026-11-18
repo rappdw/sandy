@@ -4531,8 +4531,11 @@ check "--start verifies inner-session liveness before 'already running' (#47/D6)
     grep -q '_sandy_session_live' "$_S73"
 check "bare sandy verifies inner-session liveness before the DEC-B block" \
     grep -q '_sandy_bare_live' "$_S73"
-check "restart probes the session with a mid-startup retry (not a one-shot)" \
-    bash -c 'grep -A6 "_sandy_session_live=0" "$1" | grep -q "tmux has-session -t sandy"' -- "$_S73"
+# B5: the probe is now the entry-window readiness probe (session AND verdict),
+# polled, with five no-session polls before a container counts as a zombie;
+# §226(W10a)/(W10b) run that loop for real.
+check "restart probes the session with a mid-startup retry (not a one-shot): the readiness probe, polled, 5 no-session polls before the zombie path" \
+    bash -c 'grep -A20 "_sandy_session_live=0" "$1" | grep -qF "_sandy_ew_probe \"\$_sandy_daemon_existing\"" && grep -A40 "_sandy_session_live=0" "$1" | grep -qF "[ \"\$_sandy_d6_nosess\" -ge 5 ] && break"' -- "$_S73"
 check "a dead-session daemon zombie is reaped via \$0 --stop (both --start + bare)" \
     bash -c '[ "$(grep -c "\"\$0\" --stop --workspace \"\$WORK_DIR\" >/dev/null 2>&1 || true" "$1")" -ge 2 ]' -- "$_S73"
 
@@ -26860,6 +26863,27 @@ sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S226_TMPL" >> "$_S2
 awk '/^cd "\$WORKSPACE"$/{f=1} f' "$_S226_TMPL" > "$_S226_D/tail.sh"
 sed -n '/^# BEGIN entry window host$/,/^# END entry window host$/p' "$SANDY_SCRIPT" > "$_S226_D/host.sh"
 awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S226_D/host.sh"
+# The REAL info/error (echo -e): a verdict message must never pass through them.
+grep -E '^(info|error)\(\) \{' "$SANDY_SCRIPT" >> "$_S226_D/host.sh"
+# A forged verdict: literal backslash-033 text (inert unless something runs it
+# through echo -e) and real ESC/BEL bytes (inert only if stripped).
+_S226_FORGED="$(printf 'failed\tsandy-entry w\t3\tforged \\033]52;c;ZQ==\\007 \033]52;c;ZQ==\007 \033[2J end')"
+# nocontrol.py FILE [STRIP...]: no ESC or BEL byte in FILE once each STRIP
+# literal (sandy's own colour codes) has been removed.
+_S226_NC="$_S226_D/nocontrol.py"
+cat > "$_S226_NC" <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+for literal in sys.argv[2:]:
+    data = data.replace(literal.encode().decode("unicode_escape").encode("latin-1"), b"")
+bad = [b for b in (b"\x1b", b"\x07") if b in data]
+if bad:
+    print("control bytes present:", bad, data[-400:])
+    sys.exit(1)
+if b"forged" not in data:
+    print("the forged message never reached the output:", data[-400:])
+    sys.exit(1)
+PY
 # The supervisor tail of the launch: everything after the agent's docker run
 # (and its tty restore), to the script's last line.
 awk 'index($0,"docker run \"${RUN_FLAGS[@]}\" \"$IMAGE_NAME\" \"$@\" || _run_rc=$?")==1{f=1;next} f&&index($0,"_sandy_tty_restore"){next} f' "$SANDY_SCRIPT" > "$_S226_D/suptail.sh"
@@ -26910,7 +26934,10 @@ def on_term(sig, frame):
     with open(log, "a") as f:
         f.write("pane exit\n")
     os._exit(0)
-signal.signal(signal.SIGTERM, on_term)
+if delay < 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+else:
+    signal.signal(signal.SIGTERM, on_term)
 with open(ready + ".tmp", "w") as f:
     f.write(str(os.getpid()))
 os.rename(ready + ".tmp", ready)
@@ -26961,6 +26988,11 @@ _S226_PANE='( python3 "$_S226_D/pane.py" "$S226_LOG" "$HOME/pane.ready" "${S226_
 _i=0; while [ ! -s "$HOME/pane.ready" ] && [ "$_i" -lt 50 ]; do sleep 0.1; _i=$((_i + 1)); done
 cat "$HOME/pane.ready" > "$HOME/pane.pid"; cat "$HOME/pane.ready" > "$S226_PANES"'
 
+# The launch tail, run the way user-setup runs it (set -e), single agent.
+_S226_TAILRUN='_sandy_is_headless=false; _SANDY_IS_MULTI=false; _SANDY_AGENTS=(claude); SANDY_AGENT=claude
+_sandy_build_agent_cmd() { echo fakeagent; }
+set -e
+. "$_S226_D/tail.sh"'
 if command -v flock >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
     # --- W1: teardown order -------------------------------------------------
     _s226_case w1 '#!/bin/sh
@@ -27032,15 +27064,39 @@ echo "rc=$_r elapsed=$(( $(date +%s) - _t0 )) state=$(_sandy_ew_state)"'
                 [ "$i" -lt 10 ] || { echo "watcher lock still held 1s after the hold returned"; exit 1; }
                 sleep 0.1; i=$((i + 1))
             done' _ "$_S226_D/w7b"
+    # --- W1c: the 3s grace bound ------------------------------------------
+    _s226_case w1c '' "S226_PANE_DELAY=-1; $_S226_PANE"'
+_t0=$SECONDS; _sandy_ew_teardown; echo "elapsed=$((SECONDS - _t0))"'
+    check "§226(W1c) a pane that ignores TERM gets kill-server after the 3s grace, not before and not much later (mutations: no wait; a longer bound)" \
+        bash -c 'e="$(sed -n "s/^elapsed=//p" "$1/out")"; [ -n "$e" ] && [ "$e" -ge 3 ] && [ "$e" -le 5 ] && grep -q "^kill-server" "$1/log" || { cat "$1/out" "$1/log"; exit 1; }' _ "$_S226_D/w1c"
+
+    # --- W4c: a daemon whose window failed idles, then exits when unsupervised
+    _S226_T0=$(date +%s)
+    _s226_case w4c '#!/bin/sh
+exit 3' '_SANDY_EW_IDLE_S=2; SANDY_DAEMON=1; '"$_S226_TAILRUN"
+    _S226_EL=$(( $(date +%s) - _S226_T0 ))
+    check "§226(W4c) daemon tail, entry exits 3: the pane exists, is torn down, and the container IDLES (~2s here, 60s in production) instead of exiting, then exits 1 naming the missing supervisor (mutations: exit at once; idle forever; got ${_S226_EL}s)" \
+        bash -c '[ "$(cat "$1/rc")" = 1 ] && [ "$2" -ge 2 ] && grep -q "^new-session" "$1/log" && grep -q "^kill-server" "$1/log" && ! grep -q "^exec tail" "$1/log" \
+            && grep -q "sandy-entry w exited 3 within 5s" "$1/err" && grep -q "no supervisor removed this container within 2s" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w4c" "$_S226_EL"
+
+    # --- W8b: named sessions, entry fails in the blocking window -----------
+    _s226_case w8b '#!/bin/sh
+exit 3' 'SANDY_CLAUDE_SESSIONS_ACTIVE=1
+_sandy_claude_sessions_up() { printf "sessions_up\n" >> "$S226_LOG"; }
+'"$_S226_TAILRUN"
+    check "§226(W8b) named sessions active and the entry fails in the blocking window: no session comes up, no new-session, exit 1 with the message (mutation: the window failure ignored)" \
+        bash -c '[ "$(cat "$1/rc")" = 1 ] && ! grep -q "^sessions_up" "$1/log" && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry w exited 3" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w8b"
 else
-    skip "§226(W1-W3, W7) entry-window behaviour: needs flock, python3 and pgrep on this host"
+    skip "§226(W1-W4c, W7, W8b) entry-window behaviour: needs flock, python3 and pgrep on this host"
 fi
 
+# --- W7c: the container prints a forged verdict inertly ---------------------
+_s226_case w7c '' 'printf "%s\n" "$_S226_FORGED" > "$HOME/.sandy-entry-window"
+_sandy_ew_fail_exit'
+check "§226(W7c) a forged failed verdict (literal backslash-033 text and real ESC/BEL bytes) prints on the user terminal with no control byte beyond sandy_err's own colour (mutation: the container-side strip dropped)" \
+    bash -c '[ "$(cat "$1/rc")" = 1 ] && python3 "$2" "$1/err" "\\033[0;31m" "\\033[0m"' _ "$_S226_D/w7c" "$_S226_NC"
+
 # --- W4: pending exists before new-session, and a failed write refuses -------
-_S226_TAILRUN='_sandy_is_headless=false; _SANDY_IS_MULTI=false; _SANDY_AGENTS=(claude); SANDY_AGENT=claude
-_sandy_build_agent_cmd() { echo fakeagent; }
-set -e
-. "$_S226_D/tail.sh"'
 _s226_case w4 '' "SANDY_DAEMON=1; $_S226_TAILRUN"
 check "§226(W4a) daemon launch tail, no entries: the stub sees new-session only once the verdict is pending, and the window then writes passed before the container idles" \
     bash -c '
@@ -27125,9 +27181,9 @@ _s226_sup() {
         trap - ERR; set +e
         export PATH="$_S226_D/bin6:$PATH" S226_LOG="$h/log" S226_VFILE="$h/verdict" S226_SESSION="$3"
         SANDY_DAEMON_LOG="$h/daemon.log"
-        error() { printf 'ERROR: %s\n' "$*" >&2; }
-        info() { :; }
+        RED=""; NC=""; GREEN=""
         . "$_S226_D/host.sh"
+        info() { :; }
         if [ "$4" = fn ]; then
             _sandy_ew_supervise c226; exit $?
         fi
@@ -27145,6 +27201,9 @@ _s226_sup() {
 _s226_sup w6a "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 0 fn
 check "§226(W6a) supervisor poll, verdict failed: returns non-zero, writes the .fatal marker the --start client exits 6 on, and names the entry (mutation: _sandy_daemon_fatal skipped)" \
     bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "sandy-entry w exited 3" "$1/err"' _ "$_S226_D/w6a"
+_s226_sup w6d "$_S226_FORGED" 0 fn
+check "§226(W6d) supervisor poll, forged failed verdict: the daemon log gets the message with no ESC or BEL byte (mutations: printed through error(), which is echo -e; the host-side strip dropped)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && python3 "$2" "$1/err"' _ "$_S226_D/w6d" "$_S226_NC"
 _s226_sup w6b passed 1 fn
 check "§226(W6b) supervisor poll, verdict passed with the session up: returns 0 and writes no .fatal" \
     bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S226_D/w6b"
@@ -27152,9 +27211,64 @@ _s226_sup w6c "$(printf 'failed\tsandy-entry w\t3\tboom')" 0 tail
 check "§226(W6c) the real supervisor tail, verdict failed: it exits non-zero BEFORE its 30s watch loop, and its EXIT trap removes the container (mutation: the poll's failure ignored, which falls into the watch loop and exits 0)" \
     bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "^docker rm -f c226$" "$1/log" && ! grep -q "c226 tmux has-session" "$1/log" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w6c"
 
+# --- W9/W10: the REAL --start client, against stub docker and nohup ---------
+# nohup is the supervisor fork, so a stub nohup starts nothing; it records the
+# "container" as up. docker ps reports the container once that marker exists
+# (or from the start, for the already-running cases); docker exec answers the
+# verdict probe from $S226_VFILE as if the session were up.
+mkdir -p "$_S226_D/bin9"
+cat > "$_S226_D/bin9/docker" <<'S226D9'
+#!/bin/bash
+printf 'docker %s\n' "$*" >> "$S226_LOG"
+case "$1" in
+    ps) [ -e "$S226_UP" ] && echo c226abcdef12 ;;
+    inspect) case "$*" in *RestartCount*) echo 0 ;; *State.Running*) echo true ;; esac ;;
+    exec) case "$*" in *sandy-entry-window*) cat "$S226_VFILE" ;; *sandy-sessions*) echo inactive ;; *has-session*) exit 0 ;; esac ;;
+    logs) echo "container log" ;;
+esac
+exit 0
+S226D9
+printf '#!/bin/sh\necho nohup >> "$S226_LOG"\n: > "$S226_UP"\nexit 0\n' > "$_S226_D/bin9/nohup"
+chmod +x "$_S226_D/bin9/docker" "$_S226_D/bin9/nohup"
+# _s226_client <name> <verdict> <already-up 0|1> [<verdict after 2s>]
+_s226_client() {
+    local h="$_S226_D/$1" pid i=0 t0
+    rm -rf "$h"; mkdir -p "$h/ws" "$h/home"; : > "$h/log"
+    printf '%s\n' "$2" > "$h/verdict"
+    [ "$3" = 1 ] && : > "$h/up"
+    if [ -n "${4:-}" ]; then ( sleep 2; printf '%s\n' "$4" > "$h/verdict.n"; mv -f "$h/verdict.n" "$h/verdict" ) & fi
+    t0=$(date +%s)
+    ( cd "$h/ws" && exec env -i PATH="$_S226_D/bin9:$PATH" HOME="$h/home" SANDY_HOME="$h/home/.sandy" TERM=dumb \
+        S226_LOG="$h/log" S226_UP="$h/up" S226_VFILE="$h/verdict" bash "$SANDY_SCRIPT" --start --workspace "$h/ws" ) \
+        </dev/null >"$h/out" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then
+        pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+        echo timeout > "$h/rc"
+    else
+        local rc=0; wait "$pid" || rc=$?; echo "$rc" > "$h/rc"
+    fi
+    echo $(( $(date +%s) - t0 )) > "$h/elapsed"
+    return 0
+}
+_s226_client w9a "$_S226_FORGED" 0
+check "§226(W9a) the --start client, entry failed in its window: exit 6 (not 7, not a hang), the message is shown with no ESC/BEL byte, and the container is removed (mutations: failed mapped to 7; fatal ignored; message through error())" \
+    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "A feature entry exited during its startup window: forged" "$1/out" && grep -q "^docker rm -f c226abcdef12" "$1/log" && python3 "$2" "$1/out" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S226_D/w9a" "$_S226_NC"
+_s226_client w9b pending 0 passed
+check "§226(W9b) the --start client, verdict pending then passed after 2s: exit 0, and not before the verdict passed (mutation: pending counted as ready)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S226_D/w9b"
+_s226_client w10a pending 1 passed
+check "§226(W10a) a second --start while the running session is still in its window: it waits for passed, then exits 0 as already running, and starts nothing (mutation: has-session alone counted as live)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] && grep -q "already running" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S226_D/w10a"
+_s226_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
+check "§226(W10b) a second --start while the running session's window has failed: exit 6 with the message, and starts nothing" \
+    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "sandy-entry w exited 3" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S226_D/w10b"
+unset -f _s226_client
+
 unset -f _s226_case _s226_kill_tree _s226_sup _s226_w5_verdict
 rm -rf "$_S226_D"
-unset _S226_D _S226_TMPL _S226_PANE _S226_TAILRUN _S226_W5
+unset _S226_D _S226_TMPL _S226_PANE _S226_TAILRUN _S226_W5 _S226_FORGED _S226_T0 _S226_EL _S226_NC
 
 # BEGIN SUMMARY
 # ============================================================

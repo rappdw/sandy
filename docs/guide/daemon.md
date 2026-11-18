@@ -41,7 +41,11 @@ booting while the entries settle, so the session is usable when `--start`
 returns `0`. If an entry starts and then exits inside the window, the session
 is torn down and `--start` exits `6` (it was `7`, "crash-looping", before
 2.9.0); nothing is left running. An entry that cannot start at all (missing,
-not executable) still exits `7`. See
+not executable) still exits `7`. A second `--start` during the first one's
+window waits for the same verdict rather than reporting "already running" at
+once. A daemon container that comes back on its own (after a reboot or a
+Docker restart, with no `sandy --start` watching it) and whose entry fails
+idles for 60s, then exits so Docker's restart policy tries again. See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,

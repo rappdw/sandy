@@ -2009,16 +2009,28 @@ _sandy_entry_window() {
     trap - TERM
     return 1
 }
-# After a failed window. A daemon container keeps idling: exiting would let
-# --restart unless-stopped restart it, losing the tmpfs verdict, and the
-# client would report a crash loop. The supervisor and the --start client
-# read the verdict and turn it into exit 6. Interactively, the message goes
-# to the ordinary terminal (tmux has exited) and the launch exits 1.
+# After a failed window. A daemon container keeps idling, for a bounded
+# time: exiting at once would let --restart unless-stopped restart it, losing
+# the tmpfs verdict, and the client would report a crash loop. A supervisor
+# (sandy --start) polls the verdict every 0.25s and removes the container
+# within about a second, so the client exits 6. With NO supervisor (the
+# container came back after a host reboot or a docker restart, under its
+# restart policy) nothing ever would: the container would idle sessionless
+# forever. So after _SANDY_EW_IDLE_S seconds still alive, it exits 1, and the
+# restart policy retries the launch, as it did before 2.9.0. The container
+# cannot see whether a supervisor exists (its pid is a host-side label); the
+# supervisor's removal of the container IS the acknowledgement.
+# Interactively, the message goes to the ordinary terminal (tmux has exited)
+# and the launch exits 1.
+_SANDY_EW_IDLE_S=60
 _sandy_ew_fail_exit() {
     local _m
     _m="$(_sandy_ew_message)"
     sandy_err "${_m:-a feature entry exited during its startup window; see its supervisor.log}"
-    if [ "${SANDY_DAEMON:-0}" = "1" ]; then exec tail -f /dev/null; fi
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        sleep "$_SANDY_EW_IDLE_S" || true
+        sandy_err "no supervisor removed this container within ${_SANDY_EW_IDLE_S}s of the failed feature-entry window (it was restarted without one, e.g. after a reboot); exiting so the restart policy retries the launch."
+    fi
     exit 1
 }
 # Replaces the three launch tails (single-agent foreground and daemon, combo).

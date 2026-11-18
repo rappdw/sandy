@@ -146,7 +146,12 @@ else:
     # B5: the feature-entry startup window runs alongside the agent. Measured
     # with a real image and a real tmux; the agent is a stand-in (the project
     # image replaces claude) that records when its pane started.
-    ENTRY_FAIL_START_BOUND = 8   # seconds, design B5 section 8
+    # Design B5 section 8: --start reports the failure (exit 6) within 8s.
+    # Measured from when the agent's pane STARTED, not from the invocation, so
+    # host-side setup (config, image freshness, network, proxy; slow on
+    # macOS) is excluded: entry exits at +2s, the supervisor poll and the
+    # teardown (<=3s grace) follow.
+    ENTRY_FAIL_START_BOUND = 8
 
     def entry_window_fixture(self, entry_body):
         project = self.home / 'entrywin'
@@ -222,20 +227,22 @@ else:
                              'the agent must start while the window is still open')
         print('PASS entry window: interactive failure tears down, exits 1, message after tmux', flush=True)
         # (2) --start with the same entry: exit 6, quickly, and nothing left.
-        t0 = time.time()
+        (project / '.agent-started').unlink(missing_ok=True)
         run = subprocess.run(['bash', str(ROOT / 'sandy'), '--start', '--workspace', str(project)],
                              env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
-        elapsed = time.time() - t0
+        done = time.time()
+        self.assertTrue((project / '.agent-started').exists(), 'the agent pane never started under --start')
+        elapsed = done - int((project / '.agent-started').read_text())
         (self.logs / 'entry-window-start-fail.log').write_text(run.stdout + run.stderr)
         self.assertEqual(run.returncode, 6, run.stdout[-3000:] + run.stderr[-3000:])
         self.assertIn(message, run.stdout + run.stderr)
-        self.assertLess(elapsed, self.ENTRY_FAIL_START_BOUND, 'took %.1fs' % elapsed)
+        self.assertLess(elapsed, self.ENTRY_FAIL_START_BOUND, 'took %.1fs after the agent started' % elapsed)
         for _ in range(15):
             if not self.workspace_containers(project):
                 break
             time.sleep(1)
         self.assertEqual(self.workspace_containers(project), [], 'a failed --start left a container')
-        print('PASS entry window: --start failure exits 6 in %.1fs and leaves nothing' % elapsed, flush=True)
+        print('PASS entry window: --start failure exits 6 %.1fs after the agent started, and leaves nothing' % elapsed, flush=True)
         # (3) --start with an entry that stays up: exit 0, the verdict is
         # passed, and the window ended at least 4s after the agent started.
         project = self.entry_window_fixture('exec sleep 600\n')
