@@ -30,9 +30,26 @@ and the bypass-permissions warning. The trust and first-run answers are also
 written inside the container, so the host does not need `node` (before #505 a
 host without `node` skipped the trust step silently).
 
-One limit: `--start` reports ready as soon as the session exists. It does not
-yet check that the agent got past every dialog, so after changing
-credentials or Claude Code versions, `sandy --attach` once to look.
+One limit: `--start` reports ready as soon as the session exists and every
+feature entry has passed its 5s startup window. It does not yet check that the
+agent got past every dialog, so after changing credentials or Claude Code
+versions, `sandy --attach` once to look.
+
+**Feature entries and readiness (2.9.0).** A feature's supervised entry gets a
+5s startup window, which now runs alongside the agent: the agent is already
+booting while the entries settle, so the session is usable when `--start`
+returns `0`. If an entry starts and then exits inside the window, the session
+is torn down and `--start` exits `6` (it was `7`, "crash-looping", before
+2.9.0); nothing is left running. An entry that cannot start at all (missing,
+not executable) still exits `7`. A second `--start` during the first one's
+window waits for the same verdict rather than reporting "already running" at
+once. A daemon container that comes back on its own (after a reboot or a
+Docker restart, with no `sandy --start` watching it) and whose entry fails
+idles for 60s, then exits so Docker's restart policy tries again; the next
+`sandy --start` for that workspace sees no supervisor behind it, removes it and
+starts a fresh session (with a supervisor still alive, it exits `6` instead).
+See
+[Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,
 `3` = you detached cleanly and the session is still running, `4` = no such

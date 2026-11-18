@@ -2187,7 +2187,7 @@ SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connec
 SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. Since 1.12.0 this also covers SANDY_CLAUDE_AUTH=profile (#252): the ephemeral copy of the Console profile has its refresh_token stripped (the host profile is never touched) and cred_mode becomes profile-access-only; a strip that cannot be performed or verified mounts NO profile at all. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty, and as of 2.4.0 (#380) it is keyed on a DECLARED NEED rather than on any entry: accept iff a SELECTED feature manifest declares `"receives": ["cross_session"]` AND this is not a headless (-p), --remote or --provision run (none of those leave a session for anything to deliver into), else refuse. An entry alone, with no feature declaring the need, resolves refuse. (Pre-2.6.0 sandy also accepted on the strength of a feature entry alone -- announced for removal in README's Deprecated table in 2.5.0 (#382) and removed in 2.6.0; see CLAUDE.md "Cross-session inbound".) A declared need is independent of whether any entry process runs at all -- `receives` is its own, separate, privileged statement of what a feature needs to receive, decoupled from whether that feature ships an `entry`. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn) -- unchanged, whichever default path resolved it. Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound, with cross_session_inbound_source (one of explicit, feature:<name> or default) naming WHY. See docs/security/CROSS_SESSION_INBOUND.md.
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
-SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354) -- setting it from the environment or any config file is a HARD ERROR naming the replacement (declare the executable as an 'entry' in a feature manifest). The INTERNAL CHANNEL it later served -- carrying the relay-designated entry's path from host to container-side supervisor -- was itself removed in 2.6.0 (#382, decisions 4-5): the host now passes every adopted entry to the container only via SANDY_FEATURE_ENTRIES (internal, no metadata row; see 'feature_entries' below), and no entry is designated any more -- every entry is supervised and reported identically. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Every entry's state (.state, supervisor.log) lives at its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature> and exported to that entry's own process as SANDY_FEATURE_STATE -- an entry reads its own directory from that variable rather than constructing the path, uniform across every entry. Env contract: SANDY_FEATURE_STATE, SANDY_AGENT, SANDY_WORKSPACE. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once. DOCUMENTED EXCEPTION: a stale image predating per-feature entries (a deferred build per #218, or any other image built before the sandy.feature_entries=1 Dockerfile label existed) knows only the removed SANDY_HANDOFF_RELAY channel and so starts NONE of the entries -- sandy warns at launch, naming every one, and --print-state reports them all as state absent. There is no runtime toggle to stop them: SANDY_RELAY is a HARD ERROR as of 2.6.0 (see its own row below) with no per-feature replacement, so every adopted entry always runs. Reported in /etc/sandy-session.json as feature_entries.<feature>.{path} -- schema_version 4 (2.6.0, #382, decisions 1-2): relay{} itself, and its two companions relay_alias and disabled_by, are gone from both the marker and --print-state -- and live in --print-state as feature_entries.<feature>.state (every entry, identically). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
+SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354) -- setting it from the environment or any config file is a HARD ERROR naming the replacement (declare the executable as an 'entry' in a feature manifest). The INTERNAL CHANNEL it later served -- carrying the relay-designated entry's path from host to container-side supervisor -- was itself removed in 2.6.0 (#382, decisions 4-5): the host now passes every adopted entry to the container only via SANDY_FEATURE_ENTRIES (internal, no metadata row; see 'feature_entries' below), and no entry is designated any more -- every entry is supervised and reported identically. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Every entry's state (.state, supervisor.log) lives at its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature> and exported to that entry's own process as SANDY_FEATURE_STATE -- an entry reads its own directory from that variable rather than constructing the path, uniform across every entry. Env contract: SANDY_FEATURE_STATE, SANDY_AGENT, SANDY_WORKSPACE. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once, and since 2.9.0 (B5) it runs alongside the agent, after the panes exist: an entry that starts and then exits non-zero inside it tears the session down (interactive: exit 1; --start: exit 6, was 7). DOCUMENTED EXCEPTION: a stale image predating per-feature entries (a deferred build per #218, or any other image built before the sandy.feature_entries=1 Dockerfile label existed) knows only the removed SANDY_HANDOFF_RELAY channel and so starts NONE of the entries -- sandy warns at launch, naming every one, and --print-state reports them all as state absent. There is no runtime toggle to stop them: SANDY_RELAY is a HARD ERROR as of 2.6.0 (see its own row below) with no per-feature replacement, so every adopted entry always runs. Reported in /etc/sandy-session.json as feature_entries.<feature>.{path} -- schema_version 4 (2.6.0, #382, decisions 1-2): relay{} itself, and its two companions relay_alias and disabled_by, are gone from both the marker and --print-state -- and live in --print-state as feature_entries.<feature>.state (every entry, identically). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
 SANDY_RELAY|bool|||1.11.0|deprecated|REMOVED in 2.6.0 (#382) after its 2.5.0 announcement: setting it from ANY source (environment, host config or a workspace .sandy/config), to any value, is a HARD ERROR naming the replacement -- add the sandbox to a feature manifest's "sandboxes": {"exclude": [...]}. There is deliberately no per-feature off switch and no replacement key. The key stays in the passive tier only so the loader recognizes it and fails rather than silently ignoring it as unknown.
 SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
 SANDY_GH_ACCOUNT|string||^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$|2.9.0|stable|Which forwarded gh account is active in the container. Sandy forwards every account the host's gh is logged in to; without this it picks: the only account; else the account named like origin's owner; else the first account GitHub says can push to origin (one API call per account at launch -- what an org-owned repo needs, since no account is named like the org); else the host's active gh account. Chosen on the host at launch, recorded in the session marker as github{account,reason}, and shown by sandy --accounts. The push check is skipped with SANDY_OFFLINE=1. Set it where more than one account can push and the choice is a preference, or host-wide so switching the host's active gh account does not change sandboxes. A name that is not one of the host's accounts warns and falls back to that automatic choice. Passive-safe: it only chooses among tokens already forwarded.
@@ -12123,8 +12123,12 @@ _sandy_await_entries() {
                 case "$_v" in
                     already-running|rc=0) ;;   # settled: drop from the pending set
                     rc=*)
-                        sandy_err "$_label exited ${_v#rc=} within 5s of starting, on every launch this reproduces. A feature entry that cannot stay up fails the session; see $_st/supervisor.log for its own output."
-                        exit 1 ;;
+                        # Reported, not printed: the caller decides where the
+                        # message goes (B5: the watcher runs while tmux owns the
+                        # terminal, so it must never write to the tty itself).
+                        _SANDY_EW_LABEL="$_label"; _SANDY_EW_RC="${_v#rc=}"
+                        _SANDY_EW_MSG="$_label exited ${_v#rc=} within 5s of starting, on every launch this reproduces. A feature entry that cannot stay up fails the session; see $_st/supervisor.log for its own output."
+                        return 1 ;;
                     *) _next+=("$_pair") ;;
                 esac
             else
@@ -12144,8 +12148,12 @@ _sandy_await_entries() {
 }
 
 # ---- resolve SANDY_FEATURE_ENTRIES and start each, identically (#382) ----
+# B5: this only STARTS the entries. Their startup window (_sandy_await_entries,
+# over _SANDY_EW_ARGS) runs later, alongside the agent, from
+# _sandy_entry_window below.
 _sandy_start_entries() {
-    local _tok _f _p _root="${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}" _wait_args=()
+    local _tok _f _p _root="${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}"
+    _SANDY_EW_ARGS=()
     [ -n "${SANDY_FEATURE_ENTRIES:-}" ] || return 0
     for _tok in $SANDY_FEATURE_ENTRIES; do
         [ -n "$_tok" ] || continue
@@ -12157,11 +12165,171 @@ _sandy_start_entries() {
         _f="${_tok%%=*}"; _p="${_tok#*=}"
         _sandy_supervise_entry "sandy-entry $_f" "$_p" "$_root/$_f" \
             "$HOME/.sandy-entry-$_f.lock" "$_root/$_f"
-        _wait_args+=("$_root/$_f=sandy-entry $_f")
+        _SANDY_EW_ARGS+=("$_root/$_f=sandy-entry $_f")
     done
-    _sandy_await_entries ${_wait_args[@]+"${_wait_args[@]}"}
     sandy_log "Feature entries requested (${SANDY_FEATURE_ENTRIES}); outcome (started vs. already running) is in each entry's own supervisor.log"
 }
+
+# BEGIN entry window
+# ---- the startup window runs ALONGSIDE the agent (B5, decision D1 = d) ----
+#
+# Until 2.9.0 the window above ran before the first pane existed, so every
+# launch with a long-running entry waited the full 5s before the agent even
+# started. It now runs after the panes exist. Every entry still gets at least
+# 5s; the agent boots during them instead of after them.
+#
+# The result is a VERDICT FILE, $HOME/.sandy-entry-window, on the /home/sandy
+# tmpfs: container-only (the host never writes it) and fresh on every
+# container start, so a verdict from an earlier container cannot exist.
+#   pending                         written BEFORE the first new-session,
+#                                   in every interactive or daemon launch,
+#                                   with or without entries; a launch whose
+#                                   write fails refuses before tmux.
+#   passed                          the window ended with no non-zero first
+#                                   exit. Final.
+#   failed<TAB>label<TAB>rc<TAB>msg written only AFTER teardown has finished,
+#                                   so "failed" also means "the agents are
+#                                   gone; docker rm -f is safe".
+# The agent can forge it (same uid). It is a report, like .sandy-sessions.tsv:
+# it decides an exit code, never what runs. Every writer goes through a temp
+# file and mv, so a reader never sees a torn verdict.
+_SANDY_EW_FILE="$HOME/.sandy-entry-window"
+_sandy_ew_write() {
+    local _t
+    _t="$(mktemp "$_SANDY_EW_FILE.XXXXXX" 2>/dev/null)" || return 1
+    if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$_SANDY_EW_FILE" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$_t" 2>/dev/null || true
+    return 1
+}
+# The verdict's first line: only from a regular file, at most 4096 bytes (the
+# agent can replace it, and a FIFO would block a plain read forever).
+_sandy_ew_line() {
+    if [ -f "$_SANDY_EW_FILE" ] && [ ! -p "$_SANDY_EW_FILE" ]; then
+        head -c 4096 "$_SANDY_EW_FILE" 2>/dev/null | head -n 1
+    fi
+    return 0
+}
+# The verdict's first field (pending | passed | failed), or empty.
+_sandy_ew_state() {
+    local _v
+    _v="$(_sandy_ew_line)"
+    printf '%s' "${_v%%$'\t'*}"
+}
+# The failure message (fourth field), reduced to printable ASCII (other bytes
+# become ?): the agent can write this file, it is printed on the user's
+# terminal, and UTF-8 C1 controls (U+009B, U+009D) act like ESC there.
+_sandy_ew_message() {
+    local _v
+    _v="$(_sandy_ew_line)"
+    _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"
+    printf '%s' "$_v" | LC_ALL=C tr -c '\040-\176' '?'
+}
+# Teardown, in this order (B5 section 2): TERM each pane's process group (the
+# signal docker stop and --stop send, so the agent's own exit handlers run);
+# wait up to 3s for the groups to empty; then kill-server, which HUPs whatever
+# is left (an exit pause, a teammate pane). Runs with the agent's uid, inside
+# the container; nothing on the host signals the agent.
+_sandy_ew_teardown() {
+    local _pids _p _i=0 _alive
+    _pids="$(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null || true)"
+    for _p in $_pids; do
+        case "$_p" in ''|*[!0-9]*) continue ;; esac
+        kill -TERM -- "-$_p" 2>/dev/null || kill -TERM "$_p" 2>/dev/null || true
+    done
+    while [ "$_i" -lt 30 ]; do
+        _alive=0
+        for _p in $_pids; do
+            case "$_p" in ''|*[!0-9]*) continue ;; esac
+            if kill -0 -- "-$_p" 2>/dev/null || kill -0 "$_p" 2>/dev/null; then _alive=1; fi
+        done
+        [ "$_alive" = 0 ] && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    tmux kill-server 2>/dev/null || true
+}
+# The window itself. Returns 0 once it has written `passed`, 1 once it has
+# torn the session down and written `failed`.
+_sandy_entry_window() {
+    _SANDY_EW_LABEL=""; _SANDY_EW_RC=""; _SANDY_EW_MSG=""
+    if _sandy_await_entries ${_SANDY_EW_ARGS[@]+"${_SANDY_EW_ARGS[@]}"}; then
+        _sandy_ew_write passed || true
+        return 0
+    fi
+    # From here the teardown must finish. _sandy_hold_session sends TERM to
+    # stop a watcher whose window is still running; once teardown has begun
+    # that TERM is ignored, and the hold waits for the verdict instead. The
+    # teardown is what makes tmux attach return, so the hold reaches its
+    # TERM while this is still running.
+    trap '' TERM
+    _sandy_ew_teardown
+    _sandy_ew_write "$(printf 'failed\t%s\t%s\t%s' "$_SANDY_EW_LABEL" "$_SANDY_EW_RC" "$_SANDY_EW_MSG")" || true
+    trap - TERM
+    return 1
+}
+# After a failed window. A daemon container keeps idling, for a bounded
+# time: exiting at once would let --restart unless-stopped restart it, losing
+# the tmpfs verdict, and the client would report a crash loop. A supervisor
+# (sandy --start) polls the verdict every 0.25s and removes the container
+# within about a second, so the client exits 6. With NO supervisor (the
+# container came back after a host reboot or a docker restart, under its
+# restart policy) nothing ever would: the container would idle sessionless
+# forever. So after _SANDY_EW_IDLE_S seconds still alive, it exits 1, and the
+# restart policy retries the launch, as it did before 2.9.0. The container
+# cannot see whether a supervisor exists (its pid is a host-side label); the
+# supervisor's removal of the container IS the acknowledgement.
+# Interactively, the message goes to the ordinary terminal (tmux has exited)
+# and the launch exits 1.
+_SANDY_EW_IDLE_S=60
+_sandy_ew_fail_exit() {
+    local _m
+    _m="$(_sandy_ew_message)"
+    sandy_err "${_m:-a feature entry exited during its startup window; see its supervisor.log}"
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        sleep "$_SANDY_EW_IDLE_S" || true
+        sandy_err "no supervisor removed this container within ${_SANDY_EW_IDLE_S}s of the failed feature-entry window (it was restarted without one, e.g. after a reboot); exiting so the restart policy retries the launch."
+    fi
+    exit 1
+}
+# Replaces the three launch tails (single-agent foreground and daemon, combo).
+# Runs the window unless it has already run (named sessions run it blocking,
+# before the session exists), then attaches or keeps the container alive.
+_sandy_hold_session() {
+    local _w="" _rc=0
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        if [ "$(_sandy_ew_state)" = pending ]; then
+            _sandy_entry_window || _sandy_ew_fail_exit
+        fi
+        exec tail -f /dev/null
+    fi
+    if [ "$(_sandy_ew_state)" = pending ]; then
+        # The watcher. It never writes to the tty (tmux owns it), and it
+        # survives user-setup's set -e and ERR trap.
+        ( set +e; trap - ERR; _sandy_entry_window ) </dev/null >>"$_SANDY_EW_FILE.log" 2>&1 &
+        _w=$!
+    fi
+    tmux attach -t sandy || _rc=$?
+    if [ -n "$_w" ]; then
+        # Still in its window (the user detached, or the agent exited): this
+        # stops it. Already tearing down: it ignores the TERM, and wait
+        # returns once `failed` is written.
+        kill -TERM "$_w" 2>/dev/null || true
+        wait "$_w" 2>/dev/null || true
+    fi
+    if [ "$(_sandy_ew_state)" = failed ]; then _sandy_ew_fail_exit; fi
+    return "$_rc"
+}
+# The `pending` write. Refuses the launch when it fails, so a session never
+# exists without the file.
+_sandy_ew_begin() {
+    if ! _sandy_ew_write pending; then
+        sandy_err "could not write $_SANDY_EW_FILE (the feature-entry startup verdict); refusing to start the session without it."
+        exit 1
+    fi
+}
+# END entry window
 
 cd "$WORKSPACE"
 
@@ -12172,12 +12340,21 @@ cd "$WORKSPACE"
 # for both, so this gate is the in-container half of the same decision, not
 # the only half.
 if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
+# The entry-window verdict starts as `pending`, before any new-session,
+# on exactly the launches that start entries (and on those with none). Headless
+# and --remote write no verdict: they exec before any tmux branch.
+if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_ew_begin; fi
 
 # Named Claude sessions come up BEFORE the pane, so `claude agents` shows them
 # and --start's readiness check (which waits for the tmux session) finds the
 # status file already written. The host sets SANDY_CLAUDE_SESSIONS_ACTIVE only
 # for interactive and --start launches; this gate is the in-container half.
+# The entry window runs BLOCKING here, before the sessions (B5 Q2): a failing
+# entry must not interrupt the resume prompts and jobs they create, and a
+# torn-down launch would send each resume prompt again next time. So it is
+# `passed` before new-session, and these launches save nothing.
 if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then
+    _sandy_entry_window || _sandy_ew_fail_exit
     _sandy_claude_sessions_up
 fi
 
@@ -12231,7 +12408,7 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
             exit 1
         }
         tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
-        exec tail -f /dev/null
+        _sandy_hold_session
     else
         # Foreground: create detached, tag the pane, THEN attach in this
         # process — the exact pattern the multi-agent path below already
@@ -12260,12 +12437,13 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
         # Do NOT `exec` the attach: this process still needs its EXIT trap
         # (the ANSI color-4 palette remap earlier in this script) to run
         # after the session ends, and `exec` replaces the shell without
-        # running EXIT traps. Plain `tmux attach -t sandy` returns instead of
-        # replacing the process — same as the multi-agent branch below —
-        # which is what lets that trap fire and restore the palette.
+        # running EXIT traps. _sandy_hold_session runs a plain `tmux attach
+        # -t sandy`, which returns instead of replacing the process — same as
+        # the multi-agent branch below — which is what lets that trap fire
+        # and restore the palette.
         _p_id="$(tmux new-session -d -P -F '#{pane_id}' -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1")"
         tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
-        tmux attach -t sandy
+        _sandy_hold_session
     fi
 else
     # --- Multi-agent launch (2-4 panes) ---
@@ -12327,14 +12505,12 @@ else
     fi
 
     tmux select-pane -t sandy.0
-    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
-        # Daemon mode: session already created detached above (-d); keep
-        # the container's main process alive without attaching. See the single-agent branch above
-        # for the full explanation.
-        exec tail -f /dev/null
-    else
-        tmux attach -t sandy
-    fi
+    # Daemon mode: the session was created detached above (-d), and the hold
+    # keeps the container's main process alive without attaching; see the
+    # single-agent branch above. The entry window starts only here, after
+    # the last split and select-pane, so a teardown never races pane
+    # creation.
+    _sandy_hold_session
 fi
 USERSETUP
 }
@@ -12744,6 +12920,85 @@ fi
 # as the supervisor) also skips the block and falls through to the normal
 # launch tail — which itself branches on SANDY_DAEMON_SUPERVISOR further down
 # (RUN_FLAGS assembly, and the block-and-wait launch tail) to run detached.
+# BEGIN entry window host
+# --start readiness and the feature-entry window (B5). The container writes
+# its window verdict to /home/sandy/.sandy-entry-window (see "entry window"
+# in the user-setup heredoc): `pending` before the first tmux new-session,
+# then `passed`, or `failed<TAB>label<TAB>rc<TAB>message` once it has torn the
+# session down. One `docker exec` reads it:
+#   - a `failed` verdict is printed whether or not the session exists, since
+#     the teardown removes the session BEFORE `failed` is written;
+#   - anything else is printed only while the session exists, and an absent
+#     file then reads `none`: a pre-B5 image, whose window ran before the
+#     session, so "session exists" alone still means ready for it.
+# No output means no session yet. The verdict is a report the agent could
+# forge, like .sandy-sessions.tsv: it decides an exit code, never what runs.
+# The probe script takes the verdict path as $1. It reads only a REGULAR file,
+# and at most 4096 bytes of it: the agent can replace the file, and a FIFO
+# there would block a plain cat forever (the client, the supervisor and the
+# already-running check would all hang past their budgets). Anything else that
+# exists is `malformed`, which classifies as not ready.
+_SANDY_EW_PROBE_SH='if [ -f "$1" ] && [ ! -p "$1" ]; then v="$(head -c 4096 "$1" 2>/dev/null | head -n 1)"
+elif [ -e "$1" ] || [ -L "$1" ]; then v=malformed
+else v=none; fi
+case "$v" in failed*) printf "%s\n" "$v"; exit 0 ;; esac
+tmux has-session -t sandy 2>/dev/null || exit 1
+printf "%s\n" "$v"'
+_sandy_ew_probe() {
+    docker exec -u "$(id -u)" "$1" sh -c "$_SANDY_EW_PROBE_SH" _ /home/sandy/.sandy-entry-window 2>/dev/null || true
+}
+# _sandy_ew_classify <probe output> -> ready | wait | fatal
+#   ready = session and (passed or none); fatal = failed; wait = anything
+#   else (no session yet, pending, an unrecognised value).
+_sandy_ew_classify() {
+    local _v="${1%%$'\n'*}"
+    case "${_v%%$'\t'*}" in
+        passed|none) echo ready ;;
+        failed) echo fatal ;;
+        *) echo wait ;;
+    esac
+}
+# The message field of a `failed` verdict, reduced to printable ASCII: every
+# other byte becomes `?` (the container wrote it, and it is printed on the
+# caller's terminal). Deleting only \000-\037 and \177 would let UTF-8 C1
+# controls through (U+009B CSI and U+009D OSC are \302\233 and \302\235),
+# which a UTF-8 terminal honours like ESC [ and ESC ].
+_sandy_ew_failure_text() {
+    local _v="${1%%$'\n'*}"
+    _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"; _v="${_v#*$'\t'}"
+    printf '%s' "$_v" | LC_ALL=C tr -c '\040-\176' '?'
+}
+# Print a `failed` verdict's message on stderr. The text is agent-controlled,
+# so it is printed as a printf %s ARGUMENT, never through error(): that is
+# `echo -e`, which would turn a literal backslash-033 back into a real ESC
+# after _sandy_ew_failure_text removed the control bytes.
+_sandy_ew_report() {
+    printf "${RED:-}[sandy]${NC:-} %s\n" "A feature entry exited during its startup window: $(_sandy_ew_failure_text "$1")" >&2
+}
+# Supervisor half: after `docker run -d`, poll the verdict every 0.25s, for at
+# most 120s and only while the container runs. Returns 1 on `failed`, after
+# printing the message to the daemon log (which the --start client tails) and
+# writing the .fatal marker; its caller exits 1, and the EXIT trap's cleanup
+# removes the container. Returns 0 on ready, on a stopped container, or at
+# the deadline: the 30s watch loop after it is the backstop.
+_sandy_ew_supervise() {
+    local _c="$1" _out _end=$((SECONDS + 120))
+    while [ "$SECONDS" -lt "$_end" ]; do
+        [ "$(docker inspect -f '{{.State.Running}}' "$_c" 2>/dev/null || echo false)" = "true" ] || return 0
+        _out="$(_sandy_ew_probe "$_c")"
+        case "$(_sandy_ew_classify "$_out")" in
+            ready) return 0 ;;
+            fatal)
+                _sandy_ew_report "$_out"
+                _sandy_daemon_fatal
+                return 1 ;;
+        esac
+        sleep 0.25
+    done
+    return 0
+}
+# END entry window host
+
 # --start readiness for named Claude sessions (decision 5). Reads the status
 # file the container's bring-up wrote BEFORE it created the tmux session, so by
 # the time has-session succeeds it is already there for THIS launch (its first
@@ -12809,19 +13064,63 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # running" and block the restart. Probe the session, retrying briefly so
         # a container that is merely mid-startup (session not created yet) is not
         # misread as a zombie and reaped out from under a concurrent start.
+        #
+        # B5: "live" is the same readiness the client loop below uses
+        # (_sandy_ew_probe + _sandy_ew_classify), not has-session alone, so a
+        # second --start during the first one's feature-entry window cannot
+        # report ready while the verdict is still pending. ready -> 0. fatal
+        # (the entry failed in that window) -> 6, exactly what the first
+        # --start reports; its supervisor removes the container, so nothing is
+        # reaped here. wait with a session (pending) -> keep polling, within
+        # the client loop's own 600s budget, then 8. wait with NO session for
+        # 5 polls -> the zombie path below, as before.
         _sandy_session_live=0
-        for _sandy_probe in 1 2 3 4 5; do
-            if docker exec -u "$(id -u)" "$_sandy_daemon_existing" tmux has-session -t sandy >/dev/null 2>&1; then
-                _sandy_session_live=1
-                break
+        _sandy_d6_orphan=0
+        _sandy_d6_nosess=0
+        _sandy_d6_waited=0
+        _sandy_d6_out=""
+        while [ "$_sandy_d6_waited" -lt 600 ]; do
+            _sandy_d6_out="$(_sandy_ew_probe "$_sandy_daemon_existing")"
+            case "$(_sandy_ew_classify "$_sandy_d6_out")" in
+                ready) _sandy_session_live=1; break ;;
+                fatal)
+                    # A live supervisor is tearing it down: report what the
+                    # first --start reports. No live supervisor (the container
+                    # came back after a reboot or a docker restart) means
+                    # nothing ever will: reap it and start fresh below, as for
+                    # a zombie, so a fixed entry actually gets relaunched.
+                    _sandy_d6_sup="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_existing" 2>/dev/null)" || _sandy_d6_sup=""
+                    case "$_sandy_d6_sup" in ''|*[!0-9]*) _sandy_d6_sup="" ;; esac
+                    if [ -n "$_sandy_d6_sup" ] && kill -0 "$_sandy_d6_sup" 2>/dev/null; then
+                        _sandy_ew_report "$_sandy_d6_out"
+                        error "The daemon session for $WORK_DIR is being torn down; run 'sandy --start' again once the entry is fixed."
+                        exit 6
+                    fi
+                    _sandy_d6_orphan=1
+                    break ;;
+            esac
+            if [ -z "$_sandy_d6_out" ]; then
+                _sandy_d6_nosess=$((_sandy_d6_nosess + 1))
+                [ "$_sandy_d6_nosess" -ge 5 ] && break
+            else
+                _sandy_d6_nosess=0
             fi
             sleep 1
+            _sandy_d6_waited=$((_sandy_d6_waited + 1))
         done
         if [ "$_sandy_session_live" = 1 ]; then
             info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
             exit 0
         fi
-        warn "Found a daemon container with no live session for $WORK_DIR (agent exited; container ${_sandy_daemon_existing:0:12}) — reaping it and starting fresh."
+        if [ "$_sandy_d6_orphan" = 1 ]; then
+            warn "Found an unsupervised daemon container for $WORK_DIR whose feature entry failed its startup window (container ${_sandy_daemon_existing:0:12}, restarted after a reboot or docker restart) — reaping it and starting fresh."
+            _sandy_ew_report "$_sandy_d6_out"
+        elif [ -n "$_sandy_d6_out" ]; then
+            error "Daemon session for $WORK_DIR exists but its feature-entry window never finished within 600s."
+            exit 8
+        else
+            warn "Found a daemon container with no live session for $WORK_DIR (agent exited; container ${_sandy_daemon_existing:0:12}) — reaping it and starting fresh."
+        fi
         "$0" --stop --workspace "$WORK_DIR" >/dev/null 2>&1 || true
         # fall through to a fresh --start below
     fi
@@ -12962,6 +13261,8 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     _sandy_restarts=0
     _sandy_daemon_container=""
     _sandy_sup_fatal=false
+    _sandy_ew_fatal=false
+    _sandy_ew_out=""
     while [ "$_sandy_waited" -lt "$_sandy_timeout_s" ]; do
         # Supervisor reported an unrecoverable startup refusal (it already cleaned
         # up) — give up now instead of waiting out the timeout.
@@ -12976,10 +13277,18 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # looks in /tmp/tmux-0 and can NEVER see the session — the first
         # macOS acceptance run hung the full 600s against a perfectly
         # healthy container because of exactly this.
-        if [ -n "$_sandy_daemon_container" ] \
-           && docker exec -u "$(id -u)" "$_sandy_daemon_container" tmux has-session -t sandy >/dev/null 2>&1; then
-            _sandy_ready=true
-            break
+        #
+        # Ready = the session exists AND the feature-entry window has passed
+        # (or the image predates the verdict). `pending` keeps polling, so
+        # exit 0 is never reported for a session the window will still tear
+        # down; `failed` is fatal (exit 6), the same as the supervisor's
+        # .fatal marker checked first above.
+        if [ -n "$_sandy_daemon_container" ]; then
+            _sandy_ew_out="$(_sandy_ew_probe "$_sandy_daemon_container")"
+            case "$(_sandy_ew_classify "$_sandy_ew_out")" in
+                ready) _sandy_ready=true; break ;;
+                fatal) _sandy_ew_fatal=true; _sandy_sup_fatal=true; break ;;
+            esac
         fi
         # Fail fast on a crash-looping container instead of burning the full
         # timeout: under --restart unless-stopped a container whose entrypoint
@@ -13024,15 +13333,20 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         #
         # Codes continue the DEC-C table (--attach uses 3/4/5, --stop 4/5), so
         # --start-specific failures start at 6 and never collide:
-        #   6  refused before launch  (unanswerable approval; ACTIONABLE)
-        #   7  container crash-looping
+        #   6  refused before launch  (unanswerable approval; ACTIONABLE),
+        #      or a feature entry started and then exited inside its startup
+        #      window (B5; 2.9.0, was 7)
+        #   7  container crash-looping (includes an entry that cannot start)
         #   8  timed out waiting for the inner session
         #   9  (above, on the ready path) a declared named Claude session did
         #      not come up; the container is left running
         # 1 remains the catch-all for anything not classified above.
         _sandy_start_rc=1
-        if [ "$_sandy_sup_fatal" = "true" ]; then
-            error "Daemon startup was refused before it could launch (see the guidance above)."
+        if [ "$_sandy_ew_fatal" = "true" ]; then
+            _sandy_ew_report "$_sandy_ew_out"
+            _sandy_start_rc=6
+        elif [ "$_sandy_sup_fatal" = "true" ]; then
+            error "Daemon startup was refused before it could become ready (see the guidance above)."
             _sandy_start_rc=6
         elif [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
             error "Daemon container is crash-looping (RestartCount=$_sandy_restarts) — giving up."
@@ -22403,6 +22717,12 @@ if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
         error "docker run (detached) failed with status $_run_rc — daemon not started."
         exit "$_run_rc"
     fi
+    # B5: the feature-entry window runs alongside the agent. A `failed`
+    # verdict ends the launch here, as exit 6 for the --start client, without
+    # depending on that client still being alive; the EXIT trap's cleanup
+    # removes the container (the container idles after a failure, so
+    # --restart unless-stopped never restarts it first).
+    _sandy_ew_supervise "$CONTAINER_NAME" || exit 1
     # D1 — the container (just started detached by `docker run -d` above) is
     # the daemon; this supervisor process's remaining job is to hold the #14
     # workspace lock and stay the parent of the helper processes (SSH-agent
