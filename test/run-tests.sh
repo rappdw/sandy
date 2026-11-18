@@ -29153,9 +29153,105 @@ SANDY_CODEX_AUTH=oauth' "$_S226_D/sandy.mut"))" \
     "$(_s226_vc '' 'SANDY_AGENT=codex
 SANDY_CODEX_AUTH=oauth')" "$(_s226_vc '' 'SANDY_AGENT=codex
 SANDY_CODEX_AUTH=oauth' "$_S226_D/sandy.mut")" "$_S226_D/sandy.mut"
+# --- (13) the --start approval pre-pass gets --agent, as the supervisor does --
+# The pre-pass hashes the gated set on the client tty; the supervisor re-hashes
+# it under /dev/null and needs the SAME set, or it drops every gated key. With
+# --agent the gate skips SANDY_AGENT, so a pre-pass without --agent approved a
+# set the supervisor never sees (Opus review, PR-1). Part (a) runs the REAL
+# pre-pass line with a recorder standing in for sandy; part (b) runs the real
+# script: the pre-pass on a pty (answered y), then the supervisor's view.
+_S226_PP="$(grep -m1 'SANDY_APPROVE_ONLY=1 "\$SANDY_SELF"' "$SANDY_SCRIPT" | sed 's#</dev/tty >/dev/tty##')"
+printf '#!/usr/bin/env bash\nprintf "ARGV:%%s\\n" "$*" > "$S226_REC"\n' > "$_S226_D/rec"; chmod +x "$_S226_D/rec"
+_s226_pp() { # $1 = SANDY_AGENT_OVERRIDE -> the argv the pre-pass gave sandy
+    rm -f "$_S226_D/rec.out"
+    env S226_REC="$_S226_D/rec.out" SANDY_SELF="$_S226_D/rec" WORK_DIR="$_S226_D" SANDY_AGENT_OVERRIDE="$1" \
+        _sandy_approve_result="$_S226_D/res" bash -c 'eval "$1"' _ "$_S226_PP" >/dev/null 2>&1 || true
+    cat "$_S226_D/rec.out" 2>/dev/null || echo NOT-RUN
+}
+check "§226(13a) the REAL --start pre-pass line hands --agent to the pass (got: $(_s226_pp claude); without --agent: $(_s226_pp ''))" \
+    bash -c 'test "$1" = "ARGV:--agent claude" && test "$2" = "ARGV:"' _ "$(_s226_pp claude)" "$(_s226_pp '')"
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§226(13b) python3 not available to drive a pty"
+else
+    cat > "$_S226_D/ptyans.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]; argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try: os.execvp(argv[0], argv)
+    finally: os._exit(127)
+buf = b''; sent = False; deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try: d = os.read(fd, 4096)
+        except OSError: break
+        if not d: break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode()); sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+PY
+    # $1 fixture  $2 "pty" or "dev-null"  $3.. sandy args
+    _s226_ao() {
+        local T="$_S226_D/$1" how="$2"; shift 2
+        mkdir -p "$T/bin" "$T/home" "$T/ws/.sandy"
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/docker"; chmod +x "$T/bin/docker"
+        printf 'SANDY_AGENT=codex\nSANDY_CODEX_AUTH=oauth\n' > "$T/ws/.sandy/config"
+        if [ "$how" = pty ]; then
+            ( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED -u SANDY_AGENT -u SANDY_CODEX_AUTH PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" \
+                SANDY_APPROVE_ONLY=1 python3 "$_S226_D/ptyans.py" y bash "$SANDY_SCRIPT" "$@" 2>&1 ) || true
+        else
+            ( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED -u SANDY_AGENT -u SANDY_CODEX_AUTH PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" \
+                SANDY_APPROVE_ONLY=1 bash "$SANDY_SCRIPT" "$@" </dev/null 2>&1 ) || true
+        fi
+    }
+    _S226_P1="$(_s226_ao fixed pty --agent claude)"
+    _S226_S1="$(_s226_ao fixed dev-null --agent claude)"
+    _S226_P0="$(_s226_ao bug pty)"
+    _S226_S0="$(_s226_ao bug dev-null --agent claude)"
+    check "§226(13b) with --agent on both sides the pty pre-pass approves and the supervisor's /dev/null pass honours it, no keys dropped; the control (pre-pass WITHOUT --agent, the reviewed bug) makes that same supervisor pass drop them" \
+        bash -c 'grep -q "Approved\." <<<"$1" && grep -q "SANDY_CODEX_AUTH" <<<"$1" && ! grep -q "SANDY_AGENT\$" <<<"$1" && ! grep -q "dropping these keys" <<<"$2" \
+                 && grep -q "Approved\." <<<"$3" && grep -q "dropping these keys" <<<"$4"' _ "$_S226_P1" "$_S226_S1" "$_S226_P0" "$_S226_S0"
+fi
+
+# --- (14) api_key with no key falls back to the HOST's mode, never wider ------
+# A workspace SANDY_CLAUDE_AUTH=api_key passes the gate free; with no
+# ANTHROPIC_API_KEY it used to become auto, which mounts the OAuth file or
+# forwards a long-lived token past a host that chose profile (Opus review,
+# PR-1). Chains the REAL blocks: the no-key fallback, the mode resolver up to
+# the credential-posture block, and the key-forwarding branch §117 runs.
+_S226_FB="$(awk '/--- api_key with no key: fall back to what the HOST chose/,/fi  # end api_key no-key fallback/' "$SANDY_SCRIPT")"
+_S226_RS="$(awk '/--- SANDY_CLAUDE_AUTH: make the choice EXPLICIT/{f=1} /--- #130: credential posture/{exit} f' "$SANDY_SCRIPT")"
+_S226_FW="if _sandy_agent_has claude; then
+$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$SANDY_SCRIPT")"
+mkdir -p "$_S226_D/anth/credentials"; printf '{"access_token":"x"}\n' > "$_S226_D/anth/credentials/default.json"
+_s226_chain() { # $1 = host-resolved baseline -> "mode=<_claude_auth> oauthfile=<kept|none> fwd=<names>"
+    env -i PATH="$PATH" HOME="$_S226_D" ANTHROPIC_CONFIG_DIR="$_S226_D/anth" SANDY_CLAUDE_AUTH=api_key \
+        _SANDY_PASSIVE_BASE_SANDY_CLAUDE_AUTH="$1" CLAUDE_CODE_OAUTH_TOKEN=tok-226 \
+        F1="$_S226_FB" F2="$_S226_RS" F3="$_S226_FW" bash -c '
+        set -u
+        _sandy_agent_has() { [ "$1" = claude ]; }
+        _sandy_add_secret_env() { printf "%s " "$1" >> "$HOME/fwd"; }
+        info() { :; }; warn() { :; }
+        RUN_FLAGS=(); CRED_TMPDIR=""; PROFILE_TMPDIR=""; CRED_JSON="{\"claudeAiOauth\":{}}"; : > "$HOME/fwd"
+        eval "$F1"; eval "$F2"
+        [ -n "$CRED_JSON" ] && CRED_TMPDIR=/oauth-file-mounted
+        eval "$F3"
+        printf "mode=%s oauthfile=%s fwd=%s\n" "$_claude_auth" "$([ -n "$CRED_JSON" ] && echo kept || echo none)" "$(cat "$HOME/fwd")"' 2>&1 || echo "RC=$?"
+}
+_S226_C1="$(_s226_chain profile)"
+_S226_C0="$(_s226_chain '')"
+check "§226(14) host profile, workspace api_key, no ANTHROPIC_API_KEY: the session runs on the profile, with NO OAuth file and NO token forwarded (got: $_S226_C1); control, no host choice: the old fallback to auto stands (got: $_S226_C0)" \
+    bash -c 'case "$3" in *"--- api_key with no key"*"end api_key no-key fallback"*) ;; *) exit 1 ;; esac
+             grep -q "^mode=profile oauthfile=none " <<<"$1" && ! grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$1" \
+             && grep -q "^mode=auto oauthfile=kept " <<<"$2" && grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$2"' _ "$_S226_C1" "$_S226_C0" "$_S226_FB"
 rm -rf "$_S226_D"
-unset _S226_DEFS _S226_D _S226_A
-unset -f _s226_load _s226_vc
+unset _S226_DEFS _S226_D _S226_A _S226_PP _S226_P1 _S226_S1 _S226_P0 _S226_S0 _S226_FB _S226_RS _S226_FW _S226_C1 _S226_C0
+unset -f _s226_load _s226_vc _s226_pp _s226_ao _s226_chain
 
 # BEGIN SUMMARY
 # ============================================================
