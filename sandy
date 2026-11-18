@@ -15935,7 +15935,9 @@ _check_mirror_update() {
 # release whose check cannot reach its registry (or any launch under
 # SANDY_OFFLINE, which skips the checks) is not seen, so it does not change
 # the key: that build waits out the 30 minutes like the failed one. It is only consulted while the image exists: a REQUIRED build (no
-# image to fall back to) always runs. A build for an image whose agent reports
+# image to fall back to) always runs. Nor is it consulted when the base image
+# was rebuilt in this launch (BASE_REBUILT): holding the agent build back then
+# would leave the agent image on the old base. A build for an image whose agent reports
 # no version (_SANDY_AGENT_BUILD_BROKEN) is never recorded: that image is
 # unusable, so each launch retries. A record sandy cannot parse (a damaged
 # line, a leading-zero epoch that shell arithmetic would read as octal) or
@@ -16032,7 +16034,7 @@ if [ "$_sandy_run_update_checks" = true ]; then
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
-    if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 && _sandy_build_fail_recent; then
+    if [ "$BASE_REBUILT" = false ] && docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 && _sandy_build_fail_recent; then
         _SANDY_BUILD_BACKOFF_NOTE="The $IMAGE_NAME rebuild failed $((_SANDY_BUILD_FAIL_AGO / 60)) min ago (docker build exit $_SANDY_BUILD_FAIL_RC); it is retried in $(( (_SANDY_BUILD_FAIL_LEFT + 59) / 60 )) min, or now with sandy --rebuild."
         warn "Skipping the agent image rebuild: $_SANDY_BUILD_BACKOFF_NOTE"
         warn "  Continuing on the existing image."

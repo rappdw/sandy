@@ -27125,6 +27125,19 @@ check "§234(16) a 20-digit epoch is ignored with the unreadable-record warning,
     bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3" && ! grep -q "integer expression" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
 unset _e _rest
 
+# (17) A base image rebuilt in this launch is never held back by a fresh
+# record: the agent image would otherwise stay on the old base. The record's
+# key (image, build hash, target) still matches, so only the base rebuild can
+# let the build through.
+_s234_fail
+_S234_K17="$(cut -d' ' -f3- "$_S234_REC" 2>/dev/null || true)"
+rm -f "$_S234_D/sh/.base_build_hash"
+_s234_run
+_S234_B17="$(grep -cx sandy-base "$_S234_D/builds.log" || true)"
+check "§234(17) a fresh record does not hold back the agent rebuild when the base was rebuilt in the same launch: base and agent are built, and the record is gone (mutation: drop the BASE_REBUILT guard -> agent held back; rc/base/agent builds $_S234_RC/$_S234_B17/$_S234_AG, record key $_S234_K17)" \
+    bash -c 'test -n "$5" && test "$1/$2/$3" = 0/1/1 && test ! -e "$4" && ! grep -q "Skipping the agent image rebuild" "$6"' \
+    _ "$_S234_RC" "$_S234_B17" "$_S234_AG" "$_S234_REC" "$_S234_K17" "$_S234_D/out"
+
 # (13) A combo's target names every agent with a newer release, so a second
 # agent's release is not held back by a record made for the first.
 rm -rf "$_S234_D/sh"; mkdir -p "$_S234_D/sh"
@@ -27148,7 +27161,7 @@ check "§234(13) claude,codex: a failed rebuild for claude 2.0.0 is held back on
     bash -c 'test "$1 $2 $3 $4" = "0/1 0/1 0/0 0/1" && test "$5" = "claude@2.0.0" && test "$6" = "claude@2.0.0,codex@3.0.0"' \
     _ "$_S234_C0" "$_S234_C1" "$_S234_C2" "$_S234_C3" "$_S234_T1" "$_S234_T3"
 rm -rf "$_S234_D"
-unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b _S234_K17 _S234_B17
 unset -f _s234_run _s234_age _s234_fail
 
 # BEGIN SUMMARY
