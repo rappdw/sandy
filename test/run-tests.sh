@@ -25583,14 +25583,17 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219 and 225 (removed at the end of §225, which
-# follows §219):
+# The stubs, shared by 215-219, 225 and 226 (removed at the end of §226,
+# which follows §225, which follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
 #             copy of its --env-file, under runs/; for the agent's run (the one
 #             with --name) it plays Docker's bind-mount auto-creation: each
 #             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
 #             is created in the workspace, and A6_AGENT_WRITES gets a file.
+#             With A6_SNAP_DST set, the source of the agent's mount onto that
+#             container path goes to runs/snap.src and the files it holds at
+#             that moment to runs/snap.files. A6_RUN_RC is the agent run's rc.
 #             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
 #   curl      fails, except the two build-dependency probes when A6_NET=1, so a
 #             missing image builds instead of being deferred.
@@ -25634,6 +25637,17 @@ if [ "${1:-}" = run ]; then
                 esac
             done
         done
+        if [ -n "${A6_SNAP_DST:-}" ]; then
+            for _a in "$@"; do
+                case "$_a" in
+                    *":$A6_SNAP_DST")
+                        _src="${_a%":$A6_SNAP_DST"}"
+                        printf '%s\n' "$_src" > "$A6_LOG/runs/snap.src"
+                        (cd "$_src" 2>/dev/null && find . -type f | LC_ALL=C sort) > "$A6_LOG/runs/snap.files" ;;
+                esac
+            done
+        fi
+        [ -z "${A6_RUN_RC:-}" ] || exit "$A6_RUN_RC"
     fi
 fi
 exit 0
@@ -26008,6 +26022,56 @@ unset _A6_NV
 unset -f _a6_gpus
 unset _A6_A _A6_WHY
 unset -f _hardening_unmet
+
+section "§226: a SANDY_CLAUDE_AUTH=profile launch removes its copy of the profile's credentials when it exits"
+# ============================================================
+# cleanup() removed the profile copy (PROFILE_TMPDIR) only inside its
+# CRED_TMPDIR block, and profile mode empties CRED_JSON, so CRED_TMPDIR never
+# exists on a profile launch: every one left a 0700 dir in $TMPDIR holding a
+# 0600 copy of the profile's credentials. Each case launches with its own
+# TMPDIR and has the docker stub record the profile mount's source and its
+# files while the agent "runs", which proves the copy existed under that
+# TMPDIR with the credential in it. After the launch, the mount source must be
+# gone and no file under TMPDIR may hold the fixture credential. Two exits: a
+# clean one, and an agent run that fails.
+# $1 = CASE  $2 = the launch's expected rc. Prints the first unmet condition.
+_a6_profile_residue() {
+    local t="$_A6_DIR/$1/tmp" src left
+    [ "$_A6_RC" = "$2" ] || { echo "launch rc $_A6_RC, wanted $2"; return 0; }
+    grep -qF "using Anthropic profile 'default'" "$_A6_DIR/$1/out" || { echo "not a profile launch"; return 0; }
+    src="$(cat "$_A6_DIR/$1/runs/snap.src" 2>/dev/null || true)"
+    [ -n "$src" ] || { echo "no profile mount on the agent's docker run"; return 0; }
+    case "$src" in
+        "$t"/*) : ;;
+        *) echo "mount source $src is not under the launch's TMPDIR"; return 0 ;;
+    esac
+    grep -qxF ./credentials/default.json "$_A6_DIR/$1/runs/snap.files" 2>/dev/null \
+        || { echo "the copy held no credentials/default.json during the run"; return 0; }
+    if [ -e "$src" ]; then echo "$src still exists after the launch"; return 0; fi
+    left="$(grep -rlF fixture-profile-rt "$t" 2>/dev/null || true)"
+    [ -z "$left" ] || echo "a file under TMPDIR still holds the credential: $left"
+}
+_a6_profile_fixture() {   # $1 = CASE
+    mkdir -p "$_A6_DIR/$1/.config/anthropic/credentials" "$_A6_DIR/$1/tmp"
+    printf '{"access_token":"fixture-profile-at","refresh_token":"fixture-profile-rt"}\n' \
+        > "$_A6_DIR/$1/.config/anthropic/credentials/default.json"
+}
+_a6_profile_fixture profile-clean
+_a6_launch profile-clean SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-clean/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic
+_A6_WHY="$(_a6_profile_residue profile-clean 0)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(1)" profile-clean
+check "§226(1) a profile launch that exits cleanly leaves no copy of the profile's credentials in TMPDIR (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_profile_fixture profile-fail
+_a6_launch profile-fail SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-fail/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_RUN_RC=7
+_A6_WHY="$(_a6_profile_residue profile-fail 7)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(2)" profile-fail
+check "§226(2) a profile launch whose agent run fails (rc 7) leaves none either (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+unset _A6_WHY
+unset -f _a6_profile_residue _a6_profile_fixture
 
 rm -rf "$_A6_DIR"
 unset _A6_DIR _A6_SCRIPT _A6_RC

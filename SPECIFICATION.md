@@ -2804,7 +2804,7 @@ If `SANDY_CLAUDE_AUTH=profile` resolved a profile (1.11.0) — and then the bloc
 
 The temporary directory is created per-launch and cleaned up on exit. The mount is **read-write** — Claude Code cloud features (e.g., `/ultrareview`) need to write refreshed or scoped tokens back to the credentials file during a session. The tmpdir is ephemeral (fresh each launch, `rm -rf` on exit), so in-session writes do not persist to the host. Codex `auth.json` and Gemini OAuth mounts remain `:ro` (these agents don't have equivalent cloud features that require token write-back). See §11 for credential loading rules per agent.
 
-**Cleanup trap**: the `cleanup` function that removes `*_CRED_TMPDIR` directories is registered on `EXIT INT TERM HUP QUIT ABRT`. `SIGKILL` cannot be trapped, so a residual cleanup window exists in that case alone.
+**Cleanup trap**: the `cleanup` function that removes the `*_CRED_TMPDIR` directories and `PROFILE_TMPDIR` is registered on `EXIT INT TERM HUP QUIT ABRT`. It removes each one independently, after the agent container. `PROFILE_TMPDIR` used to be removed only when `CRED_TMPDIR` was also set, which a profile launch never sets, so through 2.8.0 every profile launch left a copy of the profile's credentials in `$TMPDIR` (`run-tests.sh §226`). Under `--start` these directories belong to the daemon supervisor: the container mounts them for as long as it runs, and they are removed when the supervisor tears the session down (`--stop`, or the agent session ending). `SIGKILL` cannot be trapped, so a residual cleanup window exists in that case alone (a killed supervisor, or a daemon container that a reboot restarts with no supervisor watching it).
 
 ### E.5 .claude.json (no mount; `CLAUDE_CONFIG_DIR`)
 
