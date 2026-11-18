@@ -87,7 +87,7 @@ bash test/lint-bash32.sh            # bash-3.2 / BSD portability lint (also run 
 
 Acceptance harnesses (`test/acceptance-*.sh`) run against an isolated `$SANDY_HOME` (`test/lib-isolated-home.sh`). Fixtures in a real home look exactly like real sandboxes. `docs/TESTING_PLAN.md` covers manual TUI checks.
 
-The integration runner isolates `$SANDY_HOME` too; what it imports and what counts as success: `docs/TESTING_PLAN.md`.
+Integration-runner isolation and success rules: `docs/TESTING_PLAN.md`.
 
 Use `--only harness,contracts` for focused feedback and `--list` for groups. Both runners write logs under the ignored workspace `.test_output/`, keeping at most three runs; `.test_output/latest/` points to the newest. `--log-dir PATH` overrides the main suite's log root; `SANDY_INTEG_LOG_DIR` overrides the integration log root, with the same rotation. CI uses `--require-tools` so a missing declared dependency is a failure. A group with skipped checks is reported as partial, not fully passed. Section numbers in the legacy host suite remain stable for incident references; removed sections point to their replacements.
 
@@ -98,9 +98,9 @@ How to write tests here:
 - **Assert the property, not the presence of a mechanism.** Run the thing and check the outcome, then mutation-test the guard: break it in a temp copy and confirm the check fails. Also confirm the probe actually ran, since `set -u` has silently killed probe subshells and made checks pass vacuously.
 - **Don't anchor a JSON assertion on a field's neighbours** (`"name":"X"[^}]*"relay"…`). It breaks once someone inserts a nested object between them. Use one sandbox per fixture `$SANDY_HOME`, or slice the object with `awk` `index`/`substr` written on one line. (§88b ratchets this.)
 - New sections must survive `set -euo pipefail` plus the ERR trap.
-- A check of `--print-schema` content reads the cached run in `$_SCHEMA_CACHE`; only checks of the invocation itself run it live.
-- Assert a `docker run` flag on the argv the docker stub recorded for that container (`_hardening_unmet`, `_a6_agent_args`), never a grep of `sandy`: a comment or the other container's flag satisfies a grep.
-- `.test_output/latest/host.log` has a `TIMING` line per section; check it before and after touching a slow section.
+- A check of `--print-schema` content reads the cached run in `$_SCHEMA_CACHE`; only checks of the invocation itself (§92, §93, §100, §185) or of a modified copy of `sandy` run it live.
+- Assert an agent `docker run` flag on the stub-recorded argv: add a case to the `_a6_launch` harness (§215–§225), read it with `_a6_agent_args` + `_a6_pair` (hardening: `_hardening_unmet`; proxy: §207). A grep of `sandy` matches comments and the other container; grep only for a run no stub launches (daemon, §225(2)).
+- `.test_output/latest/host.log` has a `TIMING` line per section; compare it before and after editing a slow section.
 
 ## Portability: CI is Linux/bash 5, the maintainer is macOS/bash 3.2/BSD
 
@@ -121,15 +121,16 @@ Other macOS traps: `mktemp -d` returns a symlinked path, so canonicalize it (`D=
 ## Working inside sandy (you probably are)
 
 - **Never run `tmux`, `docker`, or `sandy --start|--stop|--attach` here.** They share the live session's tmux server and kill it. Write a harness and have the user run it on the host.
-- `.git/HEAD` is writable, so commit, switch, and `checkout -b` work. `.git/config`, `packed-refs`, `hooks/`, and `info/` are `:ro`, so:
+- The workspace is usually the maintainer's host checkout. Don't switch, reset or stash in it while tests may be running (one switch caused 25 false failures); branch in a `git worktree`. On the PR's branch, `gh pr merge --delete-branch` checks out `main`.
+- `.git/config`, `packed-refs`, `hooks/`, and `info/` are `:ro`, worktrees included, so:
   - `git push -u` reports a config-write error *after a successful push*. Use `git push origin <branch>:<branch>`.
-  - `git reset --hard` fails when `.github/workflows/` is tracked (protected dir). Use a mixed `git reset <ref>`.
+  - `git switch -c <b> origin/main` without `--no-track` prints config-write errors and claims tracking it did not set.
+  - `git reset --hard` fails in the main checkout, whose `.github/workflows/` is protected; a worktree's is writable.
   - `git gc`, `pack-refs`, and deleting packed refs fail.
-- `main` is protected, so every change goes through a PR: in a worktree, `git switch -c <feature> origin/main` → commit → `git push origin <feature>:<feature>` → `gh pr create --head <feature> --base main`.
-- The workspace is usually the maintainer's host checkout. Don't switch, reset or stash in it while tests may be running (a switch once caused 25 false failures); use a `git worktree`, and no `gh pr merge --delete-branch` (it switches the checkout).
-- On a reported failure, first compare the host-group footer's `commit` with the branch head. Check out with `git fetch origin <b> && git switch -C <b> FETCH_HEAD`; `origin/<b>` without a fresh fetch once left a reviewer on an old commit.
-- Mutation-test on a scratch copy of `sandy`, never in the repo; a rejected tool call once left a mutant in it.
-- The container has a 512-pid limit: one `test/run-tests.sh` at a time, no `xargs -P` fan-out (seven at once took a session down).
+- `main` is protected; every change is a PR: `git fetch origin main`, then in a worktree `git switch -c <feature> --no-track origin/main` → commit → `git push origin <feature>:<feature>` → `gh pr create --head <feature> --base main`.
+- On a reported failure, first compare the host-group footer's `commit` with the branch head. Check out with `git fetch origin <b> && git switch -C <b> FETCH_HEAD`; a stale `origin/<b>` once left a reviewer on an old commit.
+- Mutation-test on a scratch copy of `sandy`, never in the repo (a rejected tool call once left a mutant).
+- 512-pid limit: one `test/run-tests.sh` at a time, no `xargs -P` fan-out (seven at once took a session down).
 - Protected workspace paths (shell rc files, `.git/hooks`, `.github/workflows/`, `.vscode/`, `.sandy/`, `.claude/settings*.json`, …) are read-only in-container when they exist on the host. The full list is in SPECIFICATION.md.
 
 ## Subsystem pointers
