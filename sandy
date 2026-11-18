@@ -131,8 +131,8 @@ SANDY_PASSIVE_KEYS=(
 #       (elsewhere, listed nowhere in this array either)
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
 #       SANDY_PROVISION_ID / SANDY_APPROVE_ONLY / SANDY_APPROVE_ONLY_RESULT /
-#       SANDY_DOCKERFILE_DECLINED_HASH / SANDY_PREPASS_SYMLINKS /
-#       SANDY_APPROVE_REPORT / SANDY_TEST_PANE_TAGS / SANDY_LOGIN_AGENT (#428, set by --login).
+#       SANDY_DOCKERFILE_DECLINED_HASH / SANDY_APPROVE_REPORT /
+#       SANDY_TEST_PANE_TAGS / SANDY_LOGIN_AGENT (#428, set by --login).
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
 #   CLAUDE.md.
@@ -2167,7 +2167,7 @@ SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture,
 SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS=off,permissive,strict. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 (off) and =1 (permissive: a downgrade of a host-set =2) are approval-gated, matching SANDY_EGRESS; only =2 is free (#371).
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
-SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative directories the launch's symlink scan does not descend into, like the built-in node_modules, .venv* and .git; for a large tree that holds no link the session needs. Entries are literal paths (no globs, no . or ..), named exactly as on disk; one that names no directory is warned about. A link beneath a skipped directory gets no mount of its own and is never copied through (the copied trees use cp -R), so in the container it is only a link, and one pointing outside the workspace dangles. What it cannot hide: every path sandy mounts or copies by name (protected paths such as .claude/settings.json, .github/workflows and .git/config, .git/hooks, .git/info and .git/packed-refs; .gstack; the copied trees .claude/commands, .claude/agents, .claude/plugins, .gemini/extensions, .gemini/commands; the gitdir a .git file names, with its config, hooks, info and packed-refs; and config, hooks and info of each submodule gitdir under .git/modules) is resolved, with each of its prefixes, on every launch, and judged where it lands outside the workspace exactly as the scan judges a link there; an entry that is, holds or lies inside where a copied tree, .git or that gitdir resolves is ignored with a warning; and every mount source in the workspace is checked again just before the container starts, so a link the check did not judge refuses the launch. Privileged: leaving a directory out hides its links from the dangerous-symlink gate, so from a workspace .sandy/config it asks for the one-time approval (and a headless or non-TTY launch refuses); from the environment or the host config it needs none. Those rules still hold as defense in depth. A scan that takes over 5 s prints its duration and names this key. Leaving a directory out also drops its links from the approved-symlinks list at the next launch, so taking it back out of the key later makes any escaping link there a new one, which the dangerous-symlink gate treats as it treats any new link.
+SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative directories the launch's symlink scan does not descend into, like the built-in node_modules, .venv* and .git; for a large tree that holds no link the session needs. Entries are literal paths (no globs, no . or ..), named exactly as on disk; one that names no directory is warned about. A link beneath a skipped directory gets no mount of its own and is never copied through (the copied trees use cp -R), so in the container it is only a link, and one pointing outside the workspace dangles. What it cannot hide: every path sandy mounts or copies by name (protected paths such as .claude/settings.json, .github/workflows and .git/config, .git/hooks, .git/info and .git/packed-refs; .gstack; the copied trees .claude/commands, .claude/agents, .claude/plugins, .gemini/extensions, .gemini/commands; the gitdir a .git file names, with its config, hooks, info and packed-refs; and config, hooks and info of each submodule gitdir under .git/modules) is resolved, with each of its prefixes, on every launch, and judged where it lands outside the workspace exactly as the scan judges a link there; an entry that is, holds or lies inside where a copied tree, .git or that gitdir resolves is ignored with a warning; and every mount source is checked again just before the container starts, by where it physically lies however it is spelled, so a link the check did not judge refuses the launch. Under --start it applies to both scans, the approval pass's and the supervisor's (which scans again, so --start scans twice). Privileged: leaving a directory out hides its links from the dangerous-symlink gate, so from a workspace .sandy/config it asks for the one-time approval (and a headless or non-TTY launch refuses); from the environment or the host config it needs none. Those rules still hold as defense in depth. A scan that takes over 5 s prints its duration and names this key. Leaving a directory out also drops its links from the approved-symlinks list at the next launch, so taking it back out of the key later makes any escaping link there a new one, which the dangerous-symlink gate treats as it treats any new link.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
 CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
@@ -9023,7 +9023,7 @@ fi
 # (#296) must answer with no Docker at all, and the --start pre-pass (B2) runs
 # from a client that has just passed it. Report mode also skips the
 # SANDY_HOME-writability check (it writes nothing); the pre-pass keeps it,
-# because it writes approval files and the symlink list.
+# because it writes approval files.
 if [ -z "${_SANDY_APPROVE_PASS:-}" ]; then
     if ! command -v docker &>/dev/null; then
         error "Docker is not installed or not in PATH."
@@ -12883,7 +12883,6 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # terminal once. The pass resolves all three gates (#221 added symlinks,
     # #296 the Dockerfile).
     _sandy_df_declined=""
-    _sandy_pp_symlinks=""   # B2: the pass's link-list id, handed to the supervisor
     if [ -t 0 ] && [ -t 2 ]; then
         # $SANDY_SELF, not "$0" and not "$(_sandy_self_path)": this subshell cd's
         # to the workspace, so a relative invocation (./sandy) resolves to nothing
@@ -12902,10 +12901,8 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         ( unset SANDY_APPROVE_REPORT; export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
         if [ -f "$_sandy_approve_result" ]; then
             _sandy_df_declined="$(sed -n 's/^dockerfile_declined=//p' "$_sandy_approve_result" 2>/dev/null || true)"
-            _sandy_pp_symlinks="$(sed -n 's/^symlinks_list=//p' "$_sandy_approve_result" 2>/dev/null || true)"
             rm -f "$_sandy_approve_result" 2>/dev/null || true
             [[ "$_sandy_df_declined" =~ ^[0-9a-f]{64}$ ]] || _sandy_df_declined=""
-            [[ "$_sandy_pp_symlinks" =~ ^[0-9a-f]{16}$ ]] || _sandy_pp_symlinks=""
         fi
         # #221: the rc is no longer swallowed. Now that this pass also resolves
         # the dangerous-symlink approval, it can fail for a REAL reason -- the
@@ -12952,14 +12949,8 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # .sandy/Dockerfile gate, bound to the context hash; always passed, empty
     # when there was no decline, so a stray value in the caller's env cannot
     # reach the supervisor.
-    #
-    # SANDY_PREPASS_SYMLINKS (B2) names the pass's link list under
-    # $SANDBOX_DIR/launch/<id>/, the one the supervisor mounts from instead of
-    # scanning again; always passed, empty when there is none (no tty, or the
-    # list could not be written), and then the supervisor scans.
     nohup env SANDY_DAEMON_SUPERVISOR=1 "SANDY_DAEMON_LOG=$_sandy_daemon_log" \
         "SANDY_DOCKERFILE_DECLINED_HASH=$_sandy_df_declined" \
-        "SANDY_PREPASS_SYMLINKS=$_sandy_pp_symlinks" \
         "$0" "${_sandy_reexec_args[@]}" </dev/null >>"$_sandy_daemon_log" 2>&1 &
     disown 2>/dev/null || true
 
@@ -15407,19 +15398,6 @@ _sandy_approve_only_finish() {
     fi
     mkdir -p "$SANDBOX_DIR"
     _sandy_resolve_symlinks
-    # Optimization pass B2 (D12c): the gate passed (a refusal exits above), so
-    # hand the supervisor the links this pass resolved; it mounts from this list
-    # instead of scanning the workspace a second time. Only for the --start
-    # client (the one caller that passes SANDY_APPROVE_ONLY_RESULT). A list that
-    # cannot be written is not fatal: the supervisor then scans, as before.
-    if [ -n "${SANDY_APPROVE_ONLY_RESULT:-}" ]; then
-        local _sl_id=""
-        if _sl_id="$(_sandy_symlink_list_write)"; then
-            printf 'symlinks_list=%s\n' "$_sl_id" > "$SANDY_APPROVE_ONLY_RESULT" 2>/dev/null || true
-        else
-            warn "Could not record the approved symlink list for the session; it will scan the workspace again."
-        fi
-    fi
     if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
         if ! _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; then
             if [ -n "${SANDY_APPROVE_ONLY_RESULT:-}" ] && [ -n "${_SANDY_DF_HASH:-}" ]; then
@@ -15433,8 +15411,8 @@ _sandy_approve_only_finish() {
 # --- Symlink scan helpers (optimization pass B2: F8, D2, D12) ---------------
 #
 # True when "REL -> TARGET" is already judged this launch (one entry per pair,
-# so the by-name sweep never adds a second one for a link the scan or the
-# list already classified).
+# so the by-name sweep never adds a second one for a link the scan already
+# classified).
 _sandy_symlink_recorded() {   # $1 = rel  $2 = target
     local _i=0
     while [ "$_i" -lt ${#_SANDY_SL_RELS[@]} ]; do
@@ -15451,8 +15429,8 @@ _sandy_symlink_recorded() {   # $1 = rel  $2 = target
 # copies by name, reached through a link above it -- the gate judges it, and
 # no second mount is made for it);
 # every link it adds to DANGEROUS_SYMLINKS is also recorded, as its relative
-# path and target, in _SANDY_SL_RELS/_SANDY_SL_TGTS, which is what the --start
-# approval pass hands the supervisor (_sandy_symlink_list_write).
+# path and target, in _SANDY_SL_RELS/_SANDY_SL_TGTS: what the by-name sweep
+# deduplicates against and what the -v check counts as judged.
 _sandy_symlink_classify() {
     local link="$1" target="$2" _sl_rel link_rel raw
     [ -z "$target" ] && return 0
@@ -15635,7 +15613,7 @@ _sandy_symlink_skip_parse() {
 # (`cp -R`, links copied as links, then mounted read-write). A link at one, or
 # at any of its ancestors, still hands cp and Docker its target.
 # SANDY_SYMLINK_SCAN_SKIP never covers where one resolves
-# (_sandy_symlink_skip_parse), and the --start supervisor walks them.
+# (_sandy_symlink_skip_parse), so every scan walks them whole.
 # (A function, not a variable, so a test that extracts the scan functions
 # gets it too.)
 _sandy_symlink_copied() {
@@ -15671,9 +15649,46 @@ _sandy_gitdir_rel() {
     [ -f "$WORK_DIR/.git" ] || return 0
     sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]'
 }
+# The directory is spelled under $WORK_DIR whenever it lies physically in the
+# workspace, however the value spells it (`//ws/x`, `/./`, `..`, a linked
+# ancestor, another case): every by-name decision compares spellings with
+# $WORK_DIR, and Docker normalizes what bash's `pwd` keeps (a leading `//`).
 _sandy_gitdir_host() {   # $1 = the gitdir value -> the directory, or nothing
     [ -n "$1" ] || return 0
-    (cd "$WORK_DIR" && cd "$1" 2>/dev/null && pwd) || true
+    local _h _w
+    _h="$(cd "$WORK_DIR" && cd "$1" 2>/dev/null && pwd)" || return 0
+    [ -n "$_h" ] || return 0
+    if _w="$(_sandy_ws_physical "$_h")"; then printf '%s' "$_w"; else printf '%s' "$_h"; fi
+}
+
+# Host path $1 re-spelled under $WORK_DIR ("$WORK_DIR" or "$WORK_DIR/<rel>")
+# when it lies PHYSICALLY in the workspace; returns 1 otherwise. Its parent is
+# resolved with `cd -P` and `pwd -P` (every link, `//`, `/./`, `..`, a
+# trailing `/`, and on a case-insensitive file system the case on disk); its
+# last component is kept as named when it is a link or does not exist (the
+# link's location is what counts), and resolved with the rest when it is a
+# directory or `.`/`..`. The comparison is against `pwd -P` of the workspace,
+# with a path boundary, so <workspace>-secrets is outside.
+_sandy_ws_physical() {
+    local _p="$1" _real _par _base _rp
+    _real="${REAL_WORK_DIR:-}"
+    [ -n "$_real" ] || _real="$(cd "$WORK_DIR" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$_real" ] || return 1
+    case "$_p" in /*) ;; *) return 1 ;; esac
+    while case "$_p" in /|//) false ;; */) true ;; *) false ;; esac; do _p="${_p%/}"; done
+    _base="${_p##*/}"; _par="${_p%/*}"; [ -n "$_par" ] || _par=/
+    if [ "$_base" = . ] || [ "$_base" = .. ] || [ -z "$_base" ] \
+       || { [ -d "$_p" ] && [ ! -L "$_p" ]; }; then
+        _par="$_p"; _base=""
+    fi
+    _rp="$(CDPATH='' cd -P -- "$_par" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$_rp" ] || return 1
+    # `pwd -P` keeps a leading `//` too; on Linux and macOS it is `/`.
+    while case "$_rp" in //*) true ;; *) false ;; esac; do _rp="${_rp#/}"; done
+    [ -z "$_base" ] || _rp="${_rp%/}/$_base"
+    if [ "$_rp" = "$_real" ]; then printf '%s' "$WORK_DIR"; return 0; fi
+    case "$_rp" in "$_real"/*) printf '%s/%s' "$WORK_DIR" "${_rp#"$_real"/}"; return 0 ;; esac
+    return 1
 }
 
 # The submodule gitdirs under modules/ directory $1 that get the :ro overlay:
@@ -15749,23 +15764,21 @@ _sandy_symlink_target_judged() {
     return 1
 }
 
-# _sandy_symlink_walk REL MODE: walk workspace-relative REL prefix by prefix,
-# the way Docker and cp resolve it. A prefix that lands outside the workspace
+# _sandy_symlink_walk REL: walk workspace-relative REL prefix by prefix, the
+# way Docker and cp resolve it. A prefix that lands outside the workspace
 # while the one above it was inside is an EXIT: a link in the workspace that
 # leaves it. Below an exit the walk is in that target's own tree until a
 # prefix lands inside again (a link back in), after which the next exit is
 # judged afresh. Each exit -- and, below an exit the gate does not judge (a
 # target outside $HOME at an unprotected path), each further prefix -- is
-# judged exactly as the scan judges a link there:
-#   sweep  classified (_sandy_symlink_classify; a prefix that is not itself a
-#          link, reached through one, for the gate only), unless the pair is
-#          already recorded, by this path or by where the scan names the link;
-#   check  printed as "PREFIX -> TARGET", returning 0, when the gate would
-#          judge it and no judged target covers it; a target in $SANDY_HOME
-#          is never covered.
-# Returns 1 at the end of the path or at a prefix that does not resolve.
+# classified exactly as the scan classifies a link there
+# (_sandy_symlink_classify; a prefix that is not itself a link, reached
+# through one, for the gate only), unless the pair is already recorded, by
+# this path or by where the scan names the link. The -v check walks the same
+# way from the root (_sandy_symlink_path_unjudged). Returns 1 at the end of
+# the path or at a prefix that does not resolve.
 _sandy_symlink_walk() {
-    local _mode="$2" _q="" _rest="$1" _w _t _in=1 _ok="" _c _n
+    local _q="" _rest="$1" _w _t _in=1 _ok="" _c _n
     while [ -n "$_rest" ]; do
         _q="${_q:+$_q/}${_rest%%/*}"
         case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
@@ -15777,14 +15790,6 @@ _sandy_symlink_walk() {
         [ "$_in" = 0 ] || _ok=""
         _in=0
         [ -z "$_ok" ] || continue
-        if [ "$_mode" = check ]; then
-            case "$_t" in "$SANDY_HOME"|"$SANDY_HOME"/*) printf '%s -> %s\n' "$_q" "$_t"; return 0 ;; esac
-            if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
-            if [[ "$_t" == "$HOME"/* ]] || _sandy_is_protected_rel "$_q"; then
-                printf '%s -> %s\n' "$_q" "$_t"; return 0
-            fi
-            continue
-        fi
         if _sandy_symlink_recorded "$_q" "$_t"; then _ok=1; continue; fi
         _c="$(_sandy_symlink_canon "$_q")"
         if [ -n "$_c" ] && _sandy_symlink_recorded "$_c" "$_t"; then _ok=1; continue; fi
@@ -15801,20 +15806,17 @@ _sandy_symlink_walk() {
 
 # The workspace paths sandy mounts or copies BY NAME (_sandy_symlink_byname_rels)
 # judged as main's full scan would judge them, whatever SANDY_SYMLINK_SCAN_SKIP
-# hid and whether or not the --start supervisor rescanned: each one that
-# resolves outside the workspace is walked (_sandy_symlink_walk sweep), so a
-# link at the path or at any prefix of it, through any internal link, reaches
-# the gate, and is mounted after approval as the scan would mount it. A pair
-# already judged (by the scan, or by the supervisor from the list) is not
-# judged twice. Runs on every scan and in the supervisor. Then, in the
-# supervisor (list), each copied tree's resolved location inside the
-# workspace is walked, at every depth, for links the list does not hold (cp
-# copies the whole tree). A path with a node_modules or .venv* component is
-# left out, exactly as the scan leaves it out. Paths under .git and under a
-# gitdir are NOT left out: sandy mounts them by name, and `.git` can be a link
-# or a file naming a gitdir anywhere in the workspace.
+# hid or the scan prunes (.git): each one that resolves outside the workspace
+# is walked (_sandy_symlink_walk), so a link at the path or at any prefix of
+# it, through any internal link, reaches the gate, and is mounted after
+# approval as the scan would mount it. A pair the scan already judged is not
+# judged twice. Runs after every scan, the --start supervisor's included. A
+# path with a node_modules or .venv* component is left out, exactly as the
+# scan leaves it out. Paths under .git and under a gitdir are NOT left out:
+# sandy mounts them by name, and `.git` can be a link or a file naming a
+# gitdir anywhere in the workspace.
 _sandy_symlink_protected_sweep() {
-    local _mode="$1" _p _t _copied _link _rel _par _lp="" _lpin=""
+    local _p _t _par _lp="" _lpin=""
     # Loaded here, in this shell: the list below is produced in a subshell,
     # and the lists are read once per scan (#494).
     _sandy_is_protected_rel . || true
@@ -15836,35 +15838,80 @@ _sandy_symlink_protected_sweep() {
         if [ -n "$_lpin" ] && [ ! -L "$WORK_DIR/$_p" ]; then continue; fi
         _t="$(_sandy_symlink_resolve "$_p")"
         if [ -z "$_t" ] || _sandy_symlink_inside "$_t"; then continue; fi
-        _sandy_symlink_walk "$_p" sweep || true
+        _sandy_symlink_walk "$_p" || true
     done < <(_sandy_symlink_byname_rels)
-    [ "$_mode" = list ] || return 0
-    _copied="$(_sandy_symlink_copied)"
-    for _p in $_copied; do
-        _t="$(_sandy_symlink_resolve "$_p")"
-        [ -d "$_t" ] || continue
-        [[ "$_t" == "$REAL_WORK_DIR"/* ]] || continue
-        while IFS= read -r -d '' _link; do
-            _rel="${_link#$REAL_WORK_DIR/}"
-            _t="$(readlink -f "$_link" 2>/dev/null || true)"
-            _sandy_symlink_recorded "$_rel" "$_t" || _sandy_symlink_classify "$WORK_DIR/$_rel" "$_t"
-        done < <(find "$_t" -mindepth 1 \
-            \( -type d \( -name node_modules -o -name '.venv*' -o -name .git \) -prune \) \
-            -o -type l -print0 2>/dev/null)
-    done
     return 0
 }
 
-# A host path sandy mounts or copies by name, in the workspace: prints
-# "PREFIX -> TARGET" and returns 0 when it leaves the workspace through a
-# link the gate did not judge (_sandy_symlink_walk check); 1 otherwise,
-# including for any path outside the workspace.
-_sandy_symlink_byname_unjudged() {
-    local _rel _t
-    case "$1" in "$WORK_DIR"/*) _rel="${1#"$WORK_DIR"/}" ;; *) return 1 ;; esac
-    _t="$(_sandy_symlink_resolve "$_rel")"
-    if [ -z "$_t" ] || _sandy_symlink_inside "$_t"; then return 1; fi
-    _sandy_symlink_walk "$_rel" check
+# A host path sandy mounts or copies: prints "PREFIX -> TARGET" and returns 0
+# when it passes PHYSICALLY through the workspace and leaves it through a link
+# the gate did not judge; 1 otherwise. "In the workspace" is decided from
+# where each prefix resolves (`readlink -f`, compared with `pwd -P` of the
+# workspace and a path boundary), never from how the path is spelled, so
+# `//ws/x`, `/./`, `..`, a trailing `/`, a linked ancestor (`/tmp` and
+# `/private/tmp`) or another case cannot make a path through the workspace
+# look outside it; Docker resolves the source the same way. The path is
+# walked from the root: empty and `.` components are skipped, `..` is kept
+# for readlink. Once a prefix has resolved inside the workspace, a prefix
+# that lands outside is an EXIT, judged as the scan judges a link there: a
+# target in $SANDY_HOME is never covered; one that is, or lies under, a
+# target this launch's gate judged is covered (and so is the rest of its
+# tree, until a prefix comes back in); otherwise a target under $HOME, or
+# any target at a protected path or at one whose workspace name cannot be
+# told, is printed. A path with no link and no `..` component cannot leave
+# where it is, so it costs no readlink.
+_sandy_symlink_path_unjudged() {
+    local _rest="$1" _w="" _c _any="" _t _in=0 _ent="" _ok="" _q _qp _shp=""
+    case "$_rest" in /*) ;; *) _rest="$PWD/$_rest" ;; esac
+    while [ -n "$_rest" ]; do
+        _c="${_rest%%/*}"
+        case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+        case "$_c" in ''|.) continue ;; ..) _any=1; break ;; esac
+        _w="$_w/$_c"
+        if [ -L "$_w" ]; then _any=1; break; fi
+        [ -e "$_w" ] || break
+    done
+    [ -n "$_any" ] || return 1
+    _rest="$1"; _w=""
+    case "$_rest" in /*) ;; *) _rest="$PWD/$_rest" ;; esac
+    while [ -n "$_rest" ]; do
+        _c="${_rest%%/*}"
+        case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+        case "$_c" in ''|.) continue ;; esac
+        _w="$_w/$_c"
+        { [ -e "$_w" ] || [ -L "$_w" ]; } || return 1
+        _t="$(readlink -f "$_w" 2>/dev/null || true)"
+        [ -n "$_t" ] || return 1
+        if _sandy_symlink_inside "$_t"; then _in=1; _ent=1; continue; fi
+        [ -n "$_ent" ] || continue
+        [ "$_in" = 0 ] || _ok=""
+        _in=0
+        [ -z "$_ok" ] || continue
+        # Its workspace names: as spelled (empty and `.` components are
+        # already gone; none with a `..`), and where it physically sits.
+        _q=""; _qp=""
+        case "$_w/" in
+            */../*) ;;
+            "$WORK_DIR"/*) _q="${_w#"$WORK_DIR"/}" ;;
+        esac
+        if _qp="$(_sandy_ws_physical "$_w")"; then
+            if [ "$_qp" = "$WORK_DIR" ]; then _qp=.; else _qp="${_qp#"$WORK_DIR"/}"; fi
+        else
+            _qp=""
+        fi
+        [ -n "$_shp" ] || _shp="$(cd "$SANDY_HOME" 2>/dev/null && pwd -P)" || _shp=""
+        case "$_t" in
+            "$SANDY_HOME"|"$SANDY_HOME"/*|"${_shp:-$SANDY_HOME}"|"${_shp:-$SANDY_HOME}"/*)
+                printf '%s -> %s\n' "${_q:-${_qp:-$_w}}" "$_t"; return 0 ;;
+        esac
+        if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
+        if [[ "$_t" == "$HOME"/* ]] || { [ -z "$_q" ] && [ -z "$_qp" ]; } \
+           || { [ -n "$_q" ] && _sandy_is_protected_rel "$_q"; } \
+           || { [ -n "$_qp" ] && _sandy_is_protected_rel "$_qp"; }; then
+            printf '%s -> %s\n' "${_q:-${_qp:-$_w}}" "$_t"; return 0
+        fi
+    done
+    return 1
 }
 
 # Refuse the launch for the "PREFIX -> TARGET" lines in $1.
@@ -15888,7 +15935,7 @@ _sandy_symlink_check_mounts() {
     local _i=0 _n=${#RUN_FLAGS[@]} _hit _bad=""
     while [ "$_i" -lt "$_n" ]; do
         if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
-            if _hit="$(_sandy_symlink_byname_unjudged "${RUN_FLAGS[$((_i + 1))]%%:*}")"; then
+            if _hit="$(_sandy_symlink_path_unjudged "${RUN_FLAGS[$((_i + 1))]%%:*}")"; then
                 _bad="$_bad$_hit"$'\n'
             fi
         fi
@@ -15930,107 +15977,11 @@ _sandy_symlink_scan() {
         -o -type l -print0 2>/dev/null)
     kill "$_timer" 2>/dev/null || true
     wait "$_timer" 2>/dev/null || true
-    _sandy_symlink_protected_sweep scan
+    _sandy_symlink_protected_sweep
     _dur=$((SECONDS - _t0))
     if [ "$_dur" -gt 5 ]; then
         info "Symlink scan took ${_dur}s. A large directory that holds no link the session needs mounted can be left out with SANDY_SYMLINK_SCAN_SKIP (comma-separated, workspace-relative; e.g. in ~/.sandy/config, or in .sandy/config, which asks for approval once)."
     fi
-    return 0
-}
-
-# --- The --start approval pass's link list (D12c) ---------------------------
-# Under --start the client's approval pass (SANDY_APPROVE_ONLY) scans and
-# approves; the supervisor used to scan the whole workspace again. The pass now
-# writes the links it resolved to a fresh $SANDBOX_DIR/launch/<id>/symlinks.list
-# and hands <id> to the supervisor (SANDY_PREPASS_SYMLINKS), which re-checks
-# each listed link (still a link, still resolving to the listed target) and
-# mounts only those, then runs the same gate on them. So a link added after
-# the pass is not mounted, a retargeted link's new target is not mounted, and
-# both are judged by the gate at the next launch. NUL-separated records:
-#   sandy-symlinks-v1 <canonical workspace> <count> {<rel> <target>}*count end
-# No container mounts launch/ (only subdirectories of a launch's own id, :ro),
-# and the supervisor removes the whole launch/ tree under the lock before it
-# mints its own id, so the list is read once and never reused.
-_sandy_symlink_list_write() {   # prints the id on success
-    local _id _ld _tmp _i=0
-    _id="$( (openssl rand -hex 8 2>/dev/null) \
-        || (head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
-        || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
-    [[ "$_id" =~ ^[0-9a-f]{16}$ ]] || return 1
-    # Never through a planted link: a link at launch/ is removed (rm does not
-    # follow it), the id directory must be new (mkdir without -p fails on
-    # anything already there), and the list is renamed into it from a mktemp.
-    if [ -L "$SANDBOX_DIR/launch" ]; then rm -f "$SANDBOX_DIR/launch" || return 1; fi
-    if [ ! -d "$SANDBOX_DIR/launch" ]; then mkdir "$SANDBOX_DIR/launch" 2>/dev/null || return 1; fi
-    [ -d "$SANDBOX_DIR/launch" ] && [ ! -L "$SANDBOX_DIR/launch" ] || return 1
-    _ld="$SANDBOX_DIR/launch/$_id"
-    mkdir "$_ld" 2>/dev/null || return 1
-    _tmp="$(mktemp "$_ld/.symlinks.XXXXXX" 2>/dev/null)" || return 1
-    {
-        printf 'sandy-symlinks-v1\0%s\0%s\0' "$REAL_WORK_DIR" "${#_SANDY_SL_RELS[@]}"
-        while [ "$_i" -lt ${#_SANDY_SL_RELS[@]} ]; do
-            printf '%s\0%s\0' "${_SANDY_SL_RELS[$_i]}" "${_SANDY_SL_TGTS[$_i]}"
-            _i=$((_i + 1))
-        done
-        printf 'end\0'
-    } > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
-    mv -f "$_tmp" "$_ld/symlinks.list" 2>/dev/null || { rm -f "$_tmp"; return 1; }
-    printf '%s' "$_id"
-}
-
-# Supervisor side: load the list named by $1 into _SANDY_PP_RELS/_SANDY_PP_TGTS
-# and set _SANDY_PP_STATE=loaded. On any failure sets _SANDY_PP_REASON and
-# returns 1; the caller then scans as before. Missing or corrupt therefore
-# means "scan", never "mount nothing" and never "mount everything": the scan
-# runs the gate, which under --start (no tty) refuses anything not approved.
-_sandy_symlink_list_read() {
-    local _id="$1" _f _h="" _w="" _n="" _r _t _e="" _x="" _i=0 _real
-    _SANDY_PP_RELS=(); _SANDY_PP_TGTS=(); _SANDY_PP_STATE=""; _SANDY_PP_REASON=""
-    [[ "$_id" =~ ^[0-9a-f]{16}$ ]] || { _SANDY_PP_REASON="named by a malformed id"; return 1; }
-    _f="$SANDBOX_DIR/launch/$_id/symlinks.list"
-    if [ -L "$SANDBOX_DIR/launch" ] || [ -L "$SANDBOX_DIR/launch/$_id" ] || [ -L "$_f" ] \
-       || [ ! -d "$SANDBOX_DIR/launch/$_id" ] || [ ! -f "$_f" ]; then
-        _SANDY_PP_REASON="missing ($_f)"; return 1
-    fi
-    _real="$(cd "$WORK_DIR" && pwd -P)"
-    _SANDY_PP_REASON="corrupt ($_f)"
-    {
-        IFS= read -r -d '' _h && IFS= read -r -d '' _w && IFS= read -r -d '' _n || return 1
-        [ "$_h" = sandy-symlinks-v1 ] && [ "$_w" = "$_real" ] || return 1
-        [[ "$_n" =~ ^[0-9]{1,7}$ ]] || return 1
-        while [ "$_i" -lt "$_n" ]; do
-            IFS= read -r -d '' _r && IFS= read -r -d '' _t || return 1
-            case "/$_r/" in *//*|*/./*|*/../*) return 1 ;; esac
-            case "$_t" in /*) ;; *) return 1 ;; esac
-            _SANDY_PP_RELS+=("$_r"); _SANDY_PP_TGTS+=("$_t")
-            _i=$((_i + 1))
-        done
-        IFS= read -r -d '' _e && [ "$_e" = end ] || return 1
-        if IFS= read -r -d '' _x || [ -n "$_x" ]; then return 1; fi
-    } < "$_f"
-    _SANDY_PP_STATE=loaded; _SANDY_PP_REASON=""
-    return 0
-}
-
-# Supervisor side: the listed links that still hold, classified exactly as the
-# scan would, plus the protected-path sweep.
-_sandy_symlinks_from_list() {
-    local _i=0 _link _cur
-    while [ "$_i" -lt ${#_SANDY_PP_RELS[@]} ]; do
-        _link="$WORK_DIR/${_SANDY_PP_RELS[$_i]}"
-        if [ ! -L "$_link" ]; then
-            warn "Symlink ${_SANDY_PP_RELS[$_i]} was removed after the approval pass; nothing is mounted for it."
-        else
-            _cur="$(readlink -f "$_link" 2>/dev/null || true)"
-            if [ "$_cur" = "${_SANDY_PP_TGTS[$_i]}" ]; then
-                _sandy_symlink_classify "$_link" "$_cur"
-            else
-                warn "Symlink ${_SANDY_PP_RELS[$_i]} changed target after the approval pass (approved: ${_SANDY_PP_TGTS[$_i]}, now: ${_cur:-unresolvable}); not mounted. The next launch checks it against the approval list."
-            fi
-        fi
-        _i=$((_i + 1))
-    done
-    _sandy_symlink_protected_sweep list
     return 0
 }
 
@@ -16044,11 +15995,7 @@ _sandy_resolve_symlinks() {
     SYMLINK_HOST_PATHS=()
     SYMLINK_CONTAINER_PATHS=()
     _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
-    if [ "${_SANDY_PP_STATE:-}" = loaded ]; then
-        _sandy_symlinks_from_list
-    else
-        _sandy_symlink_scan
-    fi
+    _sandy_symlink_scan
 
     # `--approvals` report mode (#296): the verdict this gate reaches below,
     # without its writes -- the approved-list refresh (`cp`) runs on EVERY
@@ -16153,19 +16100,6 @@ _sandy_resolve_symlinks() {
 if [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then
     _sandy_approve_only_finish
 fi
-
-# B2 (D12c): the --start supervisor takes the approval pass's link list. Read
-# here, before the lock section removes every earlier launch/<id>/ directory;
-# used by _sandy_resolve_symlinks at mount assembly. Only the supervisor honours
-# it (the client always passes the variable, empty when there is no list). A
-# missing or corrupt list is named and the supervisor scans, as it did before.
-_SANDY_PP_STATE=""
-if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] && [ -n "${SANDY_PREPASS_SYMLINKS:-}" ]; then
-    if ! _sandy_symlink_list_read "$SANDY_PREPASS_SYMLINKS"; then
-        warn "The approval pass's symlink list is ${_SANDY_PP_REASON:-unreadable}; scanning the workspace again."
-    fi
-fi
-unset SANDY_PREPASS_SYMLINKS
 
 
 # Detect sibling sandboxes that point at the same workspace. The most common
@@ -21438,7 +21372,7 @@ if _sandy_agent_has claude; then
                 # a link as a link on both, so nothing is copied through one.
                 # The source itself is followed, so it must leave the
                 # workspace only through links the gate judged.
-                if _sl_hit="$(_sandy_symlink_byname_unjudged "$WORK_DIR/.claude/$_sd")"; then
+                if _sl_hit="$(_sandy_symlink_path_unjudged "$WORK_DIR/.claude/$_sd")"; then
                     _sandy_symlink_unjudged_refuse "$_sl_hit"
                 fi
                 cp -R "$WORK_DIR/.claude/$_sd" "$SANDBOX_DIR/workspace-$_sd"
@@ -21464,7 +21398,7 @@ if _sandy_agent_has gemini; then
             _host_had_sub=0
             [ -d "$WORK_DIR/.gemini/$_sd" ] && [ "$_host_empty_stub" = "0" ] && _host_had_sub=1
             if [ ! -d "$SANDBOX_DIR/workspace-gemini-$_sd" ] && [ "$_host_had_sub" = "1" ]; then
-                if _sl_hit="$(_sandy_symlink_byname_unjudged "$WORK_DIR/.gemini/$_sd")"; then
+                if _sl_hit="$(_sandy_symlink_path_unjudged "$WORK_DIR/.gemini/$_sd")"; then
                     _sandy_symlink_unjudged_refuse "$_sl_hit"
                 fi
                 cp -R "$WORK_DIR/.gemini/$_sd" "$SANDBOX_DIR/workspace-gemini-$_sd"   # -R: see .claude above

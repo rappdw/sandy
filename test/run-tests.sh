@@ -26162,116 +26162,85 @@ check "§227(5) a slow scan says it is scanning after 2 s, then prints its durat
     _ "$_A6_RC" "$_A6_DIR/s227s/out" "$_A6_DIR/s227/out"
 unset _S227_H _S227_A _S227_WHY _S227_SB
 
-section "§228: under --start the supervisor mounts only what the approval pass resolved and approved, re-checked; a missing or corrupt list means scan again (optimization pass B2, decision D12c)"
+section "§228: under --start the supervisor scans the workspace again and gates as main does: a link planted after the approval pass is refused wherever it is (optimization pass B2, decision D12c withdrawn)"
 # ============================================================
 # The --start client's approval pass (SANDY_APPROVE_ONLY) scans and resolves
-# the gate on the client's terminal; the supervisor used to scan the whole
-# workspace again. The pass now writes its links to launch/<id>/symlinks.list
-# and the supervisor mounts from it. The workspace can change in between, so:
-# a link added after the pass is not mounted, a retargeted link's new target
-# is not mounted, the gate still refuses both at the next launch, and a
-# protected-path (or .gstack) link planted in between is still refused. The supervisor is
-# driven for real (SANDY_DAEMON_SUPERVISOR=1, the argv the client re-execs);
-# the docker stub records its detached run and then SIGTERMs it, as --stop does.
+# the gate on the client's terminal; the supervisor then scans the workspace
+# again and runs the same gate under /dev/null, as on main. (B2 first had the
+# supervisor mount from a link list the pass handed it instead of scanning;
+# every bypass the verifier found in rounds 3-5 came from that, so the list
+# is gone.) The workspace can change between the two, so a link added after
+# the pass -- at ANY path, not only one sandy mounts by name -- and an
+# approved link retargeted after it are refused by the supervisor: named, no
+# agent run, the approved list unchanged. The supervisor is driven for real
+# (SANDY_DAEMON_SUPERVISOR=1, the argv the client re-execs); the docker stub
+# records its detached run and then SIGTERMs it, as --stop does.
 _s228_ws() {   # $1 = CASE: HOME/t1..t5, ws links a -> t1 and b -> t2, both approved
     local h="$_A6_DIR/$1"
     mkdir -p "$h/t1" "$h/t2" "$h/t3" "$h/t5" "$h/ws"
     ln -s "$h/t1" "$h/ws/a"; ln -s "$h/t2" "$h/ws/b"
     _s226_seed "$1" "$(printf '%s\n' "a -> $h/t1" "b -> $h/t2")"
 }
-_s228_pass() {   # $1 = CASE -> sets _S228_ID (empty when none)
+_s228_pass() {   # $1 = CASE
     rm -f "$_A6_DIR/$1/result"
     _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_A6_DIR/$1/result" --
-    _S228_ID="$(sed -n 's/^symlinks_list=//p' "$_A6_DIR/$1/result" 2>/dev/null || true)"
 }
-_s228_sup() {   # $1 = CASE  $2 = list id
+_s228_sup() {   # $1 = CASE
     _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 \
-        SANDY_PREPASS_SYMLINKS="$2" A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/$1/ws"
-}
-# The list as "rel -> target" lines (C-sorted), or BAD when its frame is wrong.
-_s228_list() {   # $1 = list file  $2 = canonical workspace
-    tr '\0' '\n' < "$1" | awk -v w="$2" '
-        NR==1 {ok=($0=="sandy-symlinks-v1")} NR==2 {ok=ok && ($0==w)} NR==3 {n=$0+0}
-        NR>3 && NR<=3+2*n { if ((NR-4)%2==0) r=$0; else print r " -> " $0 }
-        {last=$0} END {if (!ok || NR!=4+2*n || last!="end") print "BAD"}' | LC_ALL=C sort
+        A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/$1/ws"
 }
 
 _s228_ws s228
 _s228_pass s228
 _S228_SB="$(_a6_sandbox s228)"
 _S228_H="$_A6_DIR/s228"
-check "§228(1) the approval pass passes the gate and writes the links it resolved to a fresh launch/<id>/symlinks.list, named in its result file (rc ${_A6_RC:-none}, id '${_S228_ID:-}')" \
-    bash -c 'test "$1" = 0 && [[ "$2" =~ ^[0-9a-f]{16}$ ]] && test -f "$3/launch/$2/symlinks.list" && test "$4" = "$5"' \
-    _ "$_A6_RC" "${_S228_ID:-none}" "$_S228_SB" "$(_s228_list "$_S228_SB/launch/${_S228_ID:-none}/symlinks.list" "$_S228_H/ws" 2>/dev/null || true)" \
-    "$(printf '%s\n' "a -> $_S228_H/t1" "b -> $_S228_H/t2" | LC_ALL=C sort)"
+check "§228(1) the approval pass passes the gate and hands the supervisor no link list: rc 0, no symlinks_list line in its result, no symlinks.list under the sandbox (rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && ! grep -qs "^symlinks_list=" "$2" && test -z "$(find "$3" -name symlinks.list 2>/dev/null)"' \
+    _ "$_A6_RC" "$_A6_DIR/s228/result" "$_S228_SB"
+_s228_sup s228
+_S228_M="$(_s226_mounts s228 "$_S228_H")"
+[ -n "$(_a6_agent_args s228)" ] || _a6_diag "§228(2)" s228
+check "§228(2) control: nothing changed after the pass, so the supervisor's scan mounts both approved targets and reaches the agent run (mounts: $(printf '%s' "$_S228_M" | tr '\n' ' '))" \
+    bash -c 'test -n "$1" && test "$2" = "$3"' _ "$(_a6_agent_args s228)" "$_S228_M" \
+    "$(printf '%s\n' "$_S228_H/t1:$_S228_H/t1" "$_S228_H/t2:$_S228_H/t2" | LC_ALL=C sort)"
 
-# Between the pass and the supervisor: a new link, and b retargeted.
+# g2 (round 4): between the pass and the supervisor, a new link at a path
+# sandy does not mount by name, pointing outside, and b retargeted.
+_s228_ws s228n
+_s228_pass s228n
+_S228_H="$_A6_DIR/s228n"
 ln -s "$_S228_H/t3" "$_S228_H/ws/n"
 rm -f "$_S228_H/ws/b"; ln -s "$_S228_H/t5" "$_S228_H/ws/b"
-_s228_sup s228 "${_S228_ID:-}"
-_S228_M="$(_s226_mounts s228 "$_S228_H")"
-[ "$_S228_M" = "$_S228_H/t1:$_S228_H/t1" ] || _a6_diag "§228(2)" s228
-check "§228(2) the supervisor does not scan: it mounts a's target only -- not the link added after the pass, not b's new target, not b's old one -- and says b changed (mutations: the supervisor scans anyway, it mounts a target the list does not hold; mounts: $(printf '%s' "$_S228_M" | tr '\n' ' '))" \
-    bash -c 'test "$1" = "$2" && grep -q "b changed target after the approval pass" "$3" && ! grep -q "present at previous approval\|need interactive approval" "$3"' \
-    _ "$_S228_M" "$_S228_H/t1:$_S228_H/t1" "$_A6_DIR/s228/out"
-check "§228(3) ...and the gate ran on what it mounts: the approved list now holds a alone (b's approved form is gone, so its new target is new next time)" \
-    bash -c 'test "$(cat "$1")" = "$2"' _ "$_S228_SB/.sandy-approved-symlinks.list" "a -> $_S228_H/t1"
-_a6_launch s228 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-check "§228(4) the next launch's gate refuses both: the added link and b's new target, named, no agent run (rc ${_A6_RC:-none})" \
-    bash -c 'test "$1" != 0 && grep -q "present at previous approval" "$2" && grep -qF "n -> $3/t3" "$2" && grep -qF "b -> $3/t5" "$2" && test -z "$4"' \
-    _ "$_A6_RC" "$_A6_DIR/s228/out" "$_S228_H" "$(_a6_agent_args s228)"
+_s228_sup s228n
+_S228_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args s228n)" ] \
+  && grep -q "present at previous approval" "$_S228_H/out" \
+  && grep -qF "n -> $_S228_H/t3" "$_S228_H/out" && grep -qF "b -> $_S228_H/t5" "$_S228_H/out" \
+  && ! grep -rqsF -- "$_S228_H/t3" "$_S228_H/runs" && ! grep -rqsF -- "$_S228_H/t5" "$_S228_H/runs" \
+  && test "$(cat "$(_a6_sandbox s228n)/.sandy-approved-symlinks.list" 2>/dev/null)" = "$(printf '%s\n' "a -> $_S228_H/t1" "b -> $_S228_H/t2")"; } || _S228_OK=$?
+[ "$_S228_OK" = 0 ] || _a6_diag "§228(3)" s228n
+check "§228(3) g2: a link planted after the pass at a path sandy does not mount by name (n -> \$HOME/t3), and b retargeted after it, are refused by the supervisor's own scan: both named, no agent run, neither target in any docker run, the approved list unchanged (mutation: the supervisor skips the scan, as when it mounted from the pass's list; rc ${_A6_RC:-none})" \
+    test "$_S228_OK" = 0
 
-# A protected-path link planted between the pass and the supervisor: the
-# supervisor does not rescan, but it does look at every protected path.
+# A protected-path link planted between the pass and the supervisor.
 _s228_ws s228p
 _s228_pass s228p
 ln -s /etc/hosts "$_A6_DIR/s228p/ws/.npmrc"
-_s228_sup s228p "${_S228_ID:-}"
-check "§228(5) a protected-path link planted after the pass is refused by the supervisor's gate, no agent run (mutation: the list-mode protected-path sweep removed; pass id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
-    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && grep -q "present at previous approval" "$2" && grep -qF ".npmrc -> $4" "$2" && test -z "$3"' \
-    _ "${_S228_ID:-none}" "$_A6_DIR/s228p/out" "$(_a6_agent_args s228p)" "$_S226_ETC"
+_s228_sup s228p
+check "§228(4) a protected-path link planted after the pass is refused by the supervisor's gate, no agent run (rc ${_A6_RC:-none})" \
+    bash -c 'grep -q "present at previous approval" "$1" && grep -qF ".npmrc -> $3" "$1" && test -z "$2"' \
+    _ "$_A6_DIR/s228p/out" "$(_a6_agent_args s228p)" "$_S226_ETC"
 # The same for .gstack, the one other workspace path sandy mounts by name
-# (read-write, under the gstack pack): a link planted there after the pass
-# would be a mount of its target, so the supervisor judges it.
+# (read-write, under the gstack pack).
 _s228_ws s228g
 _s228_pass s228g
 mkdir -p "$_A6_DIR/s228g/secret"
 ln -s "$_A6_DIR/s228g/secret" "$_A6_DIR/s228g/ws/.gstack"
-_s228_sup s228g "${_S228_ID:-}"
-check "§228(5b) a .gstack link planted after the pass is refused by the supervisor's gate, no agent run (mutation: .gstack left out of the list-mode sweep; rc ${_A6_RC:-none})" \
-    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && grep -q "present at previous approval" "$2" && grep -qF ".gstack -> $4/secret" "$2" && test -z "$3"' \
-    _ "${_S228_ID:-none}" "$_A6_DIR/s228g/out" "$(_a6_agent_args s228g)" "$_A6_DIR/s228g"
-
-# Missing list: scan again. It mounts what the scan finds (not "nothing"),
-# and refuses what is not approved (not "everything").
-_s228_ws s228m
-_s228_sup s228m 0123456789abcdef
-_S228_M="$(_s226_mounts s228m "$_A6_DIR/s228m")"
-check "§228(6) a missing list is named and the supervisor scans: both approved targets mounted (mutation: a missing list mounts nothing; mounts: $(printf '%s' "$_S228_M" | tr '\n' ' '))" \
-    bash -c 'grep -q "symlink list is missing" "$1" && test "$2" = "$3"' _ "$_A6_DIR/s228m/out" "$_S228_M" \
-    "$(printf '%s\n' "$_A6_DIR/s228m/t1:$_A6_DIR/s228m/t1" "$_A6_DIR/s228m/t2:$_A6_DIR/s228m/t2" | LC_ALL=C sort)"
-ln -s "$_A6_DIR/s228m/t3" "$_A6_DIR/s228m/ws/n"
-_s228_sup s228m 0123456789abcdef
-check "§228(7) ...and that scan's gate refuses a link nobody approved, no agent run (rc ${_A6_RC:-none})" \
-    bash -c 'grep -q "symlink list is missing" "$1" && grep -q "present at previous approval" "$1" && grep -qF "n -> $2/t3" "$1" && test -z "$3"' \
-    _ "$_A6_DIR/s228m/out" "$_A6_DIR/s228m" "$(_a6_agent_args s228m)"
-
-# Corrupt list (a real one, truncated): named, and the supervisor scans, so an
-# unapproved link is refused rather than slipping past a half-read list.
-_s228_ws s228c
-_s228_pass s228c
-_S228_F="$(_a6_sandbox s228c)/launch/${_S228_ID:-none}/symlinks.list"
-_S228_OK=1
-if [ -f "$_S228_F" ]; then
-    _S228_N="$(wc -c < "$_S228_F" | tr -d ' ')"
-    head -c "$((_S228_N - 4))" "$_S228_F" > "$_S228_F.t" && mv -f "$_S228_F.t" "$_S228_F" && _S228_OK=0
-fi
-ln -s "$_A6_DIR/s228c/t3" "$_A6_DIR/s228c/ws/n"
-_s228_sup s228c "${_S228_ID:-}"
-check "§228(8) a corrupt (truncated) list is named and the supervisor scans: the unapproved link is refused, no agent run (mutation: a list read without its frame check; rc ${_A6_RC:-none})" \
-    bash -c 'test "$1" = 0 && grep -q "symlink list is corrupt" "$2" && grep -q "present at previous approval" "$2" && grep -qF "n -> $3/t3" "$2" && test -z "$4"' \
-    _ "$_S228_OK" "$_A6_DIR/s228c/out" "$_A6_DIR/s228c" "$(_a6_agent_args s228c)"
-unset _S228_ID _S228_SB _S228_H _S228_M _S228_F _S228_N _S228_OK
+_s228_sup s228g
+check "§228(5) a .gstack link planted after the pass is refused by the supervisor's gate, no agent run (rc ${_A6_RC:-none})" \
+    bash -c 'grep -q "present at previous approval" "$1" && grep -qF ".gstack -> $3/secret" "$1" && test -z "$2"' \
+    _ "$_A6_DIR/s228g/out" "$(_a6_agent_args s228g)" "$_A6_DIR/s228g"
+unset _S228_SB _S228_H _S228_M _S228_OK
 
 section "§229: the --start approval pass makes no docker call and generates no build files (optimization pass B2, F5)"
 # ============================================================
@@ -26283,14 +26252,14 @@ section "§229: the --start approval pass makes no docker call and generates no 
 _s228_ws s229
 _s228_pass s229
 _S229_LOG="$(grep '^docker ' "$_A6_DIR/s229/events.log" 2>/dev/null || true)"
-check "§229(1) the approval pass reached the gate (rc 0, a link list written) with zero docker calls (mutations: the docker-info preflight, the network reaper or the proxy reaper run again in the pass; logged: $(printf '%s' "${_S229_LOG:0:200}" | tr '\n' ';'))" \
-    bash -c 'test "$1" = 0 && [[ "$2" =~ ^[0-9a-f]{16}$ ]] && ! grep -q "^docker " "$3"' _ "$_A6_RC" "${_S228_ID:-none}" "$_A6_DIR/s229/events.log"
+check "§229(1) the approval pass reached the gate (rc 0) with zero docker calls (mutations: the docker-info preflight, the network reaper or the proxy reaper run again in the pass; logged: $(printf '%s' "${_S229_LOG:0:200}" | tr '\n' ';'))" \
+    bash -c 'test "$1" = 0 && ! grep -q "^docker " "$2"' _ "$_A6_RC" "$_A6_DIR/s229/events.log"
 check "§229(2) ...and generated no build files: no Dockerfile*, entrypoint.sh or tmux.conf in SANDY_HOME (mutations: ensure_build_files or ensure_agent_dockerfile run in the pass)" \
     bash -c 'test -z "$(ls "$1" | grep -E "^(Dockerfile|entrypoint\.sh|tmux\.conf)" || true)"' _ "$_A6_DIR/s229/sh"
 _a6_launch s229 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 check "§229(3) control: a plain launch through the same stubs calls docker info and writes the build files (rc ${_A6_RC:-none})" \
     bash -c 'grep -q "^docker info" "$1" && test -f "$2/Dockerfile.base"' _ "$_A6_DIR/s229/events.log" "$_A6_DIR/s229/sh"
-section "§230: the scan key and the --start list never hide a link at a path sandy copies or mounts by name, nor at an ancestor of one (B2 send-back)"
+section "§230: the scan key never hides a link at a path sandy copies or mounts by name, nor at an ancestor of one, and the --start supervisor refuses one planted after the pass (B2 send-back)"
 # ============================================================
 # .claude/{commands,agents,plugins} and .gemini/{extensions,commands} are
 # COPIED into the sandbox by name (`cp -r`, then mounted read-write); the
@@ -26298,9 +26267,10 @@ section "§230: the scan key and the --start list never hide a link at a path sa
 # link at any component of such a source. So: SANDY_SYMLINK_SCAN_SKIP may not
 # cover a copied tree (a workspace config could otherwise hide
 # `.claude/commands -> ~/secret` from the gate: the verifier's case a1), and
-# the --start supervisor, which does not rescan, judges every such path, every
-# ancestor of one, and the copied trees' contents (cases a5, a6). Each case
-# here refuses without a terminal; before the fix each launched with rc 0.
+# the --start supervisor judges every such path, every ancestor of one, and
+# the copied trees' contents when they change after the approval pass (cases
+# a5, a6). Each case here refuses without a terminal; before the fix each
+# launched with rc 0.
 _s230_refused() {   # $1 = CASE  $2 = the link that must be named
     [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$1")" ] \
         && grep -q "need interactive approval\|present at previous approval" "$_A6_DIR/$1/out" \
@@ -26338,11 +26308,11 @@ _s230_sup_after() {   # $1 = CASE; runs the pass, then $2... (a command) , then 
     _s228_ws "$c"; mkdir -p "$_A6_DIR/$c/secret" "$_A6_DIR/$c/other"
     _s228_pass "$c"
     "$@"
-    _s228_sup "$c" "${_S228_ID:-}"
+    _s228_sup "$c"
 }
 _s230_a5() { mkdir -p "$_A6_DIR/s230-a5/ws/.claude"; ln -s "$_A6_DIR/s230-a5/secret" "$_A6_DIR/s230-a5/ws/.claude/commands"; }
 _s230_sup_after s230-a5 _s230_a5
-check "§230(4) a5: .claude/commands -> \$HOME/secret planted after the pass is refused by the supervisor (mutation: copied trees left out of the sweep; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+check "§230(4) a5: .claude/commands -> \$HOME/secret planted after the pass is refused by the supervisor (rc ${_A6_RC:-none})" \
     _s230_refused s230-a5 ".claude/commands -> $_A6_DIR/s230-a5/secret"
 _s230_a6() { printf '{}\n' > "$_A6_DIR/s230-a6/other/settings.json"; rm -rf "$_A6_DIR/s230-a6/ws/.claude"; ln -s "$_A6_DIR/s230-a6/other" "$_A6_DIR/s230-a6/ws/.claude"; }
 _s230_sup_after s230-a6 _s230_a6
@@ -26350,22 +26320,22 @@ check "§230(5) a6: .claude itself replaced by a link after the pass (the ancest
     _s230_refused s230-a6 ".claude -> $_A6_DIR/s230-a6/other"
 _s230_a7() { mkdir -p "$_A6_DIR/s230-a7/ws/.claude/commands"; ln -s "$_A6_DIR/s230-a7/secret" "$_A6_DIR/s230-a7/ws/.claude/commands/x"; }
 _s230_sup_after s230-a7 _s230_a7
-check "§230(6) a link planted INSIDE a copied tree after the pass is refused (mutation: the list-mode walk of the copied trees removed; rc ${_A6_RC:-none})" \
+check "§230(6) a link planted INSIDE a copied tree after the pass is refused (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
     _s230_refused s230-a7 ".claude/commands/x -> $_A6_DIR/s230-a7/secret"
-# An approved ancestor link retargeted after the pass: on the list, but no
-# longer what was approved, so it is judged with its new target.
+# An approved ancestor link retargeted after the pass is no longer what was
+# approved, so it is judged with its new target.
 _S230=s230-a8; mkdir -p "$_A6_DIR/$_S230/o1" "$_A6_DIR/$_S230/o2" "$_A6_DIR/$_S230/ws"
 ln -s "$_A6_DIR/$_S230/o1" "$_A6_DIR/$_S230/ws/.claude"
 _s226_seed "$_S230" ".claude -> $_A6_DIR/$_S230/o1"
 _s228_pass "$_S230"
 rm -f "$_A6_DIR/$_S230/ws/.claude"; ln -s "$_A6_DIR/$_S230/o2" "$_A6_DIR/$_S230/ws/.claude"
-_s228_sup "$_S230" "${_S228_ID:-}"
-check "§230(7) an approved .claude link retargeted after the pass is judged with its new target and refused, not waved through as listed (mutation: any listed path counts as checked; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+_s228_sup "$_S230"
+check "§230(7) an approved .claude link retargeted after the pass is judged with its new target and refused (rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".claude -> $_A6_DIR/$_S230/o2"
 unset _S230
 unset -f _s230_a5 _s230_a6 _s230_a7   # _s230_refused/_s230_sup_after: §232 uses them
 
-section "§231: skip entries are literal and workspace-relative; the link list is honoured only by the supervisor, written only to a real launch/, and validated entry by entry (B2 send-back)"
+section "§231: skip entries are literal and workspace-relative (B2 send-back)"
 # ============================================================
 # I6: an entry is a literal path. With a directory literally named `.*`
 # present, the entry `.*` names it and prunes it alone -- not every
@@ -26383,33 +26353,7 @@ _S231=s231-dots; mkdir -p "$_A6_DIR/$_S231/ws/sub" "$_A6_DIR/$_S231/ws/scratch"
 _a6_launch "$_S231" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=sub/../scratch,/abs
 check "§231(2) an entry with a .. component, or an absolute one, is refused by name, not used (mutation: the ./.. check removed; rc ${_A6_RC:-none})" \
     bash -c 'grep -qF "'"'"'sub/../scratch'"'"' is not a directory inside the workspace" "$1" && grep -qF "'"'"'/abs'"'"' is not a directory inside the workspace" "$1"' _ "$_A6_DIR/$_S231/out"
-# I3: only the supervisor reads the list. A plain launch handed a valid id
-# still scans, so a link added since the pass is refused.
-_s228_ws s231-sup
-_s228_pass s231-sup
-ln -s "$_A6_DIR/s231-sup/t3" "$_A6_DIR/s231-sup/ws/n"
-_a6_launch s231-sup SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_PREPASS_SYMLINKS="${_S228_ID:-}"
-check "§231(3) a plain (non-supervisor) launch ignores SANDY_PREPASS_SYMLINKS and scans: the added link is refused (mutation: the list honoured outside the supervisor; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
-    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && test "$2" != 0 && grep -q "present at previous approval" "$3" && grep -qF "n -> $4/t3" "$3"' _ "${_S228_ID:-none}" "$_A6_RC" "$_A6_DIR/s231-sup/out" "$_A6_DIR/s231-sup"
-# I4: a link planted at launch/ is removed, not written through.
-_s228_ws s231-ln
-mkdir -p "$_A6_DIR/s231-ln/elsewhere"
-ln -s "$_A6_DIR/s231-ln/elsewhere" "$(_a6_sandbox s231-ln)/launch"
-_s228_pass s231-ln
-check "§231(4) a symlink at launch/ is not written through: the list lands in a real launch/<id>/, the link's target stays empty (mutation: the launch/ link check removed; id '${_S228_ID:-}')" \
-    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && test ! -L "$2/launch" && test -f "$2/launch/$1/symlinks.list" && test -z "$(ls -A "$3")"' _ "${_S228_ID:-none}" "$(_a6_sandbox s231-ln)" "$_A6_DIR/s231-ln/elsewhere"
-# I5: a well-framed list whose entry path escapes the workspace is corrupt.
-_s228_ws s231-ent
-_s228_pass s231-ent
-_S231_F="$(_a6_sandbox s231-ent)/launch/${_S228_ID:-none}/symlinks.list"
-_S231_OK=1
-if [ -f "$_S231_F" ]; then
-    printf 'sandy-symlinks-v1\000%s\000%s\000../a\000%s\000end\000' "$_A6_DIR/s231-ent/ws" 1 "$_A6_DIR/s231-ent/t1" > "$_S231_F" && _S231_OK=0
-fi
-_s228_sup s231-ent "${_S228_ID:-}"
-check "§231(5) a list entry whose path has a .. component makes the list corrupt (named) and the supervisor scans (mutation: entry paths not validated; rc ${_A6_RC:-none})" \
-    bash -c 'test "$1" = 0 && grep -q "symlink list is corrupt" "$2"' _ "$_S231_OK" "$_A6_DIR/s231-ent/out"
-unset _S231 _S231_F _S231_OK
+unset _S231
 
 section "§232: a path sandy mounts or copies by name is judged where it RESOLVES, through any internal link, whatever the key hides; copied trees are copied with cp -R (B2 send-back 2)"
 # ============================================================
@@ -26472,22 +26416,22 @@ check "§232(judge) .claude -> a directory outside \$HOME with a regular setting
 _s232_b3() { mkdir -p "$_A6_DIR/s232-b3/ws/vendor"; ln -s vendor "$_A6_DIR/s232-b3/ws/.claude"; ln -s "$_A6_DIR/s232-b3/secret" "$_A6_DIR/s232-b3/ws/vendor/commands"; }
 _s230_sup_after s232-b3 _s232_b3
 check "§232(b3) under --start, .claude -> vendor and vendor/commands -> \$HOME/secret planted after the pass are refused by the supervisor (rc ${_A6_RC:-none})" \
-    _s230_refused s232-b3 ".claude/commands -> $_A6_DIR/s232-b3/secret"
+    _s230_refused s232-b3 "vendor/commands -> $_A6_DIR/s232-b3/secret"
 # N6/N7: each of the five copied trees, under --start: a link AT the tree
 # planted after the pass (judged by the by-name sweep), and a link INSIDE it
-# (found by the supervisor's walk of that tree). Each tree is the only route
+# (found by the supervisor's scan). Each tree is the only route
 # to its refusal, so leaving any one out of the list fails its two checks.
 for _S232_T in .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands; do
     _S232_C="s232-at$(printf '%s' "$_S232_T" | tr -c 'a-z\n' '-')"
     _s228_ws "$_S232_C"; mkdir -p "$_A6_DIR/$_S232_C/secret"; _s228_pass "$_S232_C"
     mkdir -p "$_A6_DIR/$_S232_C/ws/${_S232_T%/*}"; ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/$_S232_T"
-    _s228_sup "$_S232_C" "${_S228_ID:-}"
+    _s228_sup "$_S232_C"
     check "§232(at $_S232_T) a link AT the copied tree $_S232_T planted after the pass is refused (mutation: $_S232_T left out of the copied trees; rc ${_A6_RC:-none})" \
         _s230_refused "$_S232_C" "$_S232_T -> $_A6_DIR/$_S232_C/secret"
     _S232_C="s232-in$(printf '%s' "$_S232_T" | tr -c 'a-z\n' '-')"
     _s228_ws "$_S232_C"; mkdir -p "$_A6_DIR/$_S232_C/secret"; _s228_pass "$_S232_C"
     mkdir -p "$_A6_DIR/$_S232_C/ws/$_S232_T"; ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/$_S232_T/x"
-    _s228_sup "$_S232_C" "${_S228_ID:-}"
+    _s228_sup "$_S232_C"
     check "§232(in $_S232_T) a link INSIDE $_S232_T planted after the pass is refused (rc ${_A6_RC:-none})" \
         _s230_refused "$_S232_C" "$_S232_T/x -> $_A6_DIR/$_S232_C/secret"
 done
@@ -26499,20 +26443,20 @@ _a6_launch "$_S232_C" "${_S232_K[@]}"
 check "§232(N2) an entry inside a copied tree is ignored, by name (mutation: only entries that cover a tree are ignored; rc ${_A6_RC:-none})" \
     grep -qF "'.claude/commands/sub' covers .claude/commands" "$_A6_DIR/$_S232_C/out"
 check "§232(N2b) ...refused" _s230_refused "$_S232_C" ".claude/commands/sub/x -> $_A6_DIR/$_S232_C/secret"
-# N4: the supervisor walks a copied tree at every depth.
+# N4: the supervisor's scan finds a link deep in a copied tree.
 _s232_n4() { mkdir -p "$_A6_DIR/s232-n4/ws/.claude/commands/a/b"; ln -s "$_A6_DIR/s232-n4/secret" "$_A6_DIR/s232-n4/ws/.claude/commands/a/b/x"; }
 _s230_sup_after s232-n4 _s232_n4
-check "§232(N4) a link three levels inside a copied tree, planted after the pass, is refused by the supervisor (mutation: the tree walk bounded to depth 1; rc ${_A6_RC:-none})" \
+check "§232(N4) a link three levels inside a copied tree, planted after the pass, is refused by the supervisor (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
     _s230_refused s232-n4 ".claude/commands/a/b/x -> $_A6_DIR/s232-n4/secret"
-# N8: an approved link at a by-name path, re-checked from the list, is
-# mounted once (the sweep does not judge the same pair again).
+# N8: an approved link at a by-name path, found by the supervisor's scan,
+# is mounted once (the sweep does not judge the same pair again).
 _S232_C=s232-once; mkdir -p "$_A6_DIR/$_S232_C/wf" "$_A6_DIR/$_S232_C/ws/.github"
 ln -s "$_A6_DIR/$_S232_C/wf" "$_A6_DIR/$_S232_C/ws/.github/workflows"
 _s226_seed "$_S232_C" ".github/workflows -> $_A6_DIR/$_S232_C/wf"
 _s228_pass "$_S232_C"
-_s228_sup "$_S232_C" "${_S228_ID:-}"
+_s228_sup "$_S232_C"
 _S232_A="$(_a6_agent_args "$_S232_C")"
-check "§232(N8) a listed link at a by-name path is mounted exactly once, and no -v value repeats (id '${_S228_ID:-}')" \
+check "§232(N8) under --start, an approved link at a by-name path is mounted exactly once, and no -v value repeats" \
     bash -c 'test -n "$1" && test "$(awk -v h="$2/wf:" '"'"'p=="-v" && index($0,h)==1 {n++} {p=$0} END {print n+0}'"'"' "$1")" = 1 && test -z "$(awk '"'"'p=="-v" {print} {p=$0}'"'"' "$1" | sort | uniq -d)"' _ "$_S232_A" "$_A6_DIR/$_S232_C"
 # b5 / b8: nothing is copied through a link. The cp stub runs `cp -r` as
 # macOS does (-RL); sandy must call cp -R, which copies a link as a link.
@@ -26542,10 +26486,10 @@ _s232_b8() { mkdir -p "$_A6_DIR/s232-b8/ws/vendor" "$_A6_DIR/s232-b8/ws/.claude/
 _s228_ws s232-b8; mkdir -p "$_A6_DIR/s232-b8/secret"
 _s228_pass s232-b8
 _s232_b8
-_a6_launch s232-b8 "${_S232_K[@]}" PATH="$_S232_CP:$_A6_DIR/bin:$PATH" SANDY_DAEMON_SUPERVISOR=1 \
-    SANDY_PREPASS_SYMLINKS="${_S228_ID:-}" A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/s232-b8/ws"
+_a6_launch s232-b8 "${_S232_K[@]}" SANDY_SYMLINK_SCAN_SKIP=vendor PATH="$_S232_CP:$_A6_DIR/bin:$PATH" SANDY_DAEMON_SUPERVISOR=1 \
+    A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/s232-b8/ws"
 _S232_W="$(_a6_sandbox s232-b8)/workspace-commands"
-check "§232(b8) ...and the same under --start with the links planted after the pass (rc ${_A6_RC:-none})" \
+check "§232(b8) ...and the same under --start with the links planted after the pass, vendor left out of the supervisor's scan by SANDY_SYMLINK_SCAN_SKIP from the environment (the key applies to its scan too; rc ${_A6_RC:-none})" \
     bash -c 'test -d "$1" && test -L "$1/a" && ! grep -rqs S232-SECRET "$1"' _ "$_S232_W"
 # An entry naming a directory in another case is warned about (it would match
 # on a case-insensitive file system, but find's -path would prune nothing).
@@ -26590,7 +26534,7 @@ _s235_held() {   # $1 = CASE  $2 = outside path
 }
 # (1) g4 foreground, key from the workspace config, no terminal: the key is
 # named and dropped, so the scan walks vendor and refuses the link there.
-_S235=s233-g4; _s235_git "$_S235"; _s235_seed "$_S235"; mkdir -p "$_A6_DIR/$_S235/ws/.sandy"
+_S235=s235-g4; _s235_git "$_S235"; _s235_seed "$_S235"; mkdir -p "$_A6_DIR/$_S235/ws/.sandy"
 printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S235/ws/.sandy/config"
 _a6_launch "$_S235" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 _S235_OK=0
@@ -26608,7 +26552,7 @@ check "§235(1) g4: SANDY_SYMLINK_SCAN_SKIP=vendor from a workspace config, no t
 # gate's): vendor holds where .git resolves (vendor/fakegit), whose config,
 # hooks and info sandy mounts by name, so the entry is ignored, by name, and
 # the scan walks vendor and refuses both links there, each named once.
-_S235=s233-g4a; _s235_git "$_S235"; _s235_seed "$_S235"; mkdir -p "$_A6_DIR/$_S235/ws/.sandy"
+_S235=s235-g4a; _s235_git "$_S235"; _s235_seed "$_S235"; mkdir -p "$_A6_DIR/$_S235/ws/.sandy"
 printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S235/ws/.sandy/config"
 _a6_launch "$_S235" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
 _S235_OK=0
@@ -26623,22 +26567,21 @@ _S235_OK=0
 check "§235(2) g4 with the key approved: vendor holds where .git -> vendor/fakegit resolves, so the entry is ignored by name, and vendor/fakegit/config -> ~/.aws/credentials and vendor/fakegit/hooks -> an outside directory are refused by the symlink gate, each named once, the list unchanged (mutation: skip entries not compared with where .git resolves; rc ${_A6_RC:-none})" \
     test "$_S235_OK" = 0
 # (3) g5: no key, --start; .git -> vendor/fakegit planted after the approval
-# pass. The supervisor does not rescan; its sweep refuses .git/config.
-_s235_g5() { _s235_git s233-g5; }
-_s230_sup_after s233-g5 _s235_g5
+# pass. The supervisor scans again and finds vendor/fakegit/config.
+_s235_g5() { _s235_git s235-g5; }
+_s230_sup_after s235-g5 _s235_g5
 _S235_OK=0
-{ [[ "${_S228_ID:-}" =~ ^[0-9a-f]{16}$ ]] \
-  && _s230_refused s233-g5 ".git/config -> $_A6_DIR/s233-g5/.aws/credentials" \
-  && ! grep -rqsF -- "$_A6_DIR/s233-g5/.aws/credentials" "$_A6_DIR/s233-g5/runs" \
-  && test "$(cat "$(_a6_sandbox s233-g5)/.sandy-approved-symlinks.list" 2>/dev/null)" = "$(printf '%s\n' "a -> $_A6_DIR/s233-g5/t1" "b -> $_A6_DIR/s233-g5/t2")"; } || _S235_OK=$?
-[ "$_S235_OK" = 0 ] || _a6_diag "§235(3)" s233-g5
-check "§235(3) g5: under --start, .git -> vendor/fakegit with an escaping config planted after the pass is refused by the supervisor, no agent run, no mount of the outside file, the approved list unchanged (mutation: the sweep skips paths under .git; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+{ _s230_refused s235-g5 "vendor/fakegit/config -> $_A6_DIR/s235-g5/.aws/credentials" \
+  && ! grep -rqsF -- "$_A6_DIR/s235-g5/.aws/credentials" "$_A6_DIR/s235-g5/runs" \
+  && test "$(cat "$(_a6_sandbox s235-g5)/.sandy-approved-symlinks.list" 2>/dev/null)" = "$(printf '%s\n' "a -> $_A6_DIR/s235-g5/t1" "b -> $_A6_DIR/s235-g5/t2")"; } || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(3)" s235-g5
+check "§235(3) g5: under --start, .git -> vendor/fakegit with an escaping config planted after the pass is refused by the supervisor, no agent run, no mount of the outside file, the approved list unchanged (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
     test "$_S235_OK" = 0
 # (3b) .git itself replaced by a link OUT of the workspace after the pass.
-_s235_g5o() { mkdir -p "$_A6_DIR/s233-g5o/other/.git/hooks"; printf '[core]\n' > "$_A6_DIR/s233-g5o/other/.git/config"; ln -s "$_A6_DIR/s233-g5o/other/.git" "$_A6_DIR/s233-g5o/ws/.git"; }
-_s230_sup_after s233-g5o _s235_g5o
-check "§235(3b) under --start, .git replaced after the pass by a link out of the workspace is refused by the supervisor (id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
-    _s230_refused s233-g5o ".git -> $_A6_DIR/s233-g5o/other/.git"
+_s235_g5o() { mkdir -p "$_A6_DIR/s235-g5o/other/.git/hooks"; printf '[core]\n' > "$_A6_DIR/s235-g5o/other/.git/config"; ln -s "$_A6_DIR/s235-g5o/other/.git" "$_A6_DIR/s235-g5o/ws/.git"; }
+_s230_sup_after s235-g5o _s235_g5o
+check "§235(3b) under --start, .git replaced after the pass by a link out of the workspace is refused by the supervisor (rc ${_A6_RC:-none})" \
+    _s230_refused s235-g5o ".git -> $_A6_DIR/s235-g5o/other/.git"
 # (4)-(7) where the key may come from. vendor/x -> HOME/secret is the only
 # escaping link, so the launch runs exactly when vendor is pruned.
 _s235_kt() {   # $1 = CASE
@@ -26650,35 +26593,35 @@ _s235_pruned() {   # $1 = CASE: ran, no config-key prompt text, nothing of secre
         && ! grep -q "wants to set privileged keys\|dropping these keys\|vendor/x ->" "$_A6_DIR/$1/out" \
         && ! grep -qF -- "$_A6_DIR/$1/secret" "$(_a6_agent_args "$1")"
 }
-_s235_kt s233-kw; mkdir -p "$_A6_DIR/s233-kw/ws/.sandy"
-printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kw/ws/.sandy/config"
-_a6_launch s233-kw SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_s235_kt s235-kw; mkdir -p "$_A6_DIR/s235-kw/ws/.sandy"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s235-kw/ws/.sandy/config"
+_a6_launch s235-kw SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 _S235_OK=0
-{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args s233-kw)" ] \
-  && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/s233-kw/out" \
-  && grep -qF "dropping these keys" "$_A6_DIR/s233-kw/out" \
-  && grep -qF "vendor/x -> $_A6_DIR/s233-kw/secret" "$_A6_DIR/s233-kw/out" \
-  && test -z "$(ls "$_A6_DIR/s233-kw/sh/approvals" 2>/dev/null | grep '^passive-' || true)"; } || _S235_OK=$?
-[ "$_S235_OK" = 0 ] || _a6_diag "§235(4)" s233-kw
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args s235-kw)" ] \
+  && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/s235-kw/out" \
+  && grep -qF "dropping these keys" "$_A6_DIR/s235-kw/out" \
+  && grep -qF "vendor/x -> $_A6_DIR/s235-kw/secret" "$_A6_DIR/s235-kw/out" \
+  && test -z "$(ls "$_A6_DIR/s235-kw/sh/approvals" 2>/dev/null | grep '^passive-' || true)"; } || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(4)" s235-kw
 check "§235(4) the key from a workspace config without a terminal is named and dropped, not honoured: vendor is scanned and vendor/x refused, no agent run, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS prunes vendor and the launch runs; rc ${_A6_RC:-none})" \
     test "$_S235_OK" = 0
-_s235_kt s233-kh; printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kh/sh/config"
-_a6_launch s233-kh SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S235_OK=0; _s235_pruned s233-kh || _S235_OK=$?
-[ "$_S235_OK" = 0 ] || _a6_diag "§235(5)" s233-kh
+_s235_kt s235-kh; printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s235-kh/sh/config"
+_a6_launch s235-kh SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S235_OK=0; _s235_pruned s235-kh || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(5)" s235-kh
 check "§235(5) the key from the host config needs no approval: vendor is pruned, the launch runs, no prompt text, nothing of the secret mounted (rc ${_A6_RC:-none})" \
     test "$_S235_OK" = 0
-_s235_kt s233-ke
-_a6_launch s233-ke SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor
-_S235_OK=0; _s235_pruned s233-ke || _S235_OK=$?
-[ "$_S235_OK" = 0 ] || _a6_diag "§235(6)" s233-ke
+_s235_kt s235-ke
+_a6_launch s235-ke SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor
+_S235_OK=0; _s235_pruned s235-ke || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(6)" s235-ke
 check "§235(6) ...and the same from the environment (rc ${_A6_RC:-none})" \
     test "$_S235_OK" = 0
-_s235_kt s233-kc
-_a6_launch s233-kc SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_s235_kt s235-kc
+_a6_launch s235-kc SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 check "§235(7) control: the same tree with no key is refused for vendor/x, so (5) and (6) ran because of the prune (rc ${_A6_RC:-none})" \
-    _s230_refused s233-kc "vendor/x -> $_A6_DIR/s233-kc/secret"
-section "§236: every path sandy mounts by name is judged, a gitdir named by a .git FILE and the submodule gitdirs under .git/modules included, and every -v source is re-checked before docker run (B2 send-back 4)"
+    _s230_refused s235-kc "vendor/x -> $_A6_DIR/s235-kc/secret"
+section "§236: every path sandy mounts by name is judged, a gitdir named by a .git FILE and the submodule gitdirs under .git/modules included, and every -v source is re-checked before docker run by where it physically lies (B2 send-backs 4 and 5)"
 # ============================================================
 # Round 4 of the verifier: a .git FILE (`gitdir: vendor/fakegit`) whose
 # config or hooks link out of the workspace, `gitdir: lnk` with lnk -> an
@@ -26690,7 +26633,12 @@ section "§236: every path sandy mounts by name is judged, a gitdir named by a .
 # (_sandy_gitdir_rel/_sandy_gitdir_host, _sandy_submodule_gitdirs), a skip
 # entry that is, holds or lies inside where .git or the gitdir resolves is
 # ignored by name, and just before docker run every -v source in the
-# workspace is checked against what the gate judged.
+# workspace is checked against what the gate judged. The --start cases (s1,
+# s1h, s3, m1) are now caught by the supervisor's own scan, as on main; the
+# key cases still need the sweep. Round 5: `gitdir: //<ws>/vendor/fg` (bash
+# keeps a leading // in `pwd`, Docker does not) made the gitdir look outside
+# the workspace to the sweep and the -v check (cases p, p2, p3, nm); both now
+# decide from where a path physically lies.
 _s236_fakegit() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
 _s236_home() {   # $1 = CASE: HOME/.aws/credentials, HOME/hooksdir, HOME/otherrepo/.git
     local h="$_A6_DIR/$1"
@@ -26707,34 +26655,34 @@ _s236_refused() {   # $1 = CASE  $2 = named link  $3 = outside path  $4 = expect
 }
 _s236_ab() { printf '%s\n' "a -> $_A6_DIR/$1/t1" "b -> $_A6_DIR/$1/t2"; }
 # --- under --start, planted after the approval pass, no key ---
-_s236_s1() { local w="$_A6_DIR/s234-s1/ws"; _s236_fakegit "$w/vendor/fakegit"; ln -s ../../../.aws/credentials "$w/vendor/fakegit/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
-_s236_home s234-s1; _s230_sup_after s234-s1 _s236_s1
-_S236_OK=0; _s236_refused s234-s1 "vendor/fakegit/config -> $_A6_DIR/s234-s1/.aws/credentials" "$_A6_DIR/s234-s1/.aws" "$(_s236_ab s234-s1)" || _S236_OK=$?
-[ "$_S236_OK" = 0 ] || _a6_diag "§236(s1)" s234-s1
-check "§236(s1) under --start, a .git FILE naming vendor/fakegit with config -> ~/.aws/credentials, planted after the pass, is refused by the supervisor's gate: no agent run, nothing outside mounted, the approved list unchanged (mutation: the sweep does not judge the gitdir a .git file names; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+_s236_s1() { local w="$_A6_DIR/s236-s1/ws"; _s236_fakegit "$w/vendor/fakegit"; ln -s ../../../.aws/credentials "$w/vendor/fakegit/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s236_home s236-s1; _s230_sup_after s236-s1 _s236_s1
+_S236_OK=0; _s236_refused s236-s1 "vendor/fakegit/config -> $_A6_DIR/s236-s1/.aws/credentials" "$_A6_DIR/s236-s1/.aws" "$(_s236_ab s236-s1)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s1)" s236-s1
+check "§236(s1) under --start, a .git FILE naming vendor/fakegit with config -> ~/.aws/credentials, planted after the pass, is refused by the supervisor's gate: no agent run, nothing outside mounted, the approved list unchanged (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
-_s236_s1h() { local w="$_A6_DIR/s234-s1h/ws"; _s236_fakegit "$w/vendor/fakegit"; printf '[core]\n' > "$w/vendor/fakegit/config"; ln -s "$_A6_DIR/s234-s1h/hooksdir" "$w/vendor/fakegit/hooks"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
-_s236_home s234-s1h; _s230_sup_after s234-s1h _s236_s1h
-_S236_OK=0; _s236_refused s234-s1h "vendor/fakegit/hooks -> $_A6_DIR/s234-s1h/hooksdir" "$_A6_DIR/s234-s1h/hooksdir" "$(_s236_ab s234-s1h)" || _S236_OK=$?
-[ "$_S236_OK" = 0 ] || _a6_diag "§236(s1h)" s234-s1h
+_s236_s1h() { local w="$_A6_DIR/s236-s1h/ws"; _s236_fakegit "$w/vendor/fakegit"; printf '[core]\n' > "$w/vendor/fakegit/config"; ln -s "$_A6_DIR/s236-s1h/hooksdir" "$w/vendor/fakegit/hooks"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s236_home s236-s1h; _s230_sup_after s236-s1h _s236_s1h
+_S236_OK=0; _s236_refused s236-s1h "vendor/fakegit/hooks -> $_A6_DIR/s236-s1h/hooksdir" "$_A6_DIR/s236-s1h/hooksdir" "$(_s236_ab s236-s1h)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s1h)" s236-s1h
 check "§236(s1h) ...and the same gitdir with a real config and hooks -> an outside directory is refused (rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
-_s236_s3() { ln -s "$_A6_DIR/s234-s3/otherrepo/.git" "$_A6_DIR/s234-s3/ws/lnk"; printf 'gitdir: lnk\n' > "$_A6_DIR/s234-s3/ws/.git"; }
-_s236_home s234-s3; _s230_sup_after s234-s3 _s236_s3
-_S236_OK=0; _s236_refused s234-s3 "lnk -> $_A6_DIR/s234-s3/otherrepo/.git" "$_A6_DIR/s234-s3/otherrepo" "$(_s236_ab s234-s3)" || _S236_OK=$?
-[ "$_S236_OK" = 0 ] || _a6_diag "§236(s3)" s234-s3
-check "§236(s3) under --start, \`gitdir: lnk\` with lnk -> an outside git directory, planted after the pass, is refused: the gitdir would have been mounted read-write (mutation: the sweep does not judge the gitdir; rc ${_A6_RC:-none})" \
+_s236_s3() { ln -s "$_A6_DIR/s236-s3/otherrepo/.git" "$_A6_DIR/s236-s3/ws/lnk"; printf 'gitdir: lnk\n' > "$_A6_DIR/s236-s3/ws/.git"; }
+_s236_home s236-s3; _s230_sup_after s236-s3 _s236_s3
+_S236_OK=0; _s236_refused s236-s3 "lnk -> $_A6_DIR/s236-s3/otherrepo/.git" "$_A6_DIR/s236-s3/otherrepo" "$(_s236_ab s236-s3)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s3)" s236-s3
+check "§236(s3) under --start, \`gitdir: lnk\` with lnk -> an outside git directory, planted after the pass, is refused: the gitdir would have been mounted read-write (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
-_s236_m1() { local w="$_A6_DIR/s234-m1/ws"; mkdir -p "$w/vendor/fakegit/modules/sub"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"
-    ln -s "$_A6_DIR/s234-m1/hooksdir" "$w/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$w/.git"; }
-_s236_home s234-m1; _s230_sup_after s234-m1 _s236_m1
-_S236_OK=0; _s236_refused s234-m1 ".git/modules/sub/hooks -> $_A6_DIR/s234-m1/hooksdir" "$_A6_DIR/s234-m1/hooksdir" "$(_s236_ab s234-m1)" || _S236_OK=$?
-[ "$_S236_OK" = 0 ] || _a6_diag "§236(m1)" s234-m1
-check "§236(m1) under --start, .git -> vendor/fakegit with a submodule gitdir whose hooks -> an outside directory, planted after the pass, is refused (mutation: the sweep does not judge the submodule gitdirs; rc ${_A6_RC:-none})" \
+_s236_m1() { local w="$_A6_DIR/s236-m1/ws"; mkdir -p "$w/vendor/fakegit/modules/sub"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"
+    ln -s "$_A6_DIR/s236-m1/hooksdir" "$w/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$w/.git"; }
+_s236_home s236-m1; _s230_sup_after s236-m1 _s236_m1
+_S236_OK=0; _s236_refused s236-m1 "vendor/fakegit/modules/sub/hooks -> $_A6_DIR/s236-m1/hooksdir" "$_A6_DIR/s236-m1/hooksdir" "$(_s236_ab s236-m1)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(m1)" s236-m1
+check "§236(m1) under --start, .git -> vendor/fakegit with a submodule gitdir whose hooks -> an outside directory, planted after the pass, is refused (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
 # --- plain launches, SANDY_SYMLINK_SCAN_SKIP=vendor from the environment ---
 _S236_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor)
-_S236_C=s234-k1; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _s236_seed() { mkdir -p "$_A6_DIR/$1/t3"; ln -s "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws/keep"; _s226_seed "$1" "keep -> $_A6_DIR/$1/t3"; }
+_S236_C=s236-k1; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _s236_seed() { mkdir -p "$_A6_DIR/$1/t3"; ln -s "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws/keep"; _s226_seed "$1" "keep -> $_A6_DIR/$1/t3"; }
 _s236_fakegit "$_S236_W/vendor/fakegit"; ln -s ../../../.aws/credentials "$_S236_W/vendor/fakegit/config"; ln -s "$_A6_DIR/$_S236_C/hooksdir" "$_S236_W/vendor/fakegit/hooks"
 printf 'gitdir: vendor/fakegit\n' > "$_S236_W/.git"; _s236_seed "$_S236_C"
 _a6_launch "$_S236_C" "${_S236_K[@]}"
@@ -26745,14 +26693,14 @@ _S236_OK=0
 [ "$_S236_OK" = 0 ] || _a6_diag "§236(k1)" "$_S236_C"
 check "§236(k1) SANDY_SYMLINK_SCAN_SKIP=vendor from the environment, a .git FILE naming vendor/fakegit: the entry is ignored by name (vendor holds the gitdir), and config and hooks linking out are refused, list unchanged (mutation: skip entries not compared with where the gitdir resolves; rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
-_S236_C=s234-s3k; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+_S236_C=s236-s3k; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
 mkdir -p "$_S236_W/vendor"; ln -s "$_A6_DIR/$_S236_C/otherrepo/.git" "$_S236_W/vendor/lnk"; printf 'gitdir: vendor/lnk\n' > "$_S236_W/.git"; _s236_seed "$_S236_C"
 _a6_launch "$_S236_C" "${_S236_K[@]}"
 _S236_OK=0; _s236_refused "$_S236_C" "vendor/lnk -> $_A6_DIR/$_S236_C/otherrepo/.git" "$_A6_DIR/$_S236_C/otherrepo" "keep -> $_A6_DIR/$_S236_C/t3" || _S236_OK=$?
 [ "$_S236_OK" = 0 ] || _a6_diag "§236(s3k)" "$_S236_C"
 check "§236(s3k) ...\`gitdir: vendor/lnk\` with vendor pruned and vendor/lnk -> an outside git directory: the gitdir is judged by the sweep and refused (mutation: the sweep does not judge the gitdir; rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
-_S236_C=s234-m1k; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+_S236_C=s236-m1k; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
 mkdir -p "$_S236_W/vendor/fakegit/modules/sub"; printf '[core]\n' > "$_S236_W/vendor/fakegit/config"; printf '[core]\n' > "$_S236_W/vendor/fakegit/modules/sub/config"
 ln -s "$_A6_DIR/$_S236_C/hooksdir" "$_S236_W/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$_S236_W/.git"; _s236_seed "$_S236_C"
 _a6_launch "$_S236_C" "${_S236_K[@]}"
@@ -26764,7 +26712,7 @@ _S236_OK=0
 check "§236(m1k) ...and .git -> vendor/fakegit with modules/sub/hooks linking out: the entry is ignored (vendor holds where .git resolves), the link refused and named once, as the scan names it (rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
 # --- outside means outside: a sibling sharing the workspace's name as a prefix ---
-_S236_C=s234-sib; _s236_home "$_S236_C"; mkdir -p "$_A6_DIR/$_S236_C/ws-secrets" "$_A6_DIR/$_S236_C/ws/.claude"
+_S236_C=s236-sib; _s236_home "$_S236_C"; mkdir -p "$_A6_DIR/$_S236_C/ws-secrets" "$_A6_DIR/$_S236_C/ws/.claude"
 printf '{}\n' > "$_A6_DIR/$_S236_C/ws-secrets/settings.json"
 ln -s ../../ws-secrets/settings.json "$_A6_DIR/$_S236_C/ws/.claude/settings.json"
 _a6_launch "$_S236_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
@@ -26774,7 +26722,7 @@ _S236_OK=0; _s230_refused "$_S236_C" ".claude/settings.json -> $_A6_DIR/$_S236_C
 check "§236(sib) a link into a sibling of the workspace whose name begins with the workspace's (ws-secrets beside ws) is outside it: .claude/settings.json -> ../../ws-secrets/settings.json is refused, not mounted (mutation: a bare prefix test for inside; rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
 # --- controls: the same layouts with no escaping link launch ---
-_S236_C=s234-ok; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+_S236_C=s236-ok; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
 _s236_fakegit "$_S236_W/vendor/fakegit"; mkdir -p "$_S236_W/vendor/fakegit/hooks" "$_S236_W/vendor/fakegit/modules/sub/hooks"
 printf '[core]\n' > "$_S236_W/vendor/fakegit/config"; printf '[core]\n' > "$_S236_W/vendor/fakegit/modules/sub/config"
 printf 'gitdir: vendor/fakegit\n' > "$_S236_W/.git"
@@ -26787,16 +26735,16 @@ _S236_OK=0
 [ "$_S236_OK" = 0 ] || _a6_diag "§236(ok)" "$_S236_C"
 check "§236(ok) control: a plain launch with a .git FILE naming a gitdir in the workspace, nothing linking out, runs, with the gitdir's config and a submodule's hooks mounted :ro (rc ${_A6_RC:-none})" \
     test "$_S236_OK" = 0
-_s236_okstart() { local w="$_A6_DIR/s234-oks/ws"; _s236_fakegit "$w/vendor/fakegit"; mkdir -p "$w/vendor/fakegit/modules/sub/hooks"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
-_s236_home s234-oks; _s230_sup_after s234-oks _s236_okstart
+_s236_okstart() { local w="$_A6_DIR/s236-oks/ws"; _s236_fakegit "$w/vendor/fakegit"; mkdir -p "$w/vendor/fakegit/modules/sub/hooks"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s236_home s236-oks; _s230_sup_after s236-oks _s236_okstart
 check "§236(ok2) control: the same planted after the pass, under --start, reaches the agent run (rc ${_A6_RC:-none})" \
-    test -n "$(_a6_agent_args s234-oks)"
+    test -n "$(_a6_agent_args s236-oks)"
 # --- the check before docker run ---
 # A link planted AFTER the gate: a git stub plants .git/modules/sub/hooks ->
 # an outside directory at the core.hooksPath lookup, which runs after the
 # gate and before the submodule overlay is assembled. Only the -v check can
 # see it.
-_S236_C=s234-late; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _S236_G="$_A6_DIR/$_S236_C/gitbin"
+_S236_C=s236-late; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _S236_G="$_A6_DIR/$_S236_C/gitbin"
 mkdir -p "$_S236_W/.git/modules/sub" "$_S236_G"; printf '[core]\n' > "$_S236_W/.git/modules/sub/config"
 { printf '#!/bin/sh\n'
   printf 'case "$*" in *core.hooksPath*) [ -e %q ] || { ln -s %q %q; : > %q; } ;; esac\n' \
@@ -26816,7 +26764,7 @@ check "§236(late) a link planted after the gate under a path sandy mounts by na
 # the gate, before the copied trees are seeded into a new sandbox. The -v
 # check cannot see a copy (the mount source is the sandbox's copy), so the
 # copy site checks its source the same way.
-_S236_C=s234-latecp; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _S236_G="$_A6_DIR/$_S236_C/gitbin"
+_S236_C=s236-latecp; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _S236_G="$_A6_DIR/$_S236_C/gitbin"
 mkdir -p "$_S236_W/.claude/commands" "$_A6_DIR/$_S236_C/out-claude/commands" "$_S236_G"
 printf 'x\n' > "$_S236_W/.claude/commands/x.md"; printf 'S234-SECRET\n' > "$_A6_DIR/$_S236_C/out-claude/commands/k.md"
 { printf '#!/bin/sh\n'
@@ -26838,7 +26786,7 @@ check "§236(latecp) .claude swapped for a link out of the workspace after the g
 # $HOME counts only at a protected path, and $SANDY_HOME is never covered.
 _S236_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify \
-          _sandy_symlink_walk _sandy_symlink_byname_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
+          _sandy_symlink_walk _sandy_ws_physical _sandy_gitdir_host _sandy_symlink_path_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
           _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S236_D/fns.sh"
 done
@@ -26852,6 +26800,8 @@ ln -s "$_S236_D/h/stow/s" "$_S236_D/h/dots/s"           # HOME/dots/s -> HOME/st
 ln -s "$_S236_D/sys" "$_S236_D/h/ws/sl"                 # sl -> outside HOME
 ln -s "$_S236_D/sys" "$_S236_D/h/ws/.claude"            # .claude -> outside HOME (settings.json protected)
 ln -s "$_S236_D/h/.sandy/x" "$_S236_D/h/ws/st"          # st -> SANDY_HOME
+ln -s "$_S236_D/h" "$_S236_D/alias"                     # alias -> HOME (a linked ancestor, like /tmp on macOS)
+mkdir -p "$_S236_D/h/ws/vendor/fg"
 _s236_chk() {   # $1 = judged targets (space-separated)  $2... = -v sources (workspace-relative) -> rc, output
     local t="$1"; shift
     ( trap - ERR; set +e
@@ -26860,7 +26810,9 @@ _s236_chk() {   # $1 = judged targets (space-separated)  $2... = -v sources (wor
       HOME="$_S236_D/h"; SANDY_HOME="$_S236_D/h/.sandy"; WORK_DIR="$_S236_D/h/ws"; REAL_WORK_DIR="$WORK_DIR"
       _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=(); RUN_FLAGS=(-v "$WORK_DIR:/w")
       for _x in $t; do _SANDY_SL_TGTS+=("$_S236_D/$_x"); done
-      for _x in "$@"; do RUN_FLAGS+=(-v "$WORK_DIR/$_x:/w/$_x:ro"); done
+      for _x in "$@"; do
+          case "$_x" in /*) RUN_FLAGS+=(-v "$_x:/w/x:ro") ;; *) RUN_FLAGS+=(-v "$WORK_DIR/$_x:/w/$_x:ro") ;; esac
+      done
       _sandy_symlink_check_mounts; echo "rc=$?" ) 2>&1 || true
 }
 _S236_R1="$(_s236_chk "" a/f)"; _S236_R2="$(_s236_chk "h/o" a/f)"; _S236_R3="$(_s236_chk "h/o" a/b/d)"; _S236_R4="$(_s236_chk "h/o h/p" a/b/d)"
@@ -26874,14 +26826,103 @@ check "§236(chk3) ...a host link inside a judged target is the host's own (a do
     bash -c 'printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S236_R5" "$_S236_R6"
 check "§236(chk4) ...but a protected path outside \$HOME is refused, a target in \$SANDY_HOME is refused even when judged, and a source inside the workspace passes (got: $(printf '%s' "$_S236_R7$_S236_R8$_S236_R9" | tr '\n' ' '))" \
     bash -c 'printf "%s\n" "$1" | grep -qxF "  .claude/settings.json -> $4/sys/settings.json" && printf "%s\n" "$2" | grep -qxF "  st -> $4/h/.sandy/x" && printf "%s\n" "$3" | grep -qx "rc=0"' _ "$_S236_R7" "$_S236_R8" "$_S236_R9" "$_S236_D"
+# Round 5: the check decides "in the workspace" from where a source PHYSICALLY
+# lies, never from its spelling. Docker normalizes `//`, `/./` and `..` and
+# follows a linked ancestor; bash keeps a leading `//` in `pwd`. Each spelling
+# of a/f below is a path through the workspace leaving it by the unjudged
+# a -> HOME/o, and is refused; judged, each passes.
+_S236_WS="$_S236_D/h/ws"
+_S236_P1="$(_s236_chk "" "/$_S236_WS/a/f")"; _S236_P2="$(_s236_chk "" "$_S236_WS/./a/f")"
+_S236_P3="$(_s236_chk "" "$_S236_WS/vendor/../a/f")"; _S236_P4="$(_s236_chk "" "$_S236_WS/a/")"
+_S236_P5="$(_s236_chk "" "$_S236_D/alias/ws/a/f")"
+_S236_P6="$(_s236_chk "h/o" "/$_S236_WS/a/f" "$_S236_WS/./a/f" "$_S236_WS/vendor/../a/f" "$_S236_WS/a/" "$_S236_D/alias/ws/a/f")"
+check "§236(chk5) a -v source spelled //ws/a/f, ws/./a/f, ws/vendor/../a/f, ws/a/ or through a linked ancestor is judged where it physically lies: each refused, naming a, and all pass once a's target is judged (mutation: the check compares spellings with \$WORK_DIR; got: $(printf '%s|' "$_S236_P1" "$_S236_P2" "$_S236_P3" "$_S236_P4" "$_S236_P5" "$_S236_P6" | tr '\n' ' '))" \
+    bash -c 'for r in "$2" "$3" "$4" "$5" "$6"; do printf "%s\n" "$r" | grep -qxF "  a -> $1/h/o" || exit 1; ! printf "%s\n" "$r" | grep -qx "rc=0" || exit 1; done; printf "%s\n" "$7" | grep -qx "rc=0"' \
+    _ "$_S236_D" "$_S236_P1" "$_S236_P2" "$_S236_P3" "$_S236_P4" "$_S236_P5" "$_S236_P6"
+# _sandy_gitdir_host re-spells a gitdir that lies physically in the workspace
+# under $WORK_DIR, however the .git file spells it, so the by-name list holds
+# its config, hooks and modules; one outside keeps its logical spelling.
+_s236_gh() {   # $1 = gitdir value -> the directory
+    ( trap - ERR; set +e; . "$_S236_D/fns.sh"; WORK_DIR="$_S236_WS"; REAL_WORK_DIR="$WORK_DIR"; _sandy_gitdir_host "$1" ) 2>/dev/null || true
+}
+_S236_G1="$(_s236_gh "/$_S236_WS/vendor/fg")"; _S236_G2="$(_s236_gh "$_S236_D/alias/ws/vendor/fg")"
+_S236_G3="$(_s236_gh "//$_S236_WS/./vendor/../vendor/fg")"; _S236_G4="$(_s236_gh vendor/fg)"; _S236_G5="$(_s236_gh ../o)"
+check "§236(gh) _sandy_gitdir_host spells a gitdir in the workspace under \$WORK_DIR whatever the .git file says (//ws/..., a linked ancestor, /./ and ..), and leaves one outside as it was (mutation: no re-spelling; got: $_S236_G1 | $_S236_G2 | $_S236_G3 | $_S236_G4 | $_S236_G5)" \
+    bash -c 'test "$1" = "$6/vendor/fg" && test "$2" = "$6/vendor/fg" && test "$3" = "$6/vendor/fg" && test "$4" = "$6/vendor/fg" && test "$5" = "$7/h/o"' \
+    _ "$_S236_G1" "$_S236_G2" "$_S236_G3" "$_S236_G4" "$_S236_G5" "$_S236_WS" "$_S236_D"
 rm -rf "$_S236_D"
+unset -f _s236_gh
+unset _S236_WS _S236_P1 _S236_P2 _S236_P3 _S236_P4 _S236_P5 _S236_P6 _S236_G1 _S236_G2 _S236_G3 _S236_G4 _S236_G5
+# --- round 5, end to end: a gitdir spelled //<ws>/... (bash keeps the //) ---
+# No docker run of any kind may carry a -v source that resolves into $3.
+_s236_noescape() {   # $1 = CASE  $2 = outside directory
+    local f m r
+    for f in "$_A6_DIR/$1"/runs/*.args; do
+        [ -f "$f" ] || continue
+        while IFS= read -r m; do
+            r="$(readlink -f "${m%%:*}" 2>/dev/null || true)"
+            case "$r" in "$2"|"$2"/*) return 1 ;; esac
+        done < <(awk 'p=="-v" {print} {p=$0}' "$f")
+    done
+    return 0
+}
+_s236_fg() { _s236_fakegit "$1"; printf '[core]\n' > "$1/config"; mkdir -p "$1/hooks"; }
+# P, P2, P3: under --start, planted after the approval pass.
+_s236_p() { local w="$_A6_DIR/s236-p/ws"; _s236_fg "$w/vendor/fg"; rm -f "$w/vendor/fg/config"; ln -s "$_A6_DIR/s236-p/.aws/credentials" "$w/vendor/fg/config"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
+_s236_p2() { local w="$_A6_DIR/s236-p2/ws"; _s236_fg "$w/vendor/fg"; rmdir "$w/vendor/fg/hooks"; ln -s "$_A6_DIR/s236-p2/hooksdir" "$w/vendor/fg/hooks"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
+_s236_p3() { local w="$_A6_DIR/s236-p3/ws"; _s236_fg "$w/vendor/fg"; mkdir -p "$w/vendor/fg/modules/sub"; printf '[core]\n' > "$w/vendor/fg/modules/sub/config"; ln -s "$_A6_DIR/s236-p3/hooksdir" "$w/vendor/fg/modules/sub/hooks"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
+# The /./ and .. spellings of P.
+_s236_pd() { local w="$_A6_DIR/s236-pd/ws"; _s236_fg "$w/vendor/fg"; rm -f "$w/vendor/fg/config"; ln -s "$_A6_DIR/s236-pd/.aws/credentials" "$w/vendor/fg/config"; printf 'gitdir: /%s/./vendor/fg\n' "$w" > "$w/.git"; }
+_s236_pu() { local w="$_A6_DIR/s236-pu/ws"; _s236_fg "$w/vendor/fg"; mkdir -p "$w/sub"; rm -f "$w/vendor/fg/config"; ln -s "$_A6_DIR/s236-pu/.aws/credentials" "$w/vendor/fg/config"; printf 'gitdir: /%s/sub/../vendor/fg\n' "$w" > "$w/.git"; }
+for _S236_C in p:config:.aws/credentials p2:hooks:hooksdir p3:modules/sub/hooks:hooksdir pd:config:.aws/credentials pu:config:.aws/credentials; do
+    _S236_N="${_S236_C%%:*}"; _S236_R="${_S236_C#*:}"; _S236_O="${_S236_R#*:}"; _S236_R="${_S236_R%%:*}"; _S236_C="s236-$_S236_N"
+    _s236_home "$_S236_C"; _s230_sup_after "$_S236_C" "_s236_$_S236_N"
+    _S236_OK=0
+    { _s236_refused "$_S236_C" "vendor/fg/$_S236_R -> $_A6_DIR/$_S236_C/$_S236_O" "$_A6_DIR/$_S236_C/$_S236_O" "$(_s236_ab "$_S236_C")" \
+      && _s236_noescape "$_S236_C" "$_A6_DIR/$_S236_C/${_S236_O%%/*}"; } || _S236_OK=$?
+    [ "$_S236_OK" = 0 ] || _a6_diag "§236($_S236_N)" "$_S236_C"
+    check "§236($_S236_N) under --start, a .git file naming its gitdir as $(sed -n 's/^gitdir: //p' "$_A6_DIR/$_S236_C/ws/.git" 2>/dev/null | sed "s#$_A6_DIR/$_S236_C/ws#<ws>#") with vendor/fg/$_S236_R linking out, planted after the pass: refused, named, no agent run, no -v source resolving outside, the approved list unchanged (mutation: the supervisor skips the scan; rc ${_A6_RC:-none})" \
+        test "$_S236_OK" = 0
+done
+# P5: the same in a foreground launch, with SANDY_SYMLINK_SCAN_SKIP=vendor
+# from the environment: the entry is ignored by name (vendor holds the
+# gitdir however it is spelled), so the scan finds the link.
+_S236_C=s236-p5; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+_s236_fg "$_S236_W/vendor/fg"; rm -f "$_S236_W/vendor/fg/config"; ln -s "$_A6_DIR/$_S236_C/.aws/credentials" "$_S236_W/vendor/fg/config"
+printf 'gitdir: /%s\n' "$_S236_W/vendor/fg" > "$_S236_W/.git"; _s236_seed "$_S236_C"
+_a6_launch "$_S236_C" "${_S236_K[@]}"
+_S236_OK=0
+{ _s236_refused "$_S236_C" "vendor/fg/config -> $_A6_DIR/$_S236_C/.aws/credentials" "$_A6_DIR/$_S236_C/.aws" "keep -> $_A6_DIR/$_S236_C/t3" \
+  && _s236_noescape "$_S236_C" "$_A6_DIR/$_S236_C/.aws" \
+  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S236_C/out"; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(p5)" "$_S236_C"
+check "§236(p5) foreground, gitdir: //<ws>/vendor/fg with config linking out and SANDY_SYMLINK_SCAN_SKIP=vendor: the entry is ignored by name, the link refused, nothing outside mounted, the list unchanged (rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+# nm: the gitdir under node_modules, which neither the scan nor the by-name
+# sweep walks: only the -v check before docker run sees config linking out,
+# and only if it finds //<ws>/node_modules/fg/config in the workspace
+# (by re-spelling the gitdir, or by comparing physical paths).
+_S236_C=s236-nm; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+_s236_fg "$_S236_W/node_modules/fg"; rm -f "$_S236_W/node_modules/fg/config"; ln -s "$_A6_DIR/$_S236_C/.aws/credentials" "$_S236_W/node_modules/fg/config"
+printf 'gitdir: /%s\n' "$_S236_W/node_modules/fg" > "$_S236_W/.git"
+_a6_launch "$_S236_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S236_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S236_C")" ] \
+  && grep -qF "leaves the workspace through a link the" "$_A6_DIR/$_S236_C/out" \
+  && grep -qF "node_modules/fg/config -> $_A6_DIR/$_S236_C/.aws/credentials" "$_A6_DIR/$_S236_C/out" \
+  && _s236_noescape "$_S236_C" "$_A6_DIR/$_S236_C/.aws"; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(nm)" "$_S236_C"
+check "§236(nm) foreground, gitdir: //<ws>/node_modules/fg with config linking out (pruned by the scan, left out of the sweep): the -v check refuses it, named, no agent run, nothing outside mounted (mutation: gitdir re-spelling removed AND the check comparing spellings; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+unset -f _s236_noescape _s236_fg _s236_p _s236_p2 _s236_p3 _s236_pd _s236_pu
+unset _S236_N _S236_R _S236_O
 unset _S236_OK _S236_K _S236_C _S236_W _S236_A _S236_G _S236_D _S236_R1 _S236_R2 _S236_R3 _S236_R4 _S236_R5 _S236_R6 _S236_R7 _S236_R8 _S236_R9 _f _x
 unset -f _s236_fakegit _s236_home _s236_refused _s236_ab _s236_s1 _s236_s1h _s236_s3 _s236_m1 _s236_seed _s236_okstart _s236_chk
 unset _S235 _S235_OK
 unset -f _s235_git _s235_seed _s235_held _s235_g5 _s235_g5o _s235_kt _s235_pruned _s230_refused _s230_sup_after
 
-unset _S228_ID _S229_LOG _S226_ETC
-unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup _s228_list
+unset _S229_LOG _S226_ETC
+unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup
 
 rm -rf "$_A6_DIR"
 unset _A6_DIR _A6_SCRIPT _A6_RC
