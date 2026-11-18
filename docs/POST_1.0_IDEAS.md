@@ -8,6 +8,35 @@ the freeze, and gets reconsidered for 1.0.1+ once the RC is out.
 Each entry: what it is, why it was deferred, rough effort, and any design notes
 worth preserving so the eventual implementer doesn't re-derive them.
 
+## Status of each entry (checked 2026-11-17, sandy `2.8.1-dev`)
+
+The entries below were written for a "1.0.1" / "1.1" that has long passed (1.0.0
+shipped 2026-07-10), and their `sandy:NNNN` line references point into much older
+copies of the script. This table is the current status; the entry text is kept as
+the design record. "On main" means merged after 2.8.0 and due in 2.9.0.
+
+| Entry | Status |
+|---|---|
+| `SANDY_AUTO_UPGRADE` | Open. No such key in `sandy`. |
+| Retire the Linux iptables isolation path | Open. The iptables path is still what `SANDY_EGRESS=off` uses on Linux. |
+| Codex CLI v0.138+ auth | **Shipped.** The API key is written into an ephemeral read-only `auth.json` (0.15.0); OAuth is seeded into the rw sandbox instead of a `:ro` overlay (#238, 1.10.0); `sandy --login codex` logs in for one sandbox (#428, 2.8.0). |
+| Host-side credential broker | Open, #121. |
+| Version / freshness hygiene cluster | Open. No script-sha stamp, no checksum verification in `install.sh` or `--upgrade`, no `SANDY_CLAUDE_VERSION` pin. |
+| Atomic tempfile+rename on state writes | Open for `WORKSPACE.json`, which is still written by a truncating redirect. |
+| `sandy --migrate-sandbox` | **Superseded.** `sandy --reset-sandbox` (#93, 1.4.0) with `--keep-history` (2.0.0, #316) is the non-`rm -rf` remedy for a sandbox below the compatibility floor. |
+| Pack-independent browser capability | Open. |
+| Optional gVisor runtime (`SANDY_RUNTIME`) | Open. No such key in `sandy`. |
+| rw ephemeral credential copies | **Shipped** for Gemini OAuth (#486, on main); the Claude credential copy was already rw; Codex OAuth moved to sandbox seeding (#238). See the entry's own update. |
+| Doc note: `SANDY_SSH=agent` + FIDO2 | Open. Not in `docs/guide/`. |
+| Doc note: cmux orphan-on-close | Open. `docs/guide/channels.md` has no such caveat. |
+| Role-based orchestration (`SANDY_ROLE`) | Superseded 2026-11-17 (in-session subagents); not planned. See `docs/ROLES_DESIGN.md`. |
+| Warn on env-vs-config credential conflict | Open. The env-set key is still skipped silently in `_load_sandy_config`, and `oauthAccount` is not stripped. |
+| "Which org am I running as?" | **Partly addressed.** `sandy --accounts` (#438, 2.8.0) reports each sandbox's account, and on main names a long-lived token or API key by fingerprint or label (`--fingerprint-token`, `$SANDY_HOME/credential-labels`, #453) instead of trusting `oauthAccount` (#454); #482 (on main) puts plan usage and the credential on Claude's status line. Resolving the org of an opaque token is still unsolved. |
+| Scoped overlay/VPN egress | Open. |
+| Lessons from sandbox-runtime | Domain filtering shipped (egress proxy, 0.14.0; today `SANDY_EGRESS`, 2.0.0). `.env*` masking is still unshipped (`THREAT_MODEL.md` R2b). The proxy logs denials to `proxy.log`; there is no `violations.log`. The rest are open. |
+| Tamper-evident tool audit | Open. `tool-audit.jsonl` is still only in the rw `~/.claude`. |
+| Proxy-log retention | Open. `proxy.log` is still truncated each launch. |
+
 ---
 
 ## `SANDY_AUTO_UPGRADE` — one-step sandy self-upgrade + re-exec
@@ -193,6 +222,8 @@ tri-state's `0`), update `--print-schema`/docs/tests. The closing-the-gap option
 
 ## Codex CLI v0.138+ auth — env-var path no longer works in the sandbox
 
+> **Shipped (status 2026-11-17).** API key → ephemeral read-only `auth.json` (0.15.0); OAuth → seeded into the sandbox (#238, 1.10.0); `sandy --login codex` (#428, 2.8.0). Current behavior: `docs/guide/agents.md`. The text below is the original problem record.
+
 **Target: TBD (codex-version-driven).** Filed 2026-06-09.
 
 ### What / the symptom
@@ -363,6 +394,8 @@ mis-parses. Fix: write to `.tmp` then `mv` (atomic on same filesystem). Same
 ---
 
 ## Sandbox migration utility (`sandy --migrate-sandbox`)
+
+> **Superseded (status 2026-11-17).** Use `sandy --reset-sandbox --workspace P --keep-history` (#93, 1.4.0; `--keep-history` 2.0.0, #316), never `rm -rf`. The text below is the original proposal.
 
 **Target: 1.0.x / 1.1 (M-effort).** Filed 2026-06-11, out of M4 PR 4.2.
 
@@ -632,9 +665,10 @@ terminals would generalize it).
 
 ## Role-based multi-session orchestration (`SANDY_ROLE`) — plan/implement/verify
 
-**Target: 1.1 (prototype on a branch sooner).** Filed 2026-07-07. **Full design
-doc: `docs/ROLES_DESIGN.md`** — decisions are settled there; this is just the
-pointer.
+**Superseded 2026-11-17; not planned.** Plan → implement → verify runs inside
+one sandy session with separate implementer and verifier subagents instead; see
+the status note in `docs/ROLES_DESIGN.md`. Originally targeted at 1.1, filed
+2026-07-07. The summary below is kept for the record.
 
 One-paragraph version: run plan → implement → verify as three *independent
 long-lived interactive sandy sessions* in tmux panes (subscription-friendly —
@@ -718,6 +752,8 @@ active org is trust-corroding in itself).
 ---
 
 ## Trustworthy "which org am I running as?" — problem statement (design TBD)
+
+> **Partly addressed (status 2026-11-17).** `sandy --accounts` (#438, 2.8.0); credential fingerprints and labels (#453), not trusting `oauthAccount` for a token (#454), and the status-line credential (#482), all on main for 2.9.0. The org behind an opaque token is still unresolved.
 
 **Target: needs a design before it can be scheduled (problem is 1.0.1-adjacent —
 same incident as the env-vs-config warning and `oauthAccount` fixes above).**

@@ -1,6 +1,6 @@
 # Feature manifest and feature-owned per-sandbox trees (2.0.0)
 
-**Status:** decided, not implemented. This record is the contract three repositories will build against — sandy, the AMAP adapter, and the router — and it exists so the decisions are made once rather than re-derived per repo.
+**Status (2026-11-17):** implemented in 2.0.0 (#316) and amended in place since: `agent_args` 2.1.0 (§9), per-feature entries and `receives` 2.4.0 (§10, §11), the relay-era removals 2.6.0, protected `submounts` 2.8.0 (#444), and `agent_wrapper` (§12, #484, on main for 2.9.0). This is the **live contract** for feature manifests; it was written before implementation so the decisions would be made once rather than re-derived by each repository building against it.
 
 **Requested by** the AMAP sandy adapter (2026-09-18), amended after review. **Tier:** `2.0.0`.
 

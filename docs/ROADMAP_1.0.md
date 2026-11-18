@@ -1,5 +1,7 @@
 # Roadmap to 1.0-rc1
 
+> **Historical record (status as of 2026-11-17).** This is the plan log for the road to 1.0, which shipped as `v1.0.0` on 2026-07-10; it was last edited 2026-07-02 and its "current state" lines describe that time, not today. What sandy does now is in `SPECIFICATION.md` and `docs/guide/`; what changed per release is in `RELEASE_NOTES.md`.
+
 This plan walks from the current state of `main` to `1.0-rc1`. It's structured as a sequence of discrete PRs, each with a clear scope, exit criteria, and target version. **No new features** — 1.0 is a stability release. Every PR should make the existing surface more trustworthy without adding to it.
 
 ## Current state (2026-04-15)
