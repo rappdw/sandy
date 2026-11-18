@@ -2167,7 +2167,7 @@ SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture,
 SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS=off,permissive,strict. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 (off) and =1 (permissive: a downgrade of a host-set =2) are approval-gated, matching SANDY_EGRESS; only =2 is free (#371).
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
-SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative directories the launch's symlink scan does not descend into, like the built-in node_modules, .venv* and .git; for a large tree that holds no link the session needs. Entries are literal paths (no globs, no . or ..), named exactly as on disk; one that names no directory is warned about. A link beneath a skipped directory gets no mount of its own and is never copied through (the copied trees use cp -R), so in the container it is only a link, and one pointing outside the workspace dangles. What it cannot hide: every path sandy mounts or copies by name (protected paths such as .claude/settings.json and .github/workflows, .gstack, and the copied trees .claude/commands, .claude/agents, .claude/plugins, .gemini/extensions, .gemini/commands) is resolved, with each of its prefixes, on every launch, and judged where it lands outside the workspace exactly as the scan judges a link there; and an entry that is, holds or lies inside where a copied tree resolves is ignored with a warning. Privileged: leaving a directory out hides its links from the dangerous-symlink gate, so from a workspace .sandy/config it asks for the one-time approval (and a headless or non-TTY launch refuses); from the environment or the host config it needs none. Those rules still hold as defense in depth; a new path sandy mounts or copies by name must be added to them. A scan that takes over 5 s prints its duration and names this key. Leaving a directory out also drops its links from the approved-symlinks list at the next launch, so taking it back out of the key later makes any escaping link there a new one, which the dangerous-symlink gate treats as it treats any new link.
+SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative directories the launch's symlink scan does not descend into, like the built-in node_modules, .venv* and .git; for a large tree that holds no link the session needs. Entries are literal paths (no globs, no . or ..), named exactly as on disk; one that names no directory is warned about. A link beneath a skipped directory gets no mount of its own and is never copied through (the copied trees use cp -R), so in the container it is only a link, and one pointing outside the workspace dangles. What it cannot hide: every path sandy mounts or copies by name (protected paths such as .claude/settings.json, .github/workflows and .git/config, .git/hooks, .git/info and .git/packed-refs; .gstack; the copied trees .claude/commands, .claude/agents, .claude/plugins, .gemini/extensions, .gemini/commands; the gitdir a .git file names, with its config, hooks, info and packed-refs; and config, hooks and info of each submodule gitdir under .git/modules) is resolved, with each of its prefixes, on every launch, and judged where it lands outside the workspace exactly as the scan judges a link there; an entry that is, holds or lies inside where a copied tree, .git or that gitdir resolves is ignored with a warning; and every mount source in the workspace is checked again just before the container starts, so a link the check did not judge refuses the launch. Privileged: leaving a directory out hides its links from the dangerous-symlink gate, so from a workspace .sandy/config it asks for the one-time approval (and a headless or non-TTY launch refuses); from the environment or the host config it needs none. Those rules still hold as defense in depth. A scan that takes over 5 s prints its duration and names this key. Leaving a directory out also drops its links from the approved-symlinks list at the next launch, so taking it back out of the key later makes any escaping link there a new one, which the dangerous-symlink gate treats as it treats any new link.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
 CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
@@ -15406,7 +15406,9 @@ _sandy_symlink_recorded() {   # $1 = rel  $2 = target
 _sandy_symlink_classify() {
     local link="$1" target="$2" _sl_rel link_rel raw
     [ -z "$target" ] && return 0
-    if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
+    # Outside means outside: a sibling such as <workspace>-secrets shares the
+    # workspace's spelling as a prefix but is not in it (_sandy_symlink_inside).
+    if ! _sandy_symlink_inside "$target"; then
         # Skip symlinks to system paths — mounting host system binaries over
         # the container's (e.g. /usr/bin/python3) breaks the container.
         # Only mount targets under $HOME.
@@ -15504,9 +15506,20 @@ _sandy_dir_has_entry() {
 # skipped directory's links never reach the dangerous-symlink gate, so a repo
 # must not be able to choose what the gate sees.
 _sandy_symlink_skip_parse() {
-    local _raw="${SANDY_SYMLINK_SCAN_SKIP:-}" _e _c _rest _bad _copied _seg _ce _cc
+    local _raw="${SANDY_SYMLINK_SCAN_SKIP:-}" _e _c _rest _bad _copied _seg _ce _cc _gits="" _ga
     _copied="$(_sandy_symlink_copied)"
     _SANDY_SL_SKIPS=(); _SANDY_SL_SKIP_EXPR=()
+    # Where .git and the gitdir a .git file names resolve (lower-cased, as
+    # below): sandy mounts paths there by name, and a .git link or a gitdir
+    # can point anywhere in the workspace.
+    if [ -n "$_raw" ]; then
+        _gits="$(_sandy_symlink_resolve .git | tr '[:upper:]' '[:lower:]')"
+        _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
+        if [ -n "$_ga" ]; then
+            _ga="$(readlink -f "$_ga" 2>/dev/null || true)"
+            [ -z "$_ga" ] || _gits="$_gits"$'\n'"$(printf '%s' "$_ga" | tr '[:upper:]' '[:lower:]')"
+        fi
+    fi
     while [ -n "$_raw" ]; do
         _e="${_raw%%,*}"
         case "$_raw" in *,*) _raw="${_raw#*,}" ;; *) _raw="" ;; esac
@@ -15550,6 +15563,18 @@ _sandy_symlink_skip_parse() {
             warn "SANDY_SYMLINK_SCAN_SKIP: '$_e' covers $_bad, which sandy copies into the sandbox; it is scanned anyway."
             continue
         fi
+        # The same for where .git and its gitdir resolve: the gitdir, its
+        # config, hooks and info, and the submodule gitdirs below it are
+        # mounted by name.
+        while IFS= read -r _cc; do
+            [ -n "$_cc" ] || continue
+            case "$_cc/" in "$_ce"/*) _bad=1; break ;; esac
+            case "$_ce/" in "$_cc"/*) _bad=1; break ;; esac
+        done <<< "$_gits"
+        if [ -n "$_bad" ]; then
+            warn "SANDY_SYMLINK_SCAN_SKIP: '$_e' covers where .git or its gitdir resolves, which sandy mounts by name; it is scanned anyway."
+            continue
+        fi
         _SANDY_SL_SKIPS+=("$_e")
         _SANDY_SL_SKIP_EXPR+=(-o -path "$(_sandy_fnmatch_escape "$WORK_DIR")/$(_sandy_fnmatch_escape "$_e")")
     done
@@ -15567,6 +15592,12 @@ _sandy_symlink_copied() {
     printf '%s\n' .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands
 }
 
+# True when canonical path $1 is the workspace or lies inside it. A bare
+# prefix test would count a sibling such as <workspace>-secrets as inside.
+_sandy_symlink_inside() {
+    [ "$1" = "$REAL_WORK_DIR" ] || [[ "$1" == "$REAL_WORK_DIR"/* ]]
+}
+
 # Where workspace-relative $1 resolves on the host: `readlink -f` of its
 # deepest existing prefix with the rest appended (portable for a path that
 # does not exist yet). Empty when even the workspace cannot be resolved.
@@ -15582,55 +15613,183 @@ _sandy_symlink_resolve() {
     done
 }
 
-# The workspace paths sandy mounts or copies BY NAME -- the protected paths,
-# .gstack (the gstack skill pack's state, mounted read-write) and the copied
-# trees above -- judged as main's full scan would judge them, whatever
-# SANDY_SYMLINK_SCAN_SKIP hid and whether or not the --start supervisor
-# rescanned. For each such path, the path itself and each of its prefixes is
-# resolved (readlink -f) and, where it lands outside the workspace, classified
-# exactly as the scan classifies a link there: a link at that path is
-# classified as one (and mounted after approval, as the scan would); a path
-# that is not itself a link, reached through a link above it, is recorded for
-# the gate only, since sandy already mounts or copies it by name. A prefix
-# that lands inside the workspace is followed further down. The first prefix
-# the gate judges ends the walk: everything below it lies under that target.
-# A pair already judged (by the scan, or by the supervisor from the list) is
-# not judged twice. Runs on every scan and in the supervisor. Then, in the
-# supervisor (list), each copied tree's resolved location inside the
-# workspace is walked, at every depth, for links the list does not hold.
-# A path with a node_modules or .venv* component is left out, exactly as the
-# scan leaves it out. Paths under .git (.git/config, .git/hooks, .git/info,
-# .git/packed-refs) are NOT left out: sandy mounts them by name, and `.git`
-# can be a link (into the workspace, perhaps into a SANDY_SYMLINK_SCAN_SKIP
-# directory, or out of it), so they are judged at every prefix like any other
-# by-name path. A new workspace path mounted or copied by name must be added
-# here.
-_sandy_symlink_protected_sweep() {
-    local _mode="$1" _p _q _rest _w _t _copied _link _rel _n
-    _copied="$(_sandy_symlink_copied)"
+# The `gitdir:` value of a .git FILE at the workspace root, and the directory
+# it names, resolved as the mount code has always resolved it (a logical `cd`
+# from the workspace). Shared by the gitdir mount and by the by-name sweep, so
+# the sweep judges exactly the directory that is mounted.
+_sandy_gitdir_rel() {
+    [ -f "$WORK_DIR/.git" ] || return 0
+    sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]'
+}
+_sandy_gitdir_host() {   # $1 = the gitdir value -> the directory, or nothing
+    [ -n "$1" ] || return 0
+    (cd "$WORK_DIR" && cd "$1" 2>/dev/null && pwd) || true
+}
+
+# The submodule gitdirs under modules/ directory $1 that get the :ro overlay:
+# every directory holding a regular file named config, to depth 6, found
+# without following links (find's default). NUL-separated. Shared by the
+# overlay (_protect_submodule_gitdirs) and by the by-name sweep.
+_sandy_submodule_gitdirs() {
+    [ -d "$1" ] || return 0
+    local _cfg
+    while IFS= read -r -d '' _cfg; do
+        printf '%s\0' "${_cfg%/*}"
+    done < <(find "$1" -mindepth 1 -maxdepth 6 -type f -name config -print0 2>/dev/null)
+}
+
+# Every workspace path sandy mounts or copies BY NAME, workspace-relative and
+# NUL-separated: the protected paths (.git/config, .git/hooks, .git/info and
+# .git/packed-refs among them), .gstack, the copied trees, and the git paths
+# the mount code derives from the workspace: the gitdir a .git FILE names
+# (with its config, hooks, info and packed-refs) when that gitdir is in the
+# workspace, and config, hooks and info of every submodule gitdir under
+# .git/modules and under that gitdir's modules/. The git paths come from the
+# helpers the mount code itself calls. A new by-name mount belongs here; one
+# that is missed is still caught before docker run, where every -v source in
+# the workspace is checked against what the gate judged
+# (_sandy_symlink_check_mounts), and refused instead of mounted.
+_sandy_symlink_byname_rels() {
+    local _r _g="" _ga _root _d
     _sandy_is_protected_rel . || true    # loads _SANDY_PROTECTED_RELS
-    for _p in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"} .gstack $_copied; do
-        case "/$_p/" in */node_modules/*|*/.venv*/*) continue ;; esac
-        _q=""; _rest="$_p"
-        while [ -n "$_rest" ]; do
-            _q="${_q:+$_q/}${_rest%%/*}"
-            case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
-            _w="$WORK_DIR/$_q"
-            [ -e "$_w" ] || [ -L "$_w" ] || break
-            _t="$(readlink -f "$_w" 2>/dev/null || true)"
-            [ -n "$_t" ] || break
-            [[ "$_t" != "$REAL_WORK_DIR"* ]] || continue
-            _n=${#_SANDY_SL_RELS[@]}
-            if _sandy_symlink_recorded "$_q" "$_t"; then break; fi
-            if [ -L "$_w" ]; then
-                _sandy_symlink_classify "$_w" "$_t"
-            else
-                _sandy_symlink_classify "$_w" "$_t" judge
-            fi
-            [ ${#_SANDY_SL_RELS[@]} -eq "$_n" ] || break
-        done
+    for _r in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"} .gstack $(_sandy_symlink_copied); do
+        printf '%s\0' "$_r"
     done
+    _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
+    case "$_ga" in
+        "$WORK_DIR") _g=. ;;
+        "$WORK_DIR"/*) _g="${_ga#"$WORK_DIR"/}" ;;
+    esac
+    if [ "$_g" = . ]; then
+        printf '%s\0' config hooks info packed-refs
+    elif [ -n "$_g" ]; then
+        printf '%s\0' "$_g" "$_g/config" "$_g/hooks" "$_g/info" "$_g/packed-refs"
+    fi
+    for _root in "$WORK_DIR/.git/modules" ${_g:+"$_ga/modules"}; do
+        while IFS= read -r -d '' _d; do
+            case "$_d" in "$WORK_DIR"/*) ;; *) continue ;; esac
+            _r="${_d#"$WORK_DIR"/}"
+            printf '%s\0' "$_r/config" "$_r/hooks" "$_r/info"
+        done < <(_sandy_submodule_gitdirs "$_root")
+    done
+}
+
+# Where workspace-relative $1's last component sits, workspace-relative: its
+# parent resolved, plus its name -- the path the scan names a link by. Empty
+# when the parent resolves outside the workspace.
+_sandy_symlink_canon() {
+    local _par _pr
+    case "$1" in
+        */*) _par="$(readlink -f "$WORK_DIR/${1%/*}" 2>/dev/null || true)" ;;
+        *) _par="$REAL_WORK_DIR" ;;
+    esac
+    { [ -n "$_par" ] && _sandy_symlink_inside "$_par"; } || return 0
+    _pr="${_par#"$REAL_WORK_DIR"}"; _pr="${_pr#/}"
+    printf '%s' "${_pr:+$_pr/}${1##*/}"
+}
+
+# True when canonical path $1 is, or lies under, a target this launch's gate
+# judged (so the user approved exposing it, or the gate is about to ask).
+_sandy_symlink_target_judged() {
+    local _i=0
+    while [ "$_i" -lt ${#_SANDY_SL_TGTS[@]} ]; do
+        case "$1" in "${_SANDY_SL_TGTS[$_i]}"|"${_SANDY_SL_TGTS[$_i]}"/*) return 0 ;; esac
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# _sandy_symlink_walk REL MODE: walk workspace-relative REL prefix by prefix,
+# the way Docker and cp resolve it. A prefix that lands outside the workspace
+# while the one above it was inside is an EXIT: a link in the workspace that
+# leaves it. Below an exit the walk is in that target's own tree until a
+# prefix lands inside again (a link back in), after which the next exit is
+# judged afresh. Each exit -- and, below an exit the gate does not judge (a
+# target outside $HOME at an unprotected path), each further prefix -- is
+# judged exactly as the scan judges a link there:
+#   sweep  classified (_sandy_symlink_classify; a prefix that is not itself a
+#          link, reached through one, for the gate only), unless the pair is
+#          already recorded, by this path or by where the scan names the link;
+#   check  printed as "PREFIX -> TARGET", returning 0, when the gate would
+#          judge it and no judged target covers it; a target in $SANDY_HOME
+#          is never covered.
+# Returns 1 at the end of the path or at a prefix that does not resolve.
+_sandy_symlink_walk() {
+    local _mode="$2" _q="" _rest="$1" _w _t _in=1 _ok="" _c _n
+    while [ -n "$_rest" ]; do
+        _q="${_q:+$_q/}${_rest%%/*}"
+        case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+        _w="$WORK_DIR/$_q"
+        { [ -e "$_w" ] || [ -L "$_w" ]; } || return 1
+        _t="$(readlink -f "$_w" 2>/dev/null || true)"
+        [ -n "$_t" ] || return 1
+        if _sandy_symlink_inside "$_t"; then _in=1; continue; fi
+        [ "$_in" = 0 ] || _ok=""
+        _in=0
+        [ -z "$_ok" ] || continue
+        if [ "$_mode" = check ]; then
+            case "$_t" in "$SANDY_HOME"|"$SANDY_HOME"/*) printf '%s -> %s\n' "$_q" "$_t"; return 0 ;; esac
+            if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
+            if [[ "$_t" == "$HOME"/* ]] || _sandy_is_protected_rel "$_q"; then
+                printf '%s -> %s\n' "$_q" "$_t"; return 0
+            fi
+            continue
+        fi
+        if _sandy_symlink_recorded "$_q" "$_t"; then _ok=1; continue; fi
+        _c="$(_sandy_symlink_canon "$_q")"
+        if [ -n "$_c" ] && _sandy_symlink_recorded "$_c" "$_t"; then _ok=1; continue; fi
+        _n=${#_SANDY_SL_RELS[@]}
+        if [ -L "$_w" ]; then
+            _sandy_symlink_classify "$_w" "$_t"
+        else
+            _sandy_symlink_classify "$_w" "$_t" judge
+        fi
+        [ ${#_SANDY_SL_RELS[@]} -eq "$_n" ] || _ok=1
+    done
+    return 1
+}
+
+# The workspace paths sandy mounts or copies BY NAME (_sandy_symlink_byname_rels)
+# judged as main's full scan would judge them, whatever SANDY_SYMLINK_SCAN_SKIP
+# hid and whether or not the --start supervisor rescanned: each one that
+# resolves outside the workspace is walked (_sandy_symlink_walk sweep), so a
+# link at the path or at any prefix of it, through any internal link, reaches
+# the gate, and is mounted after approval as the scan would mount it. A pair
+# already judged (by the scan, or by the supervisor from the list) is not
+# judged twice. Runs on every scan and in the supervisor. Then, in the
+# supervisor (list), each copied tree's resolved location inside the
+# workspace is walked, at every depth, for links the list does not hold (cp
+# copies the whole tree). A path with a node_modules or .venv* component is
+# left out, exactly as the scan leaves it out. Paths under .git and under a
+# gitdir are NOT left out: sandy mounts them by name, and `.git` can be a link
+# or a file naming a gitdir anywhere in the workspace.
+_sandy_symlink_protected_sweep() {
+    local _mode="$1" _p _t _copied _link _rel _par _lp="" _lpin=""
+    # Loaded here, in this shell: the list below is produced in a subshell,
+    # and the lists are read once per scan (#494).
+    _sandy_is_protected_rel . || true
+    while IFS= read -r -d '' _p; do
+        case "/$_p/" in */node_modules/*|*/.venv*/*) continue ;; esac
+        # A path that is not a link, in a directory that resolves inside the
+        # workspace, is inside it: no readlink for most paths (the list
+        # holds them grouped by directory).
+        case "$_p" in */*) _par="${_p%/*}" ;; *) _par=. ;; esac
+        if [ "$_par" != "$_lp" ]; then
+            _lp="$_par"; _lpin=""
+            if [ "$_par" = . ]; then
+                _lpin=1
+            else
+                _t="$(_sandy_symlink_resolve "$_par")"
+                if [ -n "$_t" ] && _sandy_symlink_inside "$_t"; then _lpin=1; fi
+            fi
+        fi
+        if [ -n "$_lpin" ] && [ ! -L "$WORK_DIR/$_p" ]; then continue; fi
+        _t="$(_sandy_symlink_resolve "$_p")"
+        if [ -z "$_t" ] || _sandy_symlink_inside "$_t"; then continue; fi
+        _sandy_symlink_walk "$_p" sweep || true
+    done < <(_sandy_symlink_byname_rels)
     [ "$_mode" = list ] || return 0
+    _copied="$(_sandy_symlink_copied)"
     for _p in $_copied; do
         _t="$(_sandy_symlink_resolve "$_p")"
         [ -d "$_t" ] || continue
@@ -15643,6 +15802,49 @@ _sandy_symlink_protected_sweep() {
             \( -type d \( -name node_modules -o -name '.venv*' -o -name .git \) -prune \) \
             -o -type l -print0 2>/dev/null)
     done
+    return 0
+}
+
+# A host path sandy mounts or copies by name, in the workspace: prints
+# "PREFIX -> TARGET" and returns 0 when it leaves the workspace through a
+# link the gate did not judge (_sandy_symlink_walk check); 1 otherwise,
+# including for any path outside the workspace.
+_sandy_symlink_byname_unjudged() {
+    local _rel _t
+    case "$1" in "$WORK_DIR"/*) _rel="${1#"$WORK_DIR"/}" ;; *) return 1 ;; esac
+    _t="$(_sandy_symlink_resolve "$_rel")"
+    if [ -z "$_t" ] || _sandy_symlink_inside "$_t"; then return 1; fi
+    _sandy_symlink_walk "$_rel" check
+}
+
+# Refuse the launch for the "PREFIX -> TARGET" lines in $1.
+_sandy_symlink_unjudged_refuse() {
+    local _l
+    error "A path sandy mounts or copies by name leaves the workspace through a link the"
+    error "symlink check did not judge (added after the check, or a mount it does not know):"
+    while IFS= read -r _l; do
+        [ -z "$_l" ] || error "  $_l"
+    done <<< "$1"
+    error "Nothing was started. Launch again: the check then judges the link like any other."
+    _sandy_daemon_fatal
+    exit 1
+}
+
+# Just before docker run: every -v source in the workspace must stay in it
+# or leave it only through links this launch's gate judged. Derived from the
+# assembled argv, so it covers every mount site, including one the by-name
+# list (_sandy_symlink_byname_rels) does not know of yet.
+_sandy_symlink_check_mounts() {
+    local _i=0 _n=${#RUN_FLAGS[@]} _hit _bad=""
+    while [ "$_i" -lt "$_n" ]; do
+        if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
+            if _hit="$(_sandy_symlink_byname_unjudged "${RUN_FLAGS[$((_i + 1))]%%:*}")"; then
+                _bad="$_bad$_hit"$'\n'
+            fi
+        fi
+        _i=$((_i + 1))
+    done
+    [ -z "$_bad" ] || _sandy_symlink_unjudged_refuse "$_bad"
     return 0
 }
 
@@ -20715,7 +20917,7 @@ fi
 # Skill pack persistent state mounts. gstack mounts from the workspace (not
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
 # ensured to exist.
-# A workspace path mounted by name: _sandy_symlink_protected_sweep must list it.
+# A workspace path mounted by name: _sandy_symlink_byname_rels must list it.
 case ",${SANDY_SKILL_PACKS:-}," in
     *,gstack,*) RUN_FLAGS+=(-v "$WORK_DIR/.gstack:/home/sandy/.gstack") ;;
 esac
@@ -20727,9 +20929,12 @@ esac
 # into the container using the same $HOME-relative mapping so the relative
 # references between worktree and gitdir resolve correctly.
 if [ -f "$WORK_DIR/.git" ]; then
-    GITDIR_REL="$(sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]')"
+    # Resolved by the helpers the by-name symlink sweep also calls, so the
+    # sweep judges this gitdir (and its config, hooks, info and modules/) at
+    # every prefix, wherever in the workspace it lies.
+    GITDIR_REL="$(_sandy_gitdir_rel)"
     if [ -n "$GITDIR_REL" ]; then
-        GITDIR_HOST="$(cd "$WORK_DIR" && cd "$GITDIR_REL" 2>/dev/null && pwd)" || GITDIR_HOST=""
+        GITDIR_HOST="$(_sandy_gitdir_host "$GITDIR_REL")"
         # R5a (1.14.0): the `gitdir:` line is REPOSITORY CONTENT, and this used
         # to be a bare `cd` with no containment check feeding a bind mount with
         # no :ro. Measured: `gitdir: ../../.ssh` produced
@@ -20995,9 +21200,9 @@ _protect_submodule_gitdirs() {
     local root_host="$1"       # filesystem path on host to walk
     local root_container="$2"  # container-side path that corresponds to root_host
     [ -d "$root_host" ] || return 0
-    local _cfg _sub_dir _rel
-    while IFS= read -r -d '' _cfg; do
-        _sub_dir="$(dirname "$_cfg")"
+    local _sub_dir _rel
+    # The same list the by-name symlink sweep judges (_sandy_submodule_gitdirs).
+    while IFS= read -r -d '' _sub_dir; do
         _rel="${_sub_dir#$root_host}"  # e.g. "/research/claude-code"
         RUN_FLAGS+=(-v "$_sub_dir/config:$root_container${_rel}/config:ro")
         # Submodule hooks/info: existence-gated, same as the top-level
@@ -21009,7 +21214,7 @@ _protect_submodule_gitdirs() {
         if [ -d "$_sub_dir/info" ]; then
             RUN_FLAGS+=(-v "$_sub_dir/info:$root_container${_rel}/info:ro")
         fi
-    done < <(find "$root_host" -mindepth 1 -maxdepth 6 -type f -name config -print0 2>/dev/null)
+    done < <(_sandy_submodule_gitdirs "$root_host")
 }
 # Regular repo: .git/modules lives under the workspace bind mount.
 _protect_submodule_gitdirs "$WORK_DIR/.git/modules" "$SANDY_WORKSPACE/.git/modules"
@@ -21044,6 +21249,11 @@ if _sandy_agent_has claude; then
             if [ ! -d "$SANDBOX_DIR/workspace-$_sd" ] && [ "$_host_had_sub" = "1" ]; then
                 # -R, not -r: BSD/Apple `cp -r` follows links (-RL); -R copies
                 # a link as a link on both, so nothing is copied through one.
+                # The source itself is followed, so it must leave the
+                # workspace only through links the gate judged.
+                if _sl_hit="$(_sandy_symlink_byname_unjudged "$WORK_DIR/.claude/$_sd")"; then
+                    _sandy_symlink_unjudged_refuse "$_sl_hit"
+                fi
                 cp -R "$WORK_DIR/.claude/$_sd" "$SANDBOX_DIR/workspace-$_sd"
             else
                 mkdir -p "$SANDBOX_DIR/workspace-$_sd"
@@ -21067,6 +21277,9 @@ if _sandy_agent_has gemini; then
             _host_had_sub=0
             [ -d "$WORK_DIR/.gemini/$_sd" ] && [ "$_host_empty_stub" = "0" ] && _host_had_sub=1
             if [ ! -d "$SANDBOX_DIR/workspace-gemini-$_sd" ] && [ "$_host_had_sub" = "1" ]; then
+                if _sl_hit="$(_sandy_symlink_byname_unjudged "$WORK_DIR/.gemini/$_sd")"; then
+                    _sandy_symlink_unjudged_refuse "$_sl_hit"
+                fi
                 cp -R "$WORK_DIR/.gemini/$_sd" "$SANDBOX_DIR/workspace-gemini-$_sd"   # -R: see .claude above
             else
                 mkdir -p "$SANDBOX_DIR/workspace-gemini-$_sd"
@@ -22467,6 +22680,10 @@ if [ -n "$_SANDY_STAGED" ]; then
     unset _sandy_ls_label
 fi
 # --- END stale-image launch-staging fallback (#400) -------------------------
+
+# Every -v source in the workspace leaves it only through links the gate
+# judged (B2): a backstop for the by-name sweep, derived from the argv itself.
+_sandy_symlink_check_mounts
 
 if [ "$SANDY_VERBOSE" -ge 3 ]; then
     info "Docker run flags:"
