@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SETTLED (kept for reference and for re-measuring on a Mirror version bump):
+# MOSTLY SETTLED (kept for reference and for re-measuring on a Mirror version bump):
 # runs 1-2 (2026-10-20, mirror 0.1.0) settled M0-M8, recorded under RESULTS
 # below and in decisions/2026-10-20-mirror-agent.md; Mirror shipped as an
 # agent on those results (#465). M9 is still listed as open in that record.
