@@ -15765,8 +15765,13 @@ _sandy_symlink_classify() {
             # un-:ro, second door. The two arrays are consumed by index
             # against each OTHER, never against this one, so adding here
             # alone is safe.
+            # Issue 26: a copied tree too (_sandy_symlink_copied). Sandy copies
+            # what it finds there into the sandbox, so a link there hands its
+            # target's contents to the agent wherever it points; it is judged
+            # here, and the copy (_sandy_copy_overlay) carries the contents,
+            # never the link.
             _sl_rel="${link#$WORK_DIR/}"
-            if _sandy_is_protected_rel "$_sl_rel"; then
+            if _sandy_is_protected_rel "$_sl_rel" || _sandy_symlink_is_copied_rel "$_sl_rel"; then
                 DANGEROUS_SYMLINKS+=("$_sl_rel -> $target")
                 _SANDY_SL_RELS+=("$_sl_rel"); _SANDY_SL_TGTS+=("$target")
             fi
@@ -15924,14 +15929,24 @@ _sandy_symlink_skip_parse() {
 }
 
 # Workspace trees sandy COPIES into the sandbox by name, on first creation
-# (`cp -R`, links copied as links, then mounted read-write). A link at one, or
-# at any of its ancestors, still hands cp and Docker its target.
+# (_sandy_copy_overlay: the tree's contents, with links inside it copied as
+# links, then mounted read-write). A link at one, or at any of its ancestors,
+# hands the copy its target's contents, so the gate judges it wherever it
+# points, a target outside $HOME included (_sandy_symlink_classify); the copy
+# itself is never a link (issue 26).
 # SANDY_SYMLINK_SCAN_SKIP never covers where one resolves
 # (_sandy_symlink_skip_parse), so every scan walks them whole.
 # (A function, not a variable, so a test that extracts the scan functions
 # gets it too.)
 _sandy_symlink_copied() {
     printf '%s\n' .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands
+}
+# True when workspace-relative $1 is one of those trees.
+_sandy_symlink_is_copied_rel() {
+    case "$1" in
+        .claude/commands|.claude/agents|.claude/plugins|.gemini/extensions|.gemini/commands) return 0 ;;
+    esac
+    return 1
 }
 
 # True when canonical path $1 is the workspace or lies inside it. A bare
@@ -16172,8 +16187,8 @@ _sandy_symlink_protected_sweep() {
 # target in $SANDY_HOME is never covered; one that is, or lies under, a
 # target this launch's gate judged is covered (and so is the rest of its
 # tree, until a prefix comes back in); otherwise a target under $HOME, or
-# any target at a protected path or at one whose workspace name cannot be
-# told, is printed. A path with no link and no `..` component cannot leave
+# any target at a protected path, at a copied tree, or at one whose workspace
+# name cannot be told, is printed. A path with no link and no `..` component cannot leave
 # where it is, so it costs no readlink.
 _sandy_symlink_path_unjudged() {
     local _rest="$1" _w="" _c _any="" _t _in=0 _ent="" _ok="" _q _qp _shp=""
@@ -16221,8 +16236,8 @@ _sandy_symlink_path_unjudged() {
         esac
         if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
         if [[ "$_t" == "$HOME"/* ]] || { [ -z "$_q" ] && [ -z "$_qp" ]; } \
-           || { [ -n "$_q" ] && _sandy_is_protected_rel "$_q"; } \
-           || { [ -n "$_qp" ] && _sandy_is_protected_rel "$_qp"; }; then
+           || { [ -n "$_q" ] && { _sandy_is_protected_rel "$_q" || _sandy_symlink_is_copied_rel "$_q"; }; } \
+           || { [ -n "$_qp" ] && { _sandy_is_protected_rel "$_qp" || _sandy_symlink_is_copied_rel "$_qp"; }; }; then
             printf '%s -> %s\n' "${_q:-${_qp:-$_w}}" "$_t"; return 0
         fi
     done
@@ -19629,6 +19644,14 @@ cleanup() {
         while IFS= read -r _stub; do
             [ -z "$_stub" ] && continue
             _stub_count=$((_stub_count + 1))
+            # Never through a link (issue 28): the workspace, or the agent
+            # during the session, can make `.claude` or `.gemini` a link, and
+            # these rmdirs (and the parent walk below) would then remove an
+            # empty directory wherever it points. Walked from the workspace
+            # root; such a stub is left alone, and so are its parents.
+            if [ -n "${WORK_DIR:-}" ] && _sandy_path_symlink_component "$WORK_DIR" "$_stub" >/dev/null; then
+                continue
+            fi
             if [ -d "$_stub" ]; then
                 if [ -z "$(ls -A "$_stub" 2>/dev/null)" ]; then
                     if ! rmdir "$_stub" 2>/dev/null; then
@@ -21553,6 +21576,10 @@ while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     _p="$WORK_DIR/$_pd"
     [ -d "$_p" ] || continue
+    # Issue 28: never through a link. `.github -> /elsewhere` made this rmdir an
+    # empty `workflows/` (and try `.github`) wherever the link pointed. Walked
+    # from the workspace root: a link at the path or any prefix skips it.
+    if _sandy_path_symlink_component "$WORK_DIR" "$_p" >/dev/null; then continue; fi
     # Empty check (no regular files, no subdirs, no dotfiles).
     [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
     # Not git-tracked (if workspace is a git repo).
@@ -21692,6 +21719,46 @@ fi
 # Seeded from host on first creation so user-authored commands/agents are available.
 # The agent can create/modify these freely; changes persist in the sandbox across sessions
 # without touching the host workspace.
+#
+# Issue 26: the copy that is mounted is never a link. `cp -R SRC DST` copies a
+# SRC that is itself a link AS a link (GNU and BSD alike), and Docker follows
+# a link in a -v source, so a workspace `.claude/commands -> /anywhere` was
+# mounted read-write at its target, outside the gate when the target lay
+# outside $HOME; a relative link landed beside the sandbox, in
+# $SANDY_HOME/sandboxes. The copy takes the source's CONTENTS (`SRC/.`) into
+# a fresh directory renamed into place; links inside the tree are still
+# copied as links (-R, never -L: BSD `cp -r` is -RL). Where the source is or
+# passes through a link leaving the workspace, the symlink gate judged it
+# first (_sandy_symlink_classify), so an approved link is copied like any
+# other tree and one nobody approved never reaches here.
+_sandy_copy_overlay() {   # $1 = source directory (followed)  $2 = destination, absent
+    local _tmp _m
+    _tmp="$(mktemp -d "${2%/*}/.copy-overlay.XXXXXX")"
+    if ! cp -R "$1/." "$_tmp/"; then
+        rm -rf "$_tmp"
+        error "Could not copy ${1#$WORK_DIR/} into the sandbox ($2)."
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    # mktemp makes it 0700; give it the mode a plain mkdir would.
+    _m="$(umask)"
+    chmod "$(printf '%o' $(( 0777 & ~0$_m )))" "$_tmp"
+    mv "$_tmp" "$2"
+}
+# A sandbox copy that is a link (an earlier sandy copied a linked source as a
+# link) is refused, not mounted: mounting it mounts wherever it points,
+# read-write. Removing it is safe (it is a link, not the data), and the next
+# launch copies the tree afresh.
+_sandy_copy_overlay_nolink() {   # $1 = sandbox copy  $2 = workspace-relative tree
+    [ -L "$1" ] || return 0
+    error "The sandbox copy of $2 is a symbolic link: $1 -> $(readlink "$1" 2>/dev/null || echo '?')"
+    error "An earlier sandy copied a linked $2 as the link itself, so mounting the copy would"
+    error "mount where it points, read-write. Nothing was started. Remove the link (only the"
+    error "link; what it points to is untouched) and launch again, which copies $2 afresh:"
+    error "  rm '$1'"
+    _sandy_daemon_fatal
+    exit 1
+}
 if _sandy_agent_has claude; then
     # user-setup.sh unconditionally runs `mkdir -p $WORKSPACE/.claude` inside
     # the container, which creates `.claude/` on the host via the rw workspace
@@ -21702,6 +21769,7 @@ if _sandy_agent_has claude; then
         echo "$WORK_DIR/.claude" >> "$SANDBOX_DIR/.session-created-stubs"
     fi
     for _sd in commands agents plugins; do
+        _sandy_copy_overlay_nolink "$SANDBOX_DIR/workspace-$_sd" ".claude/$_sd"
         # Treat an empty host dir as debris from a prior run (not user content).
         # Record it as a session stub so cleanup() removes it on exit.
         _host_empty_stub=0
@@ -21712,14 +21780,12 @@ if _sandy_agent_has claude; then
             _host_had_sub=0
             [ -d "$WORK_DIR/.claude/$_sd" ] && [ "$_host_empty_stub" = "0" ] && _host_had_sub=1
             if [ ! -d "$SANDBOX_DIR/workspace-$_sd" ] && [ "$_host_had_sub" = "1" ]; then
-                # -R, not -r: BSD/Apple `cp -r` follows links (-RL); -R copies
-                # a link as a link on both, so nothing is copied through one.
-                # The source itself is followed, so it must leave the
-                # workspace only through links the gate judged.
+                # The source itself is followed (_sandy_copy_overlay), so it
+                # must leave the workspace only through links the gate judged.
                 if _sl_hit="$(_sandy_symlink_path_unjudged "$WORK_DIR/.claude/$_sd")"; then
                     _sandy_symlink_unjudged_refuse "$_sl_hit"
                 fi
-                cp -R "$WORK_DIR/.claude/$_sd" "$SANDBOX_DIR/workspace-$_sd"
+                _sandy_copy_overlay "$WORK_DIR/.claude/$_sd" "$SANDBOX_DIR/workspace-$_sd"
             else
                 mkdir -p "$SANDBOX_DIR/workspace-$_sd"
             fi
@@ -21734,6 +21800,7 @@ if _sandy_agent_has gemini; then
     # Gemini: overlay .gemini/extensions and .gemini/commands with sandbox copies.
     # Seed from host on first creation so user-authored commands are available.
     for _sd in extensions commands; do
+        _sandy_copy_overlay_nolink "$SANDBOX_DIR/workspace-gemini-$_sd" ".gemini/$_sd"
         _host_empty_stub=0
         if [ -d "$WORK_DIR/.gemini/$_sd" ] && [ -z "$(ls -A "$WORK_DIR/.gemini/$_sd" 2>/dev/null)" ]; then
             _host_empty_stub=1
@@ -21745,7 +21812,7 @@ if _sandy_agent_has gemini; then
                 if _sl_hit="$(_sandy_symlink_path_unjudged "$WORK_DIR/.gemini/$_sd")"; then
                     _sandy_symlink_unjudged_refuse "$_sl_hit"
                 fi
-                cp -R "$WORK_DIR/.gemini/$_sd" "$SANDBOX_DIR/workspace-gemini-$_sd"   # -R: see .claude above
+                _sandy_copy_overlay "$WORK_DIR/.gemini/$_sd" "$SANDBOX_DIR/workspace-gemini-$_sd"
             else
                 mkdir -p "$SANDBOX_DIR/workspace-gemini-$_sd"
             fi
