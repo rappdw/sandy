@@ -12686,7 +12686,7 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 # The scan: its helper functions (optimization pass B2 split the loop out of
 # _sandy_resolve_symlinks), then one call of it.
 : > "$_S130_DIR/scan.sh"
-for _f in _sandy_symlink_classify _sandy_fnmatch_escape _sandy_symlink_skip_parse _sandy_symlink_protected_sweep _sandy_symlink_scan; do
+for _f in _sandy_symlink_classify _sandy_fnmatch_escape _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_protected_sweep _sandy_symlink_scan; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
 done
 unset _f
@@ -25590,7 +25590,7 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219, 225 and 226-229 (removed at the end of §229,
+# The stubs, shared by 215-219, 225 and 226-231 (removed at the end of §231,
 # which follows §225, which follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
@@ -26312,6 +26312,126 @@ check "§229(2) ...and generated no build files: no Dockerfile*, entrypoint.sh o
 _a6_launch s229 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 check "§229(3) control: a plain launch through the same stubs calls docker info and writes the build files (rc ${_A6_RC:-none})" \
     bash -c 'grep -q "^docker info" "$1" && test -f "$2/Dockerfile.base"' _ "$_A6_DIR/s229/events.log" "$_A6_DIR/s229/sh"
+section "§230: the scan key and the --start list never hide a link at a path sandy copies or mounts by name, nor at an ancestor of one (B2 send-back)"
+# ============================================================
+# .claude/{commands,agents,plugins} and .gemini/{extensions,commands} are
+# COPIED into the sandbox by name (`cp -r`, then mounted read-write); the
+# protected paths and .gstack are mounted by name. Docker and cp -r follow a
+# link at any component of such a source. So: SANDY_SYMLINK_SCAN_SKIP may not
+# cover a copied tree (a workspace config could otherwise hide
+# `.claude/commands -> ~/secret` from the gate: the verifier's case a1), and
+# the --start supervisor, which does not rescan, judges every such path, every
+# ancestor of one, and the copied trees' contents (cases a5, a6). Each case
+# here refuses without a terminal; before the fix each launched with rc 0.
+_s230_refused() {   # $1 = CASE  $2 = the link that must be named
+    [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$1")" ] \
+        && grep -q "need interactive approval\|present at previous approval" "$_A6_DIR/$1/out" \
+        && grep -qF -- "$2" "$_A6_DIR/$1/out"
+}
+# a1: skip key over .claude, a link AT a copied tree.
+_S230=s230-a1; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude" "$_A6_DIR/$_S230/ws/.sandy"
+ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands"
+printf 'SANDY_SYMLINK_SCAN_SKIP=.claude\n' > "$_A6_DIR/$_S230/ws/.sandy/config"
+_a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§230(1) SANDY_SYMLINK_SCAN_SKIP=.claude from a workspace config does not hide .claude/commands -> \$HOME/secret: refused, no agent run, and the entry is named as covering a copied tree (rc ${_A6_RC:-none})" \
+    _s230_refused "$_S230" ".claude/commands -> $_A6_DIR/$_S230/secret"
+check "§230(1b) ...the warning names the entry and the copied tree" \
+    grep -qF "'.claude' covers .claude/commands, which sandy copies into the sandbox" "$_A6_DIR/$_S230/out"
+# a1 inside: a link INSIDE a copied tree, skip key over its parent.
+_S230=s230-a1i; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands" "$_A6_DIR/$_S230/ws/.sandy"
+ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands/x"
+printf 'SANDY_SYMLINK_SCAN_SKIP=.claude\n' > "$_A6_DIR/$_S230/ws/.sandy/config"
+_a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§230(2) ...nor a link INSIDE a copied tree (cp -r may copy through it): refused (mutation: the skip key may cover a copied tree; rc ${_A6_RC:-none})" \
+    _s230_refused "$_S230" ".claude/commands/x -> $_A6_DIR/$_S230/secret"
+# a1g: the gemini copy.
+_S230=s230-a1g; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.gemini" "$_A6_DIR/$_S230/ws/.sandy"
+ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.gemini/extensions"
+printf 'SANDY_SYMLINK_SCAN_SKIP=.gemini\n' > "$_A6_DIR/$_S230/ws/.sandy/config"
+_a6_launch "$_S230" SANDY_AGENT=gemini GEMINI_API_KEY=fixture
+check "§230(3) the same for .gemini/extensions under SANDY_SYMLINK_SCAN_SKIP=.gemini (rc ${_A6_RC:-none})" \
+    _s230_refused "$_S230" ".gemini/extensions -> $_A6_DIR/$_S230/secret"
+
+# --start: links planted between the approval pass and the supervisor.
+# _s228_ws gives a -> t1, b -> t2, approved.
+_s230_sup_after() {   # $1 = CASE; runs the pass, then $2... (a command) , then the supervisor
+    local c="$1"; shift
+    _s228_ws "$c"; mkdir -p "$_A6_DIR/$c/secret" "$_A6_DIR/$c/other"
+    _s228_pass "$c"
+    "$@"
+    _s228_sup "$c" "${_S228_ID:-}"
+}
+_s230_a5() { mkdir -p "$_A6_DIR/s230-a5/ws/.claude"; ln -s "$_A6_DIR/s230-a5/secret" "$_A6_DIR/s230-a5/ws/.claude/commands"; }
+_s230_sup_after s230-a5 _s230_a5
+check "§230(4) a5: .claude/commands -> \$HOME/secret planted after the pass is refused by the supervisor (mutation: copied trees left out of the sweep; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    _s230_refused s230-a5 ".claude/commands -> $_A6_DIR/s230-a5/secret"
+_s230_a6() { printf '{}\n' > "$_A6_DIR/s230-a6/other/settings.json"; rm -rf "$_A6_DIR/s230-a6/ws/.claude"; ln -s "$_A6_DIR/s230-a6/other" "$_A6_DIR/s230-a6/ws/.claude"; }
+_s230_sup_after s230-a6 _s230_a6
+check "§230(5) a6: .claude itself replaced by a link after the pass (the ancestor of .claude/settings.json and the copied trees) is refused (mutation: the sweep tests only the full path, no ancestor walk; rc ${_A6_RC:-none})" \
+    _s230_refused s230-a6 ".claude -> $_A6_DIR/s230-a6/other"
+_s230_a7() { mkdir -p "$_A6_DIR/s230-a7/ws/.claude/commands"; ln -s "$_A6_DIR/s230-a7/secret" "$_A6_DIR/s230-a7/ws/.claude/commands/x"; }
+_s230_sup_after s230-a7 _s230_a7
+check "§230(6) a link planted INSIDE a copied tree after the pass is refused (mutation: the list-mode walk of the copied trees removed; rc ${_A6_RC:-none})" \
+    _s230_refused s230-a7 ".claude/commands/x -> $_A6_DIR/s230-a7/secret"
+# An approved ancestor link retargeted after the pass: on the list, but no
+# longer what was approved, so it is judged with its new target.
+_S230=s230-a8; mkdir -p "$_A6_DIR/$_S230/o1" "$_A6_DIR/$_S230/o2" "$_A6_DIR/$_S230/ws"
+ln -s "$_A6_DIR/$_S230/o1" "$_A6_DIR/$_S230/ws/.claude"
+_s226_seed "$_S230" ".claude -> $_A6_DIR/$_S230/o1"
+_s228_pass "$_S230"
+rm -f "$_A6_DIR/$_S230/ws/.claude"; ln -s "$_A6_DIR/$_S230/o2" "$_A6_DIR/$_S230/ws/.claude"
+_s228_sup "$_S230" "${_S228_ID:-}"
+check "§230(7) an approved .claude link retargeted after the pass is judged with its new target and refused, not waved through as listed (mutation: any listed path counts as checked; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    _s230_refused "$_S230" ".claude -> $_A6_DIR/$_S230/o2"
+unset _S230
+unset -f _s230_refused _s230_sup_after _s230_a5 _s230_a6 _s230_a7
+
+section "§231: skip entries are literal and workspace-relative; the link list is honoured only by the supervisor, written only to a real launch/, and validated entry by entry (B2 send-back)"
+# ============================================================
+# I6: an entry is a literal path. With a directory literally named `.*`
+# present, the entry `.*` names it and prunes it alone -- not every
+# dot-directory, as an unescaped find -path pattern would. The link under
+# .hidden is not approved, so a launch that still scans it refuses; an entry
+# `.[a-z]*` names no directory at all and is warned about.
+_S231=s231-glob; mkdir -p "$_A6_DIR/$_S231/t1" "$_A6_DIR/$_S231/ws/.hidden" "$_A6_DIR/$_S231/ws/.*" "$_A6_DIR/$_S231/ws/.sandy"
+ln -s "$_A6_DIR/$_S231/t1" "$_A6_DIR/$_S231/ws/.hidden/x"
+printf 'SANDY_SYMLINK_SCAN_SKIP=.*,.[a-z]*\n' > "$_A6_DIR/$_S231/ws/.sandy/config"
+_a6_launch "$_S231" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§231(1) skip entries are matched literally: '.*' prunes only the directory named '.*', so .hidden/x is still found and refused, and '.[a-z]*' (no such directory) is warned about (mutation: entries not glob-escaped; rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" != 0 && grep -qF ".hidden/x -> $3/t1" "$2" && ! grep -qF "'"'"'.*'"'"' matches no directory" "$2" && grep -qF "'"'"'.[a-z]*'"'"' matches no directory" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S231/out" "$_A6_DIR/$_S231"
+# I7: `..` is refused outright, by name.
+_S231=s231-dots; mkdir -p "$_A6_DIR/$_S231/ws/sub" "$_A6_DIR/$_S231/ws/scratch"
+_a6_launch "$_S231" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=sub/../scratch,/abs
+check "§231(2) an entry with a .. component, or an absolute one, is refused by name, not used (mutation: the ./.. check removed; rc ${_A6_RC:-none})" \
+    bash -c 'grep -qF "'"'"'sub/../scratch'"'"' is not a directory inside the workspace" "$1" && grep -qF "'"'"'/abs'"'"' is not a directory inside the workspace" "$1"' _ "$_A6_DIR/$_S231/out"
+# I3: only the supervisor reads the list. A plain launch handed a valid id
+# still scans, so a link added since the pass is refused.
+_s228_ws s231-sup
+_s228_pass s231-sup
+ln -s "$_A6_DIR/s231-sup/t3" "$_A6_DIR/s231-sup/ws/n"
+_a6_launch s231-sup SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_PREPASS_SYMLINKS="${_S228_ID:-}"
+check "§231(3) a plain (non-supervisor) launch ignores SANDY_PREPASS_SYMLINKS and scans: the added link is refused (mutation: the list honoured outside the supervisor; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && test "$2" != 0 && grep -q "present at previous approval" "$3" && grep -qF "n -> $4/t3" "$3"' _ "${_S228_ID:-none}" "$_A6_RC" "$_A6_DIR/s231-sup/out" "$_A6_DIR/s231-sup"
+# I4: a link planted at launch/ is removed, not written through.
+_s228_ws s231-ln
+mkdir -p "$_A6_DIR/s231-ln/elsewhere"
+ln -s "$_A6_DIR/s231-ln/elsewhere" "$(_a6_sandbox s231-ln)/launch"
+_s228_pass s231-ln
+check "§231(4) a symlink at launch/ is not written through: the list lands in a real launch/<id>/, the link's target stays empty (mutation: the launch/ link check removed; id '${_S228_ID:-}')" \
+    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && test ! -L "$2/launch" && test -f "$2/launch/$1/symlinks.list" && test -z "$(ls -A "$3")"' _ "${_S228_ID:-none}" "$(_a6_sandbox s231-ln)" "$_A6_DIR/s231-ln/elsewhere"
+# I5: a well-framed list whose entry path escapes the workspace is corrupt.
+_s228_ws s231-ent
+_s228_pass s231-ent
+_S231_F="$(_a6_sandbox s231-ent)/launch/${_S228_ID:-none}/symlinks.list"
+_S231_OK=1
+if [ -f "$_S231_F" ]; then
+    printf 'sandy-symlinks-v1\000%s\000%s\000../a\000%s\000end\000' "$_A6_DIR/s231-ent/ws" 1 "$_A6_DIR/s231-ent/t1" > "$_S231_F" && _S231_OK=0
+fi
+_s228_sup s231-ent "${_S228_ID:-}"
+check "§231(5) a list entry whose path has a .. component makes the list corrupt (named) and the supervisor scans (mutation: entry paths not validated; rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && grep -q "symlink list is corrupt" "$2"' _ "$_S231_OK" "$_A6_DIR/s231-ent/out"
+unset _S231 _S231_F _S231_OK
+
 unset _S228_ID _S229_LOG _S226_ETC
 unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup _s228_list
 

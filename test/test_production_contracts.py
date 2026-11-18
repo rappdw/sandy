@@ -540,7 +540,7 @@ class ProductionContracts(unittest.TestCase):
         self.assertIn(str(self.home / "outside"), run.stdout)
 
     # The scan helpers _sandy_resolve_symlinks calls (optimization pass B2).
-    SCAN = ("_sandy_symlink_classify", "_sandy_fnmatch_escape", "_sandy_symlink_skip_parse",
+    SCAN = ("_sandy_symlink_classify", "_sandy_fnmatch_escape", "_sandy_symlink_skip_parse", "_sandy_symlink_copied",
             "_sandy_symlink_protected_sweep", "_sandy_symlink_scan", "_sandy_symlinks_from_list")
     RESOLVER = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
                 "_sandy_is_protected_rel") + SCAN + ("_sandy_resolve_symlinks",)
