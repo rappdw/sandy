@@ -1318,7 +1318,7 @@ else
 fi
 
 # 'all' alias expands to four agents: run the real resolver with the shared
-# helper (3.0.0, the ordered gate expands through the same function).
+# helper (2.9.0, the ordered gate expands through the same function).
 _ALL_RES="$(env -i PATH="$PATH" SANDY_AGENT=all SANDY_AGENT_OVERRIDE= bash -c '
     eval "$(sed -n "/^_sandy_expand_agent_alias()/,/^}\$/p" "$1")"
     eval "$(sed -n "/^# --- Resolve agent ---\$/,/^# Parse comma-separated agent list/p" "$1")"
@@ -1734,7 +1734,7 @@ check "env precedence: env SANDY_AGENT beats host + workspace config" \
 
 # Conversely: when env doesn't set SANDY_AGENT, workspace passive must
 # still beat host privileged (the per-project override still works) -- for a
-# value no wider than the host's (3.0.0: a workspace that ADDS an agent is
+# value no wider than the host's (2.9.0: a workspace that ADDS an agent is
 # queued for approval instead, checked just below).
 _ENV_PREC_RESULT2="$(
     # shellcheck disable=SC1090
@@ -1765,7 +1765,7 @@ _ENV_PREC_RESULT2="$(
 )"
 check "env precedence: workspace passive still overrides host when env unset (a narrowing: host claude,gemini, workspace gemini)" \
     bash -c 'echo "$1" | grep -q "^SANDY_AGENT=gemini$"' -- "$_ENV_PREC_RESULT2"
-check "env precedence: a workspace value that REPLACES the host's agent is queued for approval, not exported (3.0.0; got: $(printf '%s' "$_ENV_PREC_RESULT2" | grep '^WIDEN='))" \
+check "env precedence: a workspace value that REPLACES the host's agent is queued for approval, not exported (2.9.0; got: $(printf '%s' "$_ENV_PREC_RESULT2" | grep '^WIDEN='))" \
     bash -c 'echo "$1" | grep -qx "WIDEN=claude|SANDY_AGENT=gemini"' -- "$_ENV_PREC_RESULT2"
 
 rm -f "$TIER_TEST_FILE"
@@ -3727,7 +3727,7 @@ check "classifier gates legacy EGRESS_PROXY=0"             test "$(_pvp SANDY_EG
 check "classifier frees legacy EGRESS_PROXY=2 (strict)"    test "$(_pvp SANDY_EGRESS_PROXY 2)" = free
 check "classifier gates ALLOW_WORKFLOW_EDIT=1"             test "$(_pvp SANDY_ALLOW_WORKFLOW_EDIT 1)" = gated
 check "classifier frees an ordinary passive key"           test "$(_pvp SANDY_MODEL anything)" = free
-# Ordered rows (3.0.0): judged against the privileged-resolved baseline ($3).
+# Ordered rows (2.9.0): judged against the privileged-resolved baseline ($3).
 check "classifier gates CODEX_AUTH=oauth over no baseline (default auto)"   test "$(_pvp SANDY_CODEX_AUTH oauth)" = gated
 check "classifier frees CODEX_AUTH=oauth when the host resolved oauth"      test "$(_pvp SANDY_CODEX_AUTH oauth oauth)" = free
 check "classifier frees GEMINI_AUTH=api_key over any baseline"              test "$(_pvp SANDY_GEMINI_AUTH api_key adc)" = free
@@ -10880,7 +10880,7 @@ check "§117(8) SANDY_CLAUDE_AUTH=oauth suppresses the key even with NO OAuth fi
 # of the account refresh token) so it stays passive-safe; `oauth` forces the
 # account credential in even when a key is available, so it is approval-gated.
 _S117_PVP="$(awk '/^_sandy_passive_value_privileged\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
-check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source when the host did not choose oauth (3.0.0: ordered)" \
+check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source when the host did not choose oauth (2.9.0: ordered)" \
     bash -c "$_S117_PVP"$'\n''_sandy_passive_value_privileged SANDY_CLAUDE_AUTH oauth "" && _sandy_passive_value_privileged SANDY_CLAUDE_AUTH oauth api_key'
 check "§117(10) SANDY_CLAUDE_AUTH=api_key is NOT approval-gated, whatever the host chose (it is the tightening direction)" \
     bash -c "$_S117_PVP"$'\n''! _sandy_passive_value_privileged SANDY_CLAUDE_AUTH api_key "" && ! _sandy_passive_value_privileged SANDY_CLAUDE_AUTH api_key oauth'
@@ -29056,9 +29056,9 @@ unset -f _s235_client
 unset -f _s235_case _s235_kill_tree _s235_sup _s235_w5_verdict _s235_w5_probe
 rm -rf "$_S235_D"
 unset _S235_D _S235_TMPL _S235_PANE _S235_TAILRUN _S235_W5 _S235_FORGED _S235_T0 _S235_EL _S235_NC
-section "§226: ordered passive gate — a workspace auth mode or agent list wider than the host's is approval-gated (3.0.0)"
+section "§226: ordered passive gate — a workspace auth mode or agent list wider than the host's is approval-gated (2.9.0)"
 # ============================================================
-# Before 3.0.0 a workspace value outranked the host for every passive key, and
+# Before 2.9.0 a workspace value outranked the host for every passive key, and
 # only fixed values were gated. So a committed SANDY_CODEX_AUTH=oauth replaced
 # a host api_key and seeded the host OAuth refresh token into the sandbox, a
 # workspace SANDY_CLAUDE_AUTH=auto undid a host api_key, and SANDY_AGENT=all
