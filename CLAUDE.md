@@ -125,7 +125,7 @@ Other macOS traps: `mktemp -d` returns a symlinked path, so canonicalize it (`D=
   - `git push -u` reports a config-write error *after a successful push*. Use `git push origin <branch>:<branch>`.
   - `git reset --hard` fails when `.github/workflows/` is tracked (protected dir). Use a mixed `git reset <ref>`.
   - `git gc`, `pack-refs`, and deleting packed refs fail.
-- `main` is protected, so every change goes through a PR. The HEAD-preserving pattern: commit → `git branch -f <feature> HEAD` → `git push origin <feature>` → `git reset origin/main` → `gh pr create --head <feature> --base main`.
+- `main` is protected, so every change goes through a PR: in a worktree, `git switch -c <feature> origin/main` → commit → `git push origin <feature>:<feature>` → `gh pr create --head <feature> --base main`.
 - The workspace is usually the maintainer's host checkout. Don't switch, reset or stash in it while tests may be running (a switch once caused 25 false failures); use a `git worktree`, and no `gh pr merge --delete-branch` (it switches the checkout).
 - On a reported failure, first compare the host-group footer's `commit` with the branch head. Check out with `git fetch origin <b> && git switch -C <b> FETCH_HEAD`; `origin/<b>` without a fresh fetch once left a reviewer on an old commit.
 - Mutation-test on a scratch copy of `sandy`, never in the repo; a rejected tool call once left a mutant in it.
