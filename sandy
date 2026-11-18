@@ -59,6 +59,7 @@ SANDY_PRIVILEGED_KEYS=(
     DISCORD_ALLOWED_SENDERS
     SANDY_HANDOFF_RELAY
     ANTHROPIC_PROFILE
+    SANDY_SYMLINK_SCAN_SKIP
 )
 
 # SANDY_PASSIVE_KEYS: allowed from a workspace .sandy/config (checked into
@@ -90,7 +91,6 @@ SANDY_PASSIVE_KEYS=(
     SANDY_EGRESS_STRICT
     SANDY_EGRESS_LOG
     SANDY_ALLOW_WORKFLOW_EDIT
-    SANDY_SYMLINK_SCAN_SKIP
     CLAUDE_CODE_MAX_OUTPUT_TOKENS
     CLAUDE_CODE_SUBAGENT_MODEL
     GEMINI_MODEL
@@ -2167,7 +2167,7 @@ SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture,
 SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS=off,permissive,strict. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 (off) and =1 (permissive: a downgrade of a host-set =2) are approval-gated, matching SANDY_EGRESS; only =2 is free (#371).
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
-SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative directories the launch's symlink scan does not descend into, like the built-in node_modules, .venv* and .git; for a large tree that holds no link the session needs. Entries are literal paths (no globs, no . or ..), named exactly as on disk; one that names no directory is warned about. A link beneath a skipped directory gets no mount of its own and is never copied through (the copied trees use cp -R), so in the container it is only a link, and one pointing outside the workspace dangles. What it cannot hide: every path sandy mounts or copies by name (protected paths such as .claude/settings.json and .github/workflows, .gstack, and the copied trees .claude/commands, .claude/agents, .claude/plugins, .gemini/extensions, .gemini/commands) is resolved, with each of its prefixes, on every launch, and judged where it lands outside the workspace exactly as the scan judges a link there; and an entry that is, holds or lies inside where a copied tree resolves is ignored with a warning. Passive (no approval from a workspace config) because of those rules; a new path sandy mounts or copies by name must be added to them. A scan that takes over 5 s prints its duration and names this key. Leaving a directory out also drops its links from the approved-symlinks list at the next launch, so taking it back out of the key later makes any escaping link there a new one, which the dangerous-symlink gate treats as it treats any new link.
+SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative directories the launch's symlink scan does not descend into, like the built-in node_modules, .venv* and .git; for a large tree that holds no link the session needs. Entries are literal paths (no globs, no . or ..), named exactly as on disk; one that names no directory is warned about. A link beneath a skipped directory gets no mount of its own and is never copied through (the copied trees use cp -R), so in the container it is only a link, and one pointing outside the workspace dangles. What it cannot hide: every path sandy mounts or copies by name (protected paths such as .claude/settings.json and .github/workflows, .gstack, and the copied trees .claude/commands, .claude/agents, .claude/plugins, .gemini/extensions, .gemini/commands) is resolved, with each of its prefixes, on every launch, and judged where it lands outside the workspace exactly as the scan judges a link there; and an entry that is, holds or lies inside where a copied tree resolves is ignored with a warning. Privileged: leaving a directory out hides its links from the dangerous-symlink gate, so from a workspace .sandy/config it asks for the one-time approval (and a headless or non-TTY launch refuses); from the environment or the host config it needs none. Those rules still hold as defense in depth; a new path sandy mounts or copies by name must be added to them. A scan that takes over 5 s prints its duration and names this key. Leaving a directory out also drops its links from the approved-symlinks list at the next launch, so taking it back out of the key later makes any escaping link there a new one, which the dangerous-symlink gate treats as it treats any new link.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
 CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
@@ -15497,9 +15497,12 @@ _sandy_dir_has_entry() {
 # _SANDY_SL_SKIP_EXPR (the find terms). An entry that names no real directory
 # -- absent, a file, a symlink, or reached through a symlink, none of which the
 # scan would descend into anyway -- is warned about by name, never silently
-# kept. Only tightens: a link the scan never sees gets no mount (it dangles in
-# the container), and links at protected paths beneath a skipped directory are
-# still checked (_sandy_symlink_protected_sweep).
+# kept. A link the scan never sees gets no mount (it dangles in the
+# container), and links at the paths sandy mounts or copies by name beneath a
+# skipped directory are still checked (_sandy_symlink_protected_sweep). The key
+# is privileged all the same (approval from a workspace .sandy/config): a
+# skipped directory's links never reach the dangerous-symlink gate, so a repo
+# must not be able to choose what the gate sees.
 _sandy_symlink_skip_parse() {
     local _raw="${SANDY_SYMLINK_SCAN_SKIP:-}" _e _c _rest _bad _copied _seg _ce _cc
     _copied="$(_sandy_symlink_copied)"
@@ -15595,15 +15598,19 @@ _sandy_symlink_resolve() {
 # not judged twice. Runs on every scan and in the supervisor. Then, in the
 # supervisor (list), each copied tree's resolved location inside the
 # workspace is walked, at every depth, for links the list does not hold.
-# A path with a node_modules, .venv* or .git component is left out, exactly
-# as the scan leaves it out. A new workspace path mounted or copied by name
-# must be added here.
+# A path with a node_modules or .venv* component is left out, exactly as the
+# scan leaves it out. Paths under .git (.git/config, .git/hooks, .git/info,
+# .git/packed-refs) are NOT left out: sandy mounts them by name, and `.git`
+# can be a link (into the workspace, perhaps into a SANDY_SYMLINK_SCAN_SKIP
+# directory, or out of it), so they are judged at every prefix like any other
+# by-name path. A new workspace path mounted or copied by name must be added
+# here.
 _sandy_symlink_protected_sweep() {
     local _mode="$1" _p _q _rest _w _t _copied _link _rel _n
     _copied="$(_sandy_symlink_copied)"
     _sandy_is_protected_rel . || true    # loads _SANDY_PROTECTED_RELS
     for _p in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"} .gstack $_copied; do
-        case "/$_p/" in */node_modules/*|*/.venv*/*|*/.git/*) continue ;; esac
+        case "/$_p/" in */node_modules/*|*/.venv*/*) continue ;; esac
         _q=""; _rest="$_p"
         while [ -n "$_rest" ]; do
             _q="${_q:+$_q/}${_rest%%/*}"
@@ -15674,7 +15681,7 @@ _sandy_symlink_scan() {
     _sandy_symlink_protected_sweep scan
     _dur=$((SECONDS - _t0))
     if [ "$_dur" -gt 5 ]; then
-        info "Symlink scan took ${_dur}s. A large directory that holds no link the session needs mounted can be left out with SANDY_SYMLINK_SCAN_SKIP (comma-separated, workspace-relative; e.g. in .sandy/config)."
+        info "Symlink scan took ${_dur}s. A large directory that holds no link the session needs mounted can be left out with SANDY_SYMLINK_SCAN_SKIP (comma-separated, workspace-relative; e.g. in ~/.sandy/config, or in .sandy/config, which asks for approval once)."
     fi
     return 0
 }

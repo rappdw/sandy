@@ -26124,12 +26124,13 @@ unset _S226_H _S226_WHY _S226_P _S226_C _S226_OK
 
 section "§227: SANDY_SYMLINK_SCAN_SKIP leaves a directory out of the symlink scan, never a protected path, and names an entry that matches nothing (optimization pass B2, decision D12a)"
 # ============================================================
-# The key is passive (a workspace .sandy/config may set it, no approval),
-# because leaving a directory out can only remove mounts: a link the scan
-# never sees is neither prompted for nor mounted, and dangles in the
-# container. The one link the scan must still see is one at a protected path,
-# which the protected-path mount loop would otherwise mount by following it.
-# Set here from the WORKSPACE config, with no approval and no terminal.
+# Leaving a directory out removes mounts: a link the scan never sees is
+# neither prompted for nor mounted, and dangles in the container. The one link
+# the scan must still see is one at a path sandy mounts by name, which the
+# protected-path mount loop would otherwise mount by following it. The key is
+# privileged (a hidden link never reaches the gate, §233), so these launches
+# set it from the WORKSPACE config with SANDY_AUTO_APPROVE_PRIVILEGED=1 (the
+# config-key approval, never the symlink gate's) and no terminal.
 _s227_tree() {   # $1 = HOME  $2 = WS
     mkdir -p "$1/t1" "$1/t2" "$1/t3" "$1/wf" "$2/scratch/deep" "$2/.github" "$2/.sandy"
     ln -s "$1/t2" "$2/scratch/far"; ln -s "$1/t1" "$2/scratch/deep/x"; ln -s /etc/hosts "$2/scratch/.npmrc"
@@ -26141,7 +26142,7 @@ _S227_H="$_A6_DIR/s227"
 _s227_tree "$_S227_H" "$_S227_H/ws"
 _S227_A="$(printf '%s\n' ".github/workflows -> $_S227_H/wf" "keep -> $_S227_H/t3" | LC_ALL=C sort)"
 _s226_seed s227 "$_S227_A"
-_a6_launch s227 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_a6_launch s227 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
 _S227_WHY="$(_s226_unmet s227 "$_S227_H" "$_S227_A" "$(printf '%s\n' "$_S227_H/t3:$_S227_H/t3" "$_S227_H/wf:$_S227_H/wf" | LC_ALL=C sort)")"
 [ -z "$_S227_WHY" ] || _a6_diag "§227(1)" s227
 check "§227(1) links under skipped directories are neither prompted for nor mounted: the launch runs with an approved list that lacks them, keeps that list, and mounts only keep's and .github/workflows' targets (unmet: ${_S227_WHY:-none})" \
@@ -26154,7 +26155,7 @@ check "§227(2) an entry that matches no directory is named in a warning, and so
 # keep, and the launch must refuse .github/workflows as new.
 _s227_tree "$_A6_DIR/s227p" "$_A6_DIR/s227p/ws"
 _s226_seed s227p "keep -> $_A6_DIR/s227p/t3"
-_a6_launch s227p SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_a6_launch s227p SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
 check "§227(3) a link at a protected path under a skipped directory still reaches the gate: refused as new, no agent run (mutation: the protected-path sweep removed; rc ${_A6_RC:-none})" \
     bash -c 'test "$1" != 0 && grep -q "present at previous approval" "$2" && grep -qF ".github/workflows -> $3/wf" "$2" && test -z "$4"' \
     _ "$_A6_RC" "$_A6_DIR/s227p/out" "$_A6_DIR/s227p" "$(_a6_agent_args s227p)"
@@ -26326,13 +26327,14 @@ section "§230: the scan key and the --start list never hide a link at a path sa
 _s230_refused() {   # $1 = CASE  $2 = the link that must be named
     [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$1")" ] \
         && grep -q "need interactive approval\|present at previous approval" "$_A6_DIR/$1/out" \
+        && ! grep -qF "dropping these keys" "$_A6_DIR/$1/out" \
         && grep -qF -- "$2" "$_A6_DIR/$1/out"
 }
 # a1: skip key over .claude, a link AT a copied tree.
 _S230=s230-a1; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude" "$_A6_DIR/$_S230/ws/.sandy"
 ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands"
 printf 'SANDY_SYMLINK_SCAN_SKIP=.claude\n' > "$_A6_DIR/$_S230/ws/.sandy/config"
-_a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
 check "§230(1) SANDY_SYMLINK_SCAN_SKIP=.claude from a workspace config does not hide .claude/commands -> \$HOME/secret: refused, no agent run, and the entry is named as covering a copied tree (rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".claude/commands -> $_A6_DIR/$_S230/secret"
 check "§230(1b) ...the warning names the entry and the copied tree" \
@@ -26341,14 +26343,14 @@ check "§230(1b) ...the warning names the entry and the copied tree" \
 _S230=s230-a1i; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands" "$_A6_DIR/$_S230/ws/.sandy"
 ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands/x"
 printf 'SANDY_SYMLINK_SCAN_SKIP=.claude\n' > "$_A6_DIR/$_S230/ws/.sandy/config"
-_a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
 check "§230(2) ...nor a link INSIDE a copied tree (cp -r may copy through it): refused (mutation: the skip key may cover a copied tree; rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".claude/commands/x -> $_A6_DIR/$_S230/secret"
 # a1g: the gemini copy.
 _S230=s230-a1g; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.gemini" "$_A6_DIR/$_S230/ws/.sandy"
 ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.gemini/extensions"
 printf 'SANDY_SYMLINK_SCAN_SKIP=.gemini\n' > "$_A6_DIR/$_S230/ws/.sandy/config"
-_a6_launch "$_S230" SANDY_AGENT=gemini GEMINI_API_KEY=fixture
+_a6_launch "$_S230" SANDY_AGENT=gemini GEMINI_API_KEY=fixture SANDY_AUTO_APPROVE_PRIVILEGED=1
 check "§230(3) the same for .gemini/extensions under SANDY_SYMLINK_SCAN_SKIP=.gemini (rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".gemini/extensions -> $_A6_DIR/$_S230/secret"
 
@@ -26396,7 +26398,7 @@ section "§231: skip entries are literal and workspace-relative; the link list i
 _S231=s231-glob; mkdir -p "$_A6_DIR/$_S231/t1" "$_A6_DIR/$_S231/ws/.hidden" "$_A6_DIR/$_S231/ws/.*" "$_A6_DIR/$_S231/ws/.sandy"
 ln -s "$_A6_DIR/$_S231/t1" "$_A6_DIR/$_S231/ws/.hidden/x"
 printf 'SANDY_SYMLINK_SCAN_SKIP=.*,.[a-z]*\n' > "$_A6_DIR/$_S231/ws/.sandy/config"
-_a6_launch "$_S231" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_a6_launch "$_S231" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
 check "§231(1) skip entries are matched literally: '.*' prunes only the directory named '.*', so .hidden/x is still found and refused, and '.[a-z]*' (no such directory) is warned about (mutation: entries not glob-escaped; rc ${_A6_RC:-none})" \
     bash -c 'test "$1" != 0 && grep -qF ".hidden/x -> $3/t1" "$2" && ! grep -qF "'"'"'.*'"'"' matches no directory" "$2" && grep -qF "'"'"'.[a-z]*'"'"' matches no directory" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S231/out" "$_A6_DIR/$_S231"
 # I7: `..` is refused outright, by name.
@@ -26443,7 +26445,9 @@ section "§232: a path sandy mounts or copies by name is judged where it RESOLVE
 # trees are copied with `cp -R`: BSD/Apple `cp -r` follows links (-RL), so
 # content behind a skipped link would leak BY COPY (b5, b8). A cp stub that
 # makes `-r` mean `-RL`, as on macOS, shows the copy never follows a link.
-_S232_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+# SANDY_AUTO_APPROVE_PRIVILEGED=1: the workspace-config key is approved (it
+# is privileged, §233), so each refusal below is the symlink gate's.
+_S232_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1)
 _s232_alias() {   # $1 = CASE  $2 = by-name path's first component  $3 = rest  -> ws/$2 -> vendor, vendor/$3 -> secret
     mkdir -p "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor" "$_A6_DIR/$1/ws/.sandy"
     mkdir -p "$(dirname "$_A6_DIR/$1/ws/vendor/$3")"
@@ -26544,7 +26548,7 @@ printf 'S232-SECRET\n' > "$_A6_DIR/$_S232_C/secret/id_fake"
 ln -s ../../vendor "$_A6_DIR/$_S232_C/ws/.gemini/commands/a"
 ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor/x"
 printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S232_C/ws/.sandy/config"
-_a6_launch "$_S232_C" SANDY_AGENT=gemini GEMINI_API_KEY=fixture PATH="$_S232_CP:$_A6_DIR/bin:$PATH"
+_a6_launch "$_S232_C" SANDY_AGENT=gemini GEMINI_API_KEY=fixture SANDY_AUTO_APPROVE_PRIVILEGED=1 PATH="$_S232_CP:$_A6_DIR/bin:$PATH"
 _S232_W="$(_a6_sandbox "$_S232_C")/workspace-gemini-commands"
 check "§232(b5g) the same for the gemini copy (mutation: cp -r for .gemini; rc ${_A6_RC:-none})" \
     bash -c 'test -d "$1" && test -L "$1/a" && ! grep -rqs S232-SECRET "$1"' _ "$_S232_W"
@@ -26565,7 +26569,129 @@ _a6_launch "$_S232_C" "${_S232_K[@]}" SANDY_SYMLINK_SCAN_SKIP=.CLAUDE
 check "§232(case) an entry spelled in another case than the directory (.CLAUDE for .claude) is named in a warning" \
     grep -qF "'.CLAUDE' matches no directory" "$_A6_DIR/$_S232_C/out"
 unset _S232_K _S232_C _S232_T _S232_A _S232_CP _S232_W _S232_N _S232_P _S232_R
-unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8 _s230_refused _s230_sup_after
+unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8   # _s230_refused/_s230_sup_after: §233 uses them
+
+section "§233: paths under .git are judged like every by-name path, even through a .git link, and SANDY_SYMLINK_SCAN_SKIP from a workspace config needs approval (B2 send-back 3)"
+# ============================================================
+# Round 3 of the verifier (g4, g5): `.git -> vendor/fakegit`, with
+# vendor/fakegit/config -> ~/.aws/credentials and vendor/fakegit/hooks -> an
+# outside directory, launched with both mounted at /home/sandy/ws/.git/config
+# and .git/hooks and no prompt: the by-name sweep skipped every path under
+# .git, and a workspace config pruned vendor from the scan (g4) or the link
+# was planted after the --start approval pass (g5). Main refuses both. Now the
+# sweep judges .git/config, .git/hooks, .git/info and .git/packed-refs at
+# every prefix, and the key is privileged: from a workspace config a non-TTY
+# launch drops it (naming it), so the scan sees the directory; approved (or
+# set from the host config or the environment) it prunes, and the sweep is
+# what still sees the .git paths. No agent run means no mount of anything.
+_s233_git() {   # $1 = CASE: ws/.git -> vendor/fakegit, config -> HOME/.aws/credentials, hooks -> HOME/hooksdir
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h/ws/vendor/fakegit" "$h/.aws" "$h/hooksdir"
+    printf 'S233-SECRET\n' > "$h/.aws/credentials"; printf 'S233-HOOK\n' > "$h/hooksdir/pre-commit"
+    ln -s vendor/fakegit "$h/ws/.git"
+    ln -s ../../../.aws/credentials "$h/ws/vendor/fakegit/config"
+    ln -s "$h/hooksdir" "$h/ws/vendor/fakegit/hooks"
+}
+_s233_seed() {   # $1 = CASE: an approved keep -> HOME/t3, so a refusal must leave the list byte-identical
+    mkdir -p "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws"; ln -s "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws/keep"
+    _s226_seed "$1" "keep -> $_A6_DIR/$1/t3"
+}
+# The list as seeded, no config-key approval written, and no docker run of
+# any kind carried the outside path.
+_s233_held() {   # $1 = CASE  $2 = outside path
+    test "$(cat "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list" 2>/dev/null)" = "keep -> $_A6_DIR/$1/t3" \
+        && test -z "$(ls "$_A6_DIR/$1/sh/approvals" 2>/dev/null | grep '^passive-' || true)" \
+        && ! grep -rqsF -- "$2" "$_A6_DIR/$1/runs"
+}
+# (1) g4 foreground, key from the workspace config, no terminal: the key is
+# named and dropped, so the scan walks vendor and refuses the link there.
+_S233=s233-g4; _s233_git "$_S233"; _s233_seed "$_S233"; mkdir -p "$_A6_DIR/$_S233/ws/.sandy"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S233/ws/.sandy/config"
+_a6_launch "$_S233" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S233_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S233")" ] \
+  && grep -q "wants to set privileged keys" "$_A6_DIR/$_S233/out" \
+  && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/$_S233/out" \
+  && grep -qF "dropping these keys" "$_A6_DIR/$_S233/out" \
+  && grep -q "present at previous approval" "$_A6_DIR/$_S233/out" \
+  && grep -qF "vendor/fakegit/config -> $_A6_DIR/$_S233/.aws/credentials" "$_A6_DIR/$_S233/out" \
+  && _s233_held "$_S233" "$_A6_DIR/$_S233/.aws/credentials"; } || _S233_OK=$?
+[ "$_S233_OK" = 0 ] || _a6_diag "§233(1)" "$_S233"
+check "§233(1) g4: SANDY_SYMLINK_SCAN_SKIP=vendor from a workspace config, no terminal: the key is named and dropped, the scan walks vendor, the launch is refused before any docker run, the approved list unchanged, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS; rc ${_A6_RC:-none})" \
+    test "$_S233_OK" = 0
+# (2) the same with the key approved (the config-key approval, not the symlink
+# gate's): vendor is pruned, so only the sweep can see .git/config and
+# .git/hooks, and the gate still refuses them.
+_S233=s233-g4a; _s233_git "$_S233"; _s233_seed "$_S233"; mkdir -p "$_A6_DIR/$_S233/ws/.sandy"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S233/ws/.sandy/config"
+_a6_launch "$_S233" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
+_S233_OK=0
+{ _s230_refused "$_S233" ".git/config -> $_A6_DIR/$_S233/.aws/credentials" \
+  && grep -qF ".git/hooks -> $_A6_DIR/$_S233/hooksdir" "$_A6_DIR/$_S233/out" \
+  && ! grep -qF "vendor/fakegit/config ->" "$_A6_DIR/$_S233/out" \
+  && _s233_held "$_S233" "$_A6_DIR/$_S233/.aws/credentials" \
+  && _s233_held "$_S233" "$_A6_DIR/$_S233/hooksdir"; } || _S233_OK=$?
+[ "$_S233_OK" = 0 ] || _a6_diag "§233(2)" "$_S233"
+check "§233(2) g4 with the key approved: vendor is pruned (its link is not named), and .git/config -> ~/.aws/credentials and .git/hooks -> an outside directory, reached through .git -> vendor/fakegit, are refused by the symlink gate, list unchanged (mutation: the sweep skips paths under .git; rc ${_A6_RC:-none})" \
+    test "$_S233_OK" = 0
+# (3) g5: no key, --start; .git -> vendor/fakegit planted after the approval
+# pass. The supervisor does not rescan; its sweep refuses .git/config.
+_s233_g5() { _s233_git s233-g5; }
+_s230_sup_after s233-g5 _s233_g5
+_S233_OK=0
+{ [[ "${_S228_ID:-}" =~ ^[0-9a-f]{16}$ ]] \
+  && _s230_refused s233-g5 ".git/config -> $_A6_DIR/s233-g5/.aws/credentials" \
+  && ! grep -rqsF -- "$_A6_DIR/s233-g5/.aws/credentials" "$_A6_DIR/s233-g5/runs" \
+  && test "$(cat "$(_a6_sandbox s233-g5)/.sandy-approved-symlinks.list" 2>/dev/null)" = "$(printf '%s\n' "a -> $_A6_DIR/s233-g5/t1" "b -> $_A6_DIR/s233-g5/t2")"; } || _S233_OK=$?
+[ "$_S233_OK" = 0 ] || _a6_diag "§233(3)" s233-g5
+check "§233(3) g5: under --start, .git -> vendor/fakegit with an escaping config planted after the pass is refused by the supervisor, no agent run, no mount of the outside file, the approved list unchanged (mutation: the sweep skips paths under .git; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    test "$_S233_OK" = 0
+# (3b) .git itself replaced by a link OUT of the workspace after the pass.
+_s233_g5o() { mkdir -p "$_A6_DIR/s233-g5o/other/.git/hooks"; printf '[core]\n' > "$_A6_DIR/s233-g5o/other/.git/config"; ln -s "$_A6_DIR/s233-g5o/other/.git" "$_A6_DIR/s233-g5o/ws/.git"; }
+_s230_sup_after s233-g5o _s233_g5o
+check "§233(3b) under --start, .git replaced after the pass by a link out of the workspace is refused by the supervisor (id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    _s230_refused s233-g5o ".git -> $_A6_DIR/s233-g5o/other/.git"
+# (4)-(7) where the key may come from. vendor/x -> HOME/secret is the only
+# escaping link, so the launch runs exactly when vendor is pruned.
+_s233_kt() {   # $1 = CASE
+    mkdir -p "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor" "$_A6_DIR/$1/sh"
+    ln -s "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor/x"
+}
+_s233_pruned() {   # $1 = CASE: ran, no config-key prompt text, nothing of secret mounted
+    [ "$_A6_RC" = 0 ] && [ -n "$(_a6_agent_args "$1")" ] \
+        && ! grep -q "wants to set privileged keys\|dropping these keys\|vendor/x ->" "$_A6_DIR/$1/out" \
+        && ! grep -qF -- "$_A6_DIR/$1/secret" "$(_a6_agent_args "$1")"
+}
+_s233_kt s233-kw; mkdir -p "$_A6_DIR/s233-kw/ws/.sandy"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kw/ws/.sandy/config"
+_a6_launch s233-kw SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S233_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args s233-kw)" ] \
+  && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/s233-kw/out" \
+  && grep -qF "dropping these keys" "$_A6_DIR/s233-kw/out" \
+  && grep -qF "vendor/x -> $_A6_DIR/s233-kw/secret" "$_A6_DIR/s233-kw/out" \
+  && test -z "$(ls "$_A6_DIR/s233-kw/sh/approvals" 2>/dev/null | grep '^passive-' || true)"; } || _S233_OK=$?
+[ "$_S233_OK" = 0 ] || _a6_diag "§233(4)" s233-kw
+check "§233(4) the key from a workspace config without a terminal is named and dropped, not honoured: vendor is scanned and vendor/x refused, no agent run, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS prunes vendor and the launch runs; rc ${_A6_RC:-none})" \
+    test "$_S233_OK" = 0
+_s233_kt s233-kh; printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kh/sh/config"
+_a6_launch s233-kh SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S233_OK=0; _s233_pruned s233-kh || _S233_OK=$?
+[ "$_S233_OK" = 0 ] || _a6_diag "§233(5)" s233-kh
+check "§233(5) the key from the host config needs no approval: vendor is pruned, the launch runs, no prompt text, nothing of the secret mounted (rc ${_A6_RC:-none})" \
+    test "$_S233_OK" = 0
+_s233_kt s233-ke
+_a6_launch s233-ke SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor
+_S233_OK=0; _s233_pruned s233-ke || _S233_OK=$?
+[ "$_S233_OK" = 0 ] || _a6_diag "§233(6)" s233-ke
+check "§233(6) ...and the same from the environment (rc ${_A6_RC:-none})" \
+    test "$_S233_OK" = 0
+_s233_kt s233-kc
+_a6_launch s233-kc SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§233(7) control: the same tree with no key is refused for vendor/x, so (5) and (6) ran because of the prune (rc ${_A6_RC:-none})" \
+    _s230_refused s233-kc "vendor/x -> $_A6_DIR/s233-kc/secret"
+unset _S233 _S233_OK
+unset -f _s233_git _s233_seed _s233_held _s233_g5 _s233_g5o _s233_kt _s233_pruned _s230_refused _s230_sup_after
 
 unset _S228_ID _S229_LOG _S226_ETC
 unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup _s228_list
