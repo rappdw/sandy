@@ -24475,8 +24475,10 @@ check "§204(12b) inactive: the flag is still forwarded as 0 (a forged env is al
 _S204_GUARD='if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then'
 check "§204(12c) container side: sessions come up BEFORE the pane is created, gated on the flag and never headless or --remote" \
     awk -v g="$_S204_GUARD" 'index($0, g) == 1 {gl = NR} $0 == "    _sandy_claude_sessions_up" && gl == NR - 1 {u = NR} index($0, "if [ \"$_SANDY_IS_MULTI\" = false ]; then") == 1 && !m {m = NR} END {exit !(u && m && u < m)}' "$SANDY_SCRIPT"
+# Anchored on the relay block's comment: CHANNEL_RELAY_PID="" also appears
+# before the cleanup trap, where cleanup()'s inputs are cleared.
 check "§204(12d) the host relay stands down while a named session receives channels (agent view cannot take keystrokes)" \
-    bash -c 'grep -A1 "Launch host-side channel relay" "$1" >/dev/null && awk "/^CHANNEL_RELAY_PID=\"\"\$/{p=1} p&&/_SANDY_CS_ACTIVE:-0}\" != 1/{f=1} p&&/^    case /{exit} END{exit !f}" "$1"' -- "$SANDY_SCRIPT"
+    bash -c 'grep -A1 "Launch host-side channel relay" "$1" >/dev/null && awk "/^# Launch host-side channel relay/{p=1} p&&/_SANDY_CS_ACTIVE:-0}\" != 1/{f=1} p&&/^    case /{exit} END{exit !f}" "$1"' -- "$SANDY_SCRIPT"
 rm -rf "$_S204_D"
 unset _S204_D _S204_PARSE _S204_OK _S204_TWO _S204_DUPN _S204_LNK _S204_CRLF _S204_CH _S204_H1 _S204_H2 _S204_H3 _S204_L2
 unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_GATE _S204_FILT _S204_CSI _S204_SC
@@ -25555,14 +25557,21 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219 and 225 (removed at the end of §225, which
-# follows §219):
+# The stubs, shared by 215-219, 225 and 226 (removed at the end of §226,
+# which follows §225, which follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
 #             copy of its --env-file, under runs/; for the agent's run (the one
 #             with --name) it plays Docker's bind-mount auto-creation: each
 #             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
 #             is created in the workspace, and A6_AGENT_WRITES gets a file.
+#             With A6_SNAP_DST set, the source of the agent's mount onto that
+#             container path goes to runs/snap.src and the files it holds at
+#             that moment to runs/snap.files. A6_RUN_RC is the agent run's rc;
+#             A6_TERM_AT_RUN SIGTERMs the launcher (its parent) from inside
+#             the agent run. When the agent container is force-removed, whether
+#             that mount source still exists goes to runs/snap.at-rm.
+#             A6_NETFAIL makes `network create` fail.
 #             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
 #   curl      fails, except the two build-dependency probes when A6_NET=1, so a
 #             missing image builds instead of being deferred.
@@ -25606,8 +25615,27 @@ if [ "${1:-}" = run ]; then
                 esac
             done
         done
+        if [ -n "${A6_SNAP_DST:-}" ]; then
+            for _a in "$@"; do
+                case "$_a" in
+                    *":$A6_SNAP_DST")
+                        _src="${_a%":$A6_SNAP_DST"}"
+                        printf '%s\n' "$_src" > "$A6_LOG/runs/snap.src"
+                        (cd "$_src" 2>/dev/null && find . -type f | LC_ALL=C sort) > "$A6_LOG/runs/snap.files" ;;
+                esac
+            done
+        fi
+        if [ -n "${A6_TERM_AT_RUN:-}" ]; then kill -TERM "$PPID"; sleep 1; fi
+        [ -z "${A6_RUN_RC:-}" ] || exit "$A6_RUN_RC"
     fi
 fi
+case "$*" in
+    "network create"*) [ -z "${A6_NETFAIL:-}" ] || exit 1 ;;
+    "rm -f sandy-ws-"*)
+        if [ -f "$A6_LOG/runs/snap.src" ]; then
+            if [ -e "$(cat "$A6_LOG/runs/snap.src")" ]; then echo present; else echo gone; fi > "$A6_LOG/runs/snap.at-rm"
+        fi ;;
+esac
 exit 0
 EOF
 cat > "$_A6_DIR/bin/curl" <<'EOF'
@@ -25980,6 +26008,114 @@ unset _A6_NV
 unset -f _a6_gpus
 unset _A6_A _A6_WHY
 unset -f _hardening_unmet
+
+section "§226: a SANDY_CLAUDE_AUTH=profile launch removes its copy of the profile's credentials when it exits"
+# ============================================================
+# cleanup() removed the profile copy (PROFILE_TMPDIR) only inside its
+# CRED_TMPDIR block, and profile mode empties CRED_JSON, so CRED_TMPDIR never
+# exists on a profile launch: every one left a 0700 dir in $TMPDIR holding a
+# 0600 copy of the profile's credentials. Each case launches with its own
+# TMPDIR and has the docker stub record the profile mount's source and its
+# files while the agent "runs", which proves the copy existed under that
+# TMPDIR with the credential in it. After the launch, the mount source must be
+# gone and no file under TMPDIR may hold the fixture credential, and the copy
+# must still have existed when cleanup() force-removed the agent container
+# (the container mounts it). Exits: clean, a failing agent run, SIGTERM during
+# the run, and the daemon supervisor's teardown. (5) is the reverse hazard:
+# cleanup() deleting what a caller's environment named.
+# $1 = CASE  $2 = the launch's expected rc. Prints the first unmet condition.
+_a6_profile_residue() {
+    local t="$_A6_DIR/$1/tmp" src left
+    [ "$_A6_RC" = "$2" ] || { echo "launch rc $_A6_RC, wanted $2"; return 0; }
+    grep -qF "using Anthropic profile 'default'" "$_A6_DIR/$1/out" || { echo "not a profile launch"; return 0; }
+    src="$(cat "$_A6_DIR/$1/runs/snap.src" 2>/dev/null || true)"
+    [ -n "$src" ] || { echo "no profile mount on the agent's docker run"; return 0; }
+    case "$src" in
+        "$t"/*) : ;;
+        *) echo "mount source $src is not under the launch's TMPDIR"; return 0 ;;
+    esac
+    grep -qxF ./credentials/default.json "$_A6_DIR/$1/runs/snap.files" 2>/dev/null \
+        || { echo "the copy held no credentials/default.json during the run"; return 0; }
+    # The container mounts the copy, so it must outlive the container.
+    [ "$(cat "$_A6_DIR/$1/runs/snap.at-rm" 2>/dev/null || true)" = present ] \
+        || { echo "the copy was not there when the agent container was force-removed (at-rm: $(cat "$_A6_DIR/$1/runs/snap.at-rm" 2>/dev/null || echo 'no rm -f seen'))"; return 0; }
+    if [ -e "$src" ]; then echo "$src still exists after the launch"; return 0; fi
+    left="$(grep -rlF fixture-profile-rt "$t" 2>/dev/null || true)"
+    [ -z "$left" ] || echo "a file under TMPDIR still holds the credential: $left"
+}
+_a6_profile_fixture() {   # $1 = CASE
+    mkdir -p "$_A6_DIR/$1/.config/anthropic/credentials" "$_A6_DIR/$1/tmp"
+    printf '{"access_token":"fixture-profile-at","refresh_token":"fixture-profile-rt"}\n' \
+        > "$_A6_DIR/$1/.config/anthropic/credentials/default.json"
+}
+_a6_profile_fixture profile-clean
+_a6_launch profile-clean SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-clean/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic
+_A6_WHY="$(_a6_profile_residue profile-clean 0)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(1)" profile-clean
+check "§226(1) a profile launch that exits cleanly leaves no copy of the profile's credentials in TMPDIR (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_profile_fixture profile-fail
+_a6_launch profile-fail SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-fail/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_RUN_RC=7
+_A6_WHY="$(_a6_profile_residue profile-fail 7)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(2)" profile-fail
+check "§226(2) a profile launch whose agent run fails (rc 7) leaves none either (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_profile_fixture profile-term
+_a6_launch profile-term SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-term/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_TERM_AT_RUN=1
+_A6_WHY="$(_a6_profile_residue profile-term 143)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(3)" profile-term
+check "§226(3) SIGTERM during the agent run (rc 143): none left either (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+# The daemon supervisor: `docker run -d`, then the watch loop; --stop is a
+# SIGTERM to the supervisor, delivered here from inside the detached run.
+_a6_profile_fixture profile-daemon
+_a6_launch profile-daemon SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-daemon/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_TERM_AT_RUN=1 \
+    SANDY_DAEMON_SUPERVISOR=1 SANDY_DAEMON_LOG="$_A6_DIR/profile-daemon/daemon.log" \
+    -- --start --workspace "$_A6_DIR/profile-daemon/ws"
+_A6_WHY="$(_a6_profile_residue profile-daemon 143)"
+if [ -z "$_A6_WHY" ] && ! grep -qx -- -d "$(_a6_agent_args profile-daemon)"; then _A6_WHY="the agent run was not detached (-d): not the supervisor path"; fi
+[ -z "$_A6_WHY" ] || _a6_diag "§226(4)" profile-daemon
+check "§226(4) the daemon supervisor (detached run, stopped by SIGTERM) removes the copy at teardown, after the container (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+
+# (5) Every name cleanup() rm -rf's, kills or force-removes is cleared before
+# the trap is armed. Each is inherited here pointing at something precious,
+# and the launch fails at `network create`, after the trap is armed and before
+# any of them is assigned. The failure point is proven reached (the create was
+# called, no agent run happened) and cleanup() proven run (its network rm).
+_A6_V="$_A6_DIR/inherit/victims"
+mkdir -p "$_A6_V"
+_A6_VARS="CRED_TMPDIR PROFILE_TMPDIR GEMINI_CRED_TMPDIR CODEX_CRED_TMPDIR OPENCODE_CRED_TMPDIR SECRET_ENV_TMPDIR SSH_STAGE_TMPDIR"
+_A6_ENVS=()
+for _A6_N in $_A6_VARS; do
+    mkdir -p "$_A6_V/$_A6_N"; echo keep > "$_A6_V/$_A6_N/precious"
+    _A6_ENVS+=("$_A6_N=$_A6_V/$_A6_N")
+done
+sleep 120 &
+_A6_PID=$!
+_a6_launch inherit SANDY_AGENT=claude A6_NETFAIL=1 "${_A6_ENVS[@]}" \
+    CONTAINER_NAME=sandy-decoy-a6 SSH_RELAY_PID="$_A6_PID" CHANNEL_RELAY_PID="$_A6_PID"
+_A6_WHY=""
+[ "$_A6_RC" != 0 ] || _A6_WHY="launch rc 0: the network create failure did not stop it"
+grep -q '^docker network create' "$_A6_DIR/inherit/events.log" || _A6_WHY="${_A6_WHY:+$_A6_WHY; }never reached network create"
+grep -q '^docker network rm sandy_net_' "$_A6_DIR/inherit/events.log" || _A6_WHY="${_A6_WHY:+$_A6_WHY; }cleanup() did not run"
+[ -z "$(_a6_agent_args inherit)" ] || _A6_WHY="${_A6_WHY:+$_A6_WHY; }an agent run happened"
+for _A6_N in $_A6_VARS; do
+    [ -f "$_A6_V/$_A6_N/precious" ] || _A6_WHY="${_A6_WHY:+$_A6_WHY; }$_A6_N's target was deleted"
+done
+! grep -q 'sandy-decoy-a6' "$_A6_DIR/inherit/events.log" || _A6_WHY="${_A6_WHY:+$_A6_WHY; }the inherited CONTAINER_NAME was force-removed"
+kill -0 "$_A6_PID" 2>/dev/null || _A6_WHY="${_A6_WHY:+$_A6_WHY; }the inherited relay pid was killed"
+kill "$_A6_PID" 2>/dev/null || true
+wait "$_A6_PID" 2>/dev/null || true
+[ -z "$_A6_WHY" ] || _a6_diag "§226(5)" inherit
+check "§226(5) an exit between arming the trap and the credential setup leaves alone what the caller's environment names in cleanup()'s variables (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+unset _A6_WHY _A6_V _A6_VARS _A6_ENVS _A6_N _A6_PID
+unset -f _a6_profile_residue _a6_profile_fixture
 
 rm -rf "$_A6_DIR"
 unset _A6_DIR _A6_SCRIPT _A6_RC
