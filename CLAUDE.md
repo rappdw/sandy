@@ -93,11 +93,11 @@ The main runner labels each group and prints individual Python test names and ou
 
 How to write tests here:
 
-- **Assert the property, not the presence of a mechanism.** Run the thing and check the outcome, then mutation-test the guard: break it in a scratch copy of `sandy`, never the repo (a rejected tool call once left a mutant), and confirm the check fails. Also confirm the probe actually ran, since `set -u` has silently killed probe subshells and made checks pass vacuously.
+- **Assert the property, not the presence of a mechanism.** Run the thing and check the outcome, then mutation-test the guard: break it in a scratch copy (of `sandy` or whichever file holds the guard), never the repo (a rejected tool call once left a mutant), and confirm the check fails. Also confirm the probe actually ran, since `set -u` has silently killed probe subshells and made checks pass vacuously.
 - **Don't anchor a JSON assertion on a field's neighbours** (`"name":"X"[^}]*"relay"…`). It breaks once someone inserts a nested object between them. Use one sandbox per fixture `$SANDY_HOME`, or slice the object with `awk` `index`/`substr` written on one line. (§88b ratchets this.)
 - New sections must survive `set -euo pipefail` plus the ERR trap.
 - Schema-content checks read `$_SCHEMA_CACHE`; only invocation checks (§92, §93, §100, §185; §46 and §114(17a) via `regen-config-docs.sh`) and checks of a modified `sandy` run `--print-schema` live.
-- Assert an agent `docker run` flag on the stub-recorded argv: add an `_a6_launch` case (§215–§219, §225; unset before §220), read it with `_a6_agent_args` + `_a6_pair` (hardening: `_hardening_unmet`; proxy: §207). Grep `sandy` (comments and the other container match) only for the daemon run no stub launches (§225(2)).
+- Assert an agent `docker run` flag on the stub-recorded argv: add an `_a6_launch` case (§215–§219, §225; unset before §220), read it with `_a6_agent_args` + `_a6_pair` (hardening: `_hardening_unmet`; proxy: §207). Grep `sandy` (a pattern there also matches comments and the proxy's run) only for the daemon run no stub launches (§225(2)).
 - `.test_output/latest/host.log` has per-section `TIMING` lines: compare before and after editing a slow one.
 
 ## Portability: CI is Linux/bash 5, the maintainer is macOS/bash 3.2/BSD
