@@ -26814,7 +26814,10 @@ case "$1" in
         exit 0 ;;
     build)
         _p=""
-        for _a in "$@"; do [ "$_p" = -t ] && printf '%s\n' "$_a" >> "$S233_D/builds.log"; _p="$_a"; done
+        _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S233_D/builds.log"
+        [ -n "${S233_FAILIMG:-}" ] && [ "$_t" = "$S233_FAILIMG" ] && exit 17
         exit 0 ;;
     image)
         [ "$2" = inspect ] || exit 0
@@ -26861,6 +26864,17 @@ check "§233(1) --update-sessions --rebuild over three sessions builds sandy-bas
     bash -c 'test "$1" = 0/1/1/1 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_R" "$_S233_D/out"
 check "§233(2) ...and says the cache was cleared once, by the orchestrator" \
     bash -c 'test "$(grep -c "Build cache cleared" "$1")" = 1' _ "$_S233_D/out"
+# (3) A failed optional claude rebuild in session A is recorded, so session B
+# (same image) is held back by it instead of repeating the build, and the
+# orchestrator's own output says so for both: the children succeed, so their
+# warnings would otherwise stay in the captured logs.
+rm -f "$_S233_D/sh/.build_hash"
+export S233_FAILIMG=sandy-claude-code
+_s233_run
+unset S233_FAILIMG
+_S233_R="$_S233_RC/$(_s233_count sandy-claude-code)"
+check "§233(3) a failed optional rebuild is built once across the fleet, and the plan output names the record for A and the skip for B (mutation: drop the orchestrator's note; rc/claude builds $_S233_R)" \
+    bash -c 'test "$1" = 0/1 && grep -q "sessA: Not retrying this build for 30 minutes" "$2" && grep -q "sessB: Skipping the agent image rebuild: The sandy-claude-code rebuild failed" "$2"' _ "$_S233_R" "$_S233_D/out"
 rm -rf "$_S233_D"
 unset _S233_D _S233_RC _S233_PRE _S233_R
 unset -f _s233_run _s233_count
@@ -26868,9 +26882,12 @@ unset -f _s233_run _s233_count
 section "§234: a failed optional agent rebuild is not retried for 30 minutes; --rebuild, a new target or a missing image retries (B8 G7)"
 # ============================================================
 # The REAL launcher's --build-only (the agent phase runs before it exits)
-# behind a stub docker whose agent build fails when S234_FAIL=1 and whose
-# agent image is absent when S234_NOIMG=1. The 30 minutes are crossed by
-# rewriting the epoch the record carries, never by faking the clock or mtime.
+# behind a stub docker whose build of $S234_FAILIMG fails (exit 17) and whose
+# agent image is absent when S234_NOIMG=1. Installed agent versions come from
+# $S234_D/ver_<dir> (default 1.0.0) and published ones from latest_claude /
+# latest_codex, so the update checks run for real when SANDY_OFFLINE is off.
+# The 30 minutes are crossed by rewriting the epoch the record carries, never
+# by faking the clock or mtime.
 _S234_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S234_D/bin" "$_S234_D/sh" "$_S234_D/ws"
 cat > "$_S234_D/bin/docker" <<'EOF'
@@ -26880,7 +26897,7 @@ case "$1" in
         _p=""; _t=""
         for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
         printf '%s\n' "$_t" >> "$S234_D/builds.log"
-        [ "$_t" = sandy-claude-code ] && [ "${S234_FAIL:-0}" = 1 ] && exit 17
+        [ -n "${S234_FAILIMG:-}" ] && [ "$_t" = "$S234_FAILIMG" ] && exit 17
         exit 0 ;;
     image)
         [ "$2" = inspect ] || exit 0
@@ -26889,24 +26906,53 @@ case "$1" in
         [ "$_n" = sandy-claude-code ] && [ "${S234_NOIMG:-0}" = 1 ] && exit 1
         [ -n "$_f" ] && echo "sha256:id-$_n"
         exit 0 ;;
-    run) exit 1 ;;
+    run)
+        _last=""; for _a in "$@"; do _last="$_a"; done
+        case "$*" in
+            *"--entrypoint cat "*)
+                _a="$(printf '%s' "$_last" | cut -d/ -f3)"
+                cat "$S234_D/ver_$_a" 2>/dev/null || echo 1.0.0
+                exit 0 ;;
+        esac
+        exit 0 ;;
+    network)
+        case "$*" in
+            *Subnet*) echo 172.30.0.0/16 ;;
+            *Gateway*) echo 172.30.0.1 ;;
+            *bridge.name*) echo br-s234 ;;
+        esac
+        exit 0 ;;
 esac
 exit 0
 EOF
 cat > "$_S234_D/bin/curl" <<'EOF'
 #!/bin/sh
-case "$*" in *deb.debian.org*|*registry.npmjs.org*) exit 0 ;; esac
+case "$*" in
+    *registry.npmjs.org/@openai/codex/latest*)
+        [ -f "$S234_D/latest_codex" ] || exit 1
+        printf '{"version":"%s"}\n' "$(cat "$S234_D/latest_codex")"; exit 0 ;;
+    *claude-code-releases/latest*)
+        [ -f "$S234_D/latest_claude" ] || exit 1
+        cat "$S234_D/latest_claude"; exit 0 ;;
+    *deb.debian.org*|*registry.npmjs.org/) exit 0 ;;
+esac
 exit 1
 EOF
-chmod +x "$_S234_D/bin/docker" "$_S234_D/bin/curl"
+printf '#!/bin/sh\nexit 1\n' > "$_S234_D/bin/gh"
+printf '#!/bin/sh\nexit 0\n' > "$_S234_D/bin/sudo"
+printf '#!/bin/sh\nexit 44\n' > "$_S234_D/bin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S234_D/bin/uname"
+chmod +x "$_S234_D/bin/docker" "$_S234_D/bin/curl" "$_S234_D/bin/gh" "$_S234_D/bin/sudo" "$_S234_D/bin/security" "$_S234_D/bin/uname"
 _S234_REC="$_S234_D/sh/.build_failed"
-# _s234_run [VAR=value ...] [-- sandy-args ...]: one --build-only launch as
-# claude, offline (no version probe); sets _S234_RC and _S234_AG (agent builds).
+_S234_IMG=sandy-claude-code
+# _s234_run [VAR=value ...] [-- sandy-args ...]: one launch (default
+# --build-only as claude, offline); sets _S234_RC and _S234_AG (builds of
+# $_S234_IMG).
 _s234_run() {
     local envs args
-    envs=(); args=(--build-only)
+    envs=(SANDY_AGENT=claude SANDY_OFFLINE=1); args=(--build-only)
     while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
-    if [ $# -gt 0 ]; then shift; args+=("$@"); fi
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
     : > "$_S234_D/builds.log"
     _S234_RC=0
     (
@@ -26915,11 +26961,11 @@ _s234_run() {
                 SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
             esac
         done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
         cd "$_S234_D/ws" && env PATH="$_S234_D/bin:$PATH" HOME="$_S234_D" SANDY_HOME="$_S234_D/sh" S234_D="$_S234_D" \
-            SANDY_AGENT=claude SANDY_EGRESS=off SANDY_OFFLINE=1 ${envs[@]+"${envs[@]}"} \
-            bash "$SANDY_SCRIPT" "${args[@]}" </dev/null >"$_S234_D/out" 2>&1
+            SANDY_EGRESS=off "${envs[@]}" bash "$SANDY_SCRIPT" "${args[@]}" </dev/null >"$_S234_D/out" 2>&1
     ) || _S234_RC=$?
-    _S234_AG="$(grep -cx sandy-claude-code "$_S234_D/builds.log" || true)"
+    _S234_AG="$(grep -cx "$_S234_IMG" "$_S234_D/builds.log" || true)"
 }
 # _s234_age SECONDS: move the record's epoch that far into the past (a
 # missing record stays missing, and the check that needed it fails).
@@ -26928,10 +26974,14 @@ _s234_age() {
     read -r e rest < "$_S234_REC" 2>/dev/null || return 0
     printf '%s %s\n' "$((e - $1))" "$rest" > "$_S234_REC"
 }
+# _s234_fail: a fresh failure record for the solo claude image.
+_s234_fail() {
+    rm -f "$_S234_D/sh/.build_hash"
+    _s234_run S234_FAILIMG=sandy-claude-code
+}
 _s234_run
 _S234_P="$_S234_RC/$_S234_AG"
-rm -f "$_S234_D/sh/.build_hash"   # the agent's inputs "changed": it needs a rebuild
-_s234_run S234_FAIL=1
+_s234_fail
 _S234_F="$_S234_RC/$_S234_AG"
 # The record's shape: <epoch> <exit> <image> <hash> <target>, nothing more.
 _S234_SHAPE="unread"
@@ -26942,36 +26992,109 @@ unset _f1 _f2 _f3 _f4 _f5 _f6
 check "§234(pre) control: a primed home builds the agent; with its hash gone a failing rebuild is attempted, the launch continues on the existing image (rc 0), and the failure is recorded as <epoch> <exit> <image> <hash> <target> (prime rc/agent builds $_S234_P, failing $_S234_F, record: $_S234_SHAPE)" \
     bash -c 'test "$1" = 0/1 && test "$2" = 0/1 && test "$4" = "17 sandy-claude-code hash -" && grep -q "Agent image rebuild failed (docker build exit 17)" "$3" && grep -q "Not retrying this build for 30 minutes" "$3"' \
     _ "$_S234_P" "$_S234_F" "$_S234_D/out" "$_S234_SHAPE"
-_s234_run S234_FAIL=1
+_s234_run S234_FAILIMG=sandy-claude-code
 check "§234(1) the next launch within 30 minutes does not build the agent, continues (rc 0), and its warning names the failure, the retry time and sandy --rebuild (rc/agent builds $_S234_RC/$_S234_AG)" \
     bash -c 'test "$1/$2" = 0/0 && grep -qF "Skipping the agent image rebuild: The sandy-claude-code rebuild failed 0 min ago (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3"' \
     _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
 _s234_age 1801
-_s234_run S234_FAIL=1
+_s234_run S234_FAILIMG=sandy-claude-code
 check "§234(2) after 30 minutes the build is retried (mutation: drop the TTL comparison -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
     bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
-_s234_run S234_FAIL=1 -- --rebuild
+_s234_run S234_FAILIMG=sandy-claude-code -- --build-only --rebuild
 check "§234(3) --rebuild retries at once despite a fresh record (mutation: --rebuild no longer clears the records -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
     bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
 _S234_H=""; _e=0; _x=""; _i=""; _t=""
 read -r _e _x _i _S234_H _t < "$_S234_REC" 2>/dev/null || true
 printf '%s %s %s other-hash %s\n' "$_e" "$_x" "$_i" "$_t" > "$_S234_REC"
-_s234_run S234_FAIL=1
+_s234_run S234_FAILIMG=sandy-claude-code
 _S234_H2=""
 read -r _e _x _i _S234_H2 _t < "$_S234_REC" 2>/dev/null || true
 unset _e _x _i _t
 check "§234(4) a fresh record for a different target (other build inputs) does not hold this build back, and the new failure replaces it (rc/agent builds $_S234_RC/$_S234_AG)" \
     bash -c 'test "$1/$2" = 0/1 && test -n "$3" && test "$3" = "$4"' _ "$_S234_RC" "$_S234_AG" "$_S234_H" "$_S234_H2"
-_s234_run S234_FAIL=1 S234_NOIMG=1
+_s234_run S234_FAILIMG=sandy-claude-code S234_NOIMG=1
 check "§234(5) a REQUIRED build (no agent image to fall back to) is attempted despite a fresh record, and its failure fails the launch (mutation: consult the record without the image check -> no build, rc 0; rc/agent builds $_S234_RC/$_S234_AG)" \
     bash -c 'test "$1/$2" = 1/1 && grep -q "no previous image exists" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
 _s234_age 1801
 _s234_run
 check "§234(6) a successful rebuild deletes the record (rc/agent builds $_S234_RC/$_S234_AG)" \
     bash -c 'test "$1/$2" = 0/1 && test ! -e "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_REC"
+
+# (7) A leading-zero epoch would be octal to $(( )): an 8 or 9 in it aborted
+# the build step silently. Fresh or backdated, it is ignored with a warning
+# and the build runs.
+for _S234_LZ in 0 1801; do
+    _s234_fail
+    _rest=""; read -r _e _rest < "$_S234_REC" 2>/dev/null || true
+    printf '0%s %s\n' "$(($(date +%s) - _S234_LZ))" "$_rest" > "$_S234_REC"
+    _s234_run S234_FAILIMG=sandy-claude-code
+    check "§234(7) a record whose epoch has a leading zero (backdated ${_S234_LZ}s) is ignored with a warning and the build is retried (mutation: accept a leading zero; rc/agent builds $_S234_RC/$_S234_AG)" \
+        bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+done
+unset _e _rest _S234_LZ
+
+# (8) A link planted at the record path is replaced, never written through:
+# the record lands at the path itself, nothing appears in the link's target,
+# and the next launch is held back by it.
+mkdir -p "$_S234_D/elsewhere"
+rm -f "$_S234_REC"; ln -s "$_S234_D/elsewhere" "$_S234_REC"
+_s234_fail
+_S234_R8="$_S234_RC/$_S234_AG"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(8) a link to a directory at the record path is removed, not followed: the record is a plain file at the path, the directory stays empty, and the next launch is held back (mutation: mv through the link; failing rc/builds $_S234_R8, next $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = 0/1 && test "$2/$3" = 0/0 && test -f "$4" && test ! -L "$4" && test -z "$(ls -A "$5")"' \
+    _ "$_S234_R8" "$_S234_RC" "$_S234_AG" "$_S234_REC" "$_S234_D/elsewhere"
+
+# (9) A real directory at the record path cannot hold a record: the failure
+# says so (no false "not retrying"), the next launch retries, and --rebuild
+# leaves the directory alone with a warning instead of failing under set -e.
+rm -f "$_S234_REC"; mkdir "$_S234_REC"
+_s234_fail
+_S234_R9="$_S234_RC/$_S234_AG"
+check "§234(9) a directory at the record path: the failure is reported as not recorded, never as held back (rc/agent builds $_S234_R9)" \
+    bash -c 'test "$1" = 0/1 && grep -q "Could not record the failure: .* is not a file" "$2" && ! grep -q "Not retrying this build" "$2"' _ "$_S234_R9" "$_S234_D/out"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(10) ...and the next launch retries the build, saying why (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && grep -q "is not a plain file. Retrying" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_run -- --build-only --rebuild
+check "§234(11) --rebuild with a directory matching the records still succeeds, leaving it with a warning (mutation: rm -f the glob -> rc 1; rc $_S234_RC)" \
+    bash -c 'test "$1" = 0 && test -d "$2" && grep -q "Leaving .* alone: it is not a file" "$3"' _ "$_S234_RC" "$_S234_REC" "$_S234_D/out"
+rm -rf "$_S234_REC"
+
+# (12) Session end, on a real (-p) launch whose rebuild failed and was
+# recorded: the closing line names the 30-minute retry, never "the next
+# launch".
+rm -f "$_S234_D/sh/.build_hash"
+_s234_run S234_FAILIMG=sandy-claude-code ANTHROPIC_API_KEY=sk-fixture-s234 -- -p fixture
+check "§234(12) a recorded failure's session-end notice gives the 30-minute retry and not 'rebuilds on the next launch' (mutation: set the generic deferred flag anyway; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$2" = 1 && grep -qF "You ran on the existing image. The sandy-claude-code rebuild failed (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3" && ! grep -q "rebuilds on the next launch" "$3"' \
+    _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+
+# (13) A combo's target names every agent with a newer release, so a second
+# agent's release is not held back by a record made for the first.
+rm -rf "$_S234_D/sh"; mkdir -p "$_S234_D/sh"
+rm -f "$_S234_D/latest_claude" "$_S234_D/latest_codex"
+_S234_IMG=sandy-full
+_S234_REC="$_S234_D/sh/.build_failed_full"
+_S234_CB=(SANDY_AGENT=claude,codex SANDY_OFFLINE=0)
+_s234_run "${_S234_CB[@]}"
+_S234_C0="$_S234_RC/$_S234_AG"
+printf '2.0.0\n' > "$_S234_D/latest_claude"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C1="$_S234_RC/$_S234_AG"
+_S234_T1="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C2="$_S234_RC/$_S234_AG"
+printf '3.0.0\n' > "$_S234_D/latest_codex"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C3="$_S234_RC/$_S234_AG"
+_S234_T3="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+check "§234(13) claude,codex: a failed rebuild for claude 2.0.0 is held back on the next launch, but codex 3.0.0 appearing retries it, and the record names both (mutation: stop the checks at the first update -> held back; builds prime/fail/same/codex $_S234_C0 $_S234_C1 $_S234_C2 $_S234_C3, targets $_S234_T1 / $_S234_T3)" \
+    bash -c 'test "$1 $2 $3 $4" = "0/1 0/1 0/0 0/1" && test "$5" = "claude@2.0.0" && test "$6" = "claude@2.0.0,codex@3.0.0"' \
+    _ "$_S234_C0" "$_S234_C1" "$_S234_C2" "$_S234_C3" "$_S234_T1" "$_S234_T3"
 rm -rf "$_S234_D"
-unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE
-unset -f _s234_run _s234_age
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3
+unset -f _s234_run _s234_age _s234_fail
 
 # BEGIN SUMMARY
 # ============================================================

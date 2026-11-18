@@ -13245,8 +13245,22 @@ fi
 # linear execution reaches the build phase. The project image's hash lives in
 # its sandbox and is not on this list: --rebuild never forced it.
 _sandy_clear_build_cache() {
+    local _bf
     rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_grok" "$SANDY_HOME/.build_hash_mirror" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
-    rm -f "$SANDY_HOME"/.build_failed*
+    for _bf in "$SANDY_HOME"/.build_failed*; do
+        _sandy_build_fail_remove "$_bf"
+    done
+}
+# Remove one failed-rebuild record path: a file or a link (never its target)
+# goes; anything else (a directory) is left, with a warning naming it, since
+# sandy never wrote it and a record cannot be stored there.
+_sandy_build_fail_remove() {
+    if [ -L "$1" ] || [ -f "$1" ]; then
+        rm -f "$1"
+    elif [ -e "$1" ]; then
+        warn "Leaving $1 alone: it is not a file, so no failed-rebuild record can be kept there."
+    fi
+    return 0
 }
 
 # --- Fleet updates (--update-sessions; milestone 1.2.0, #41) ---
@@ -13437,6 +13451,10 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             fi
         done
         wait "$_upd_build_pid" 2>/dev/null || true
+        # B8 G7: a child that skipped (or recorded) a failed agent rebuild
+        # succeeds, so its warning would otherwise stay in the captured log.
+        _upd_note="$(grep -m1 -E 'Skipping the agent image rebuild|Not retrying this build' "$_upd_build_log" 2>/dev/null | sed -E 's/^.*\[sandy\][^ ]* +//' || true)"
+        [ -n "$_upd_note" ] && warn "  $_upd_sess: $_upd_note"
         if [ "$(cat "$_upd_done" 2>/dev/null || echo 1)" != "0" ]; then
             error "  Build failed for $_upd_sess — tail of output:"
             tail -n 20 "$_upd_build_log" | sed 's/^/[sandy]   /' >&2
@@ -15812,7 +15830,7 @@ _sandy_agent_version_empty() {
     [ "$1" -eq 0 ] && [ -z "$2" ] || return 1
     docker run --rm --entrypoint test "$IMAGE_NAME" -s "$3" >/dev/null 2>&1 && return 1
     warn "$4 in $IMAGE_NAME reports no version (its install failed); rebuilding."
-    _SANDY_AGENT_BUILD_TARGET="broken"
+    _SANDY_AGENT_BUILD_BROKEN=true
     return 0
 }
 _check_claude_update() {
@@ -15822,7 +15840,7 @@ _check_claude_update() {
     latest="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Claude Code update available: $inst → $latest"
-        _SANDY_AGENT_BUILD_TARGET="claude@$latest"
+        _SANDY_AGENT_BUILD_TARGET="${_SANDY_AGENT_BUILD_TARGET:+$_SANDY_AGENT_BUILD_TARGET,}claude@$latest"
         return 0
     fi
     return 1
@@ -15836,7 +15854,7 @@ _check_gemini_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Gemini CLI update available: $inst → $latest"
-        _SANDY_AGENT_BUILD_TARGET="gemini@$latest"
+        _SANDY_AGENT_BUILD_TARGET="${_SANDY_AGENT_BUILD_TARGET:+$_SANDY_AGENT_BUILD_TARGET,}gemini@$latest"
         return 0
     fi
     return 1
@@ -15855,7 +15873,7 @@ _check_codex_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Codex CLI update available: $inst → $latest"
-        _SANDY_AGENT_BUILD_TARGET="codex@$latest"
+        _SANDY_AGENT_BUILD_TARGET="${_SANDY_AGENT_BUILD_TARGET:+$_SANDY_AGENT_BUILD_TARGET,}codex@$latest"
         return 0
     fi
     return 1
@@ -15869,7 +15887,7 @@ _check_opencode_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "OpenCode update available: $inst → $latest"
-        _SANDY_AGENT_BUILD_TARGET="opencode@$latest"
+        _SANDY_AGENT_BUILD_TARGET="${_SANDY_AGENT_BUILD_TARGET:+$_SANDY_AGENT_BUILD_TARGET,}opencode@$latest"
         return 0
     fi
     return 1
@@ -15886,7 +15904,7 @@ _check_mirror_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Mirror update available: $inst → $latest"
-        _SANDY_AGENT_BUILD_TARGET="mirror@$latest"
+        _SANDY_AGENT_BUILD_TARGET="${_SANDY_AGENT_BUILD_TARGET:+$_SANDY_AGENT_BUILD_TARGET,}mirror@$latest"
         return 0
     fi
     return 1
@@ -15902,19 +15920,23 @@ _check_mirror_update() {
 # The record, one per agent image (the same suffix as its hash file):
 #   $SANDY_HOME/.build_failed[_<agent>|_full]
 #   one line: <epoch> <docker build exit> <image> <build hash> <target>
-# <target> is what the update check found (<agent>@<version>) or "-" when the
-# build was triggered by its inputs. A record whose image, build hash or
+# <target> is what the update checks found, every agent with a newer release
+# in check order (claude,gemini,codex,opencode,mirror), comma-joined
+# (claude@2.1.0,codex@0.9.0), or "-" when the build was triggered by its inputs. A record whose image, build hash or
 # target differ from this launch's is ignored, so a newer agent release, a
 # changed Dockerfile or a different agent is never held back by an older
 # failure. It is only consulted while the image exists: a REQUIRED build (no
-# image to fall back to) always runs. "broken" (an image whose agent reports
-# no version) is never recorded: that image is unusable, so each launch
-# retries. A successful build deletes the record; --rebuild deletes every
+# image to fall back to) always runs. A build for an image whose agent reports
+# no version (_SANDY_AGENT_BUILD_BROKEN) is never recorded: that image is
+# unusable, so each launch retries. A record sandy cannot parse (a damaged
+# line, a leading-zero epoch that shell arithmetic would read as octal) or
+# that is not a plain file is ignored with a warning: the build is retried. A successful build deletes the record; --rebuild deletes every
 # record (_sandy_clear_build_cache). The epoch is read from the file, not its
 # mtime, so a test (or a skewed clock) moves it portably; a record from the
 # future is ignored rather than trusted.
 _SANDY_BUILD_FAIL_TTL=1800
 _SANDY_AGENT_BUILD_TARGET=""
+_SANDY_AGENT_BUILD_BROKEN=false
 _SANDY_BUILD_BACKOFF_NOTE=""
 _sandy_build_fail_file() { printf '%s/.build_failed%s' "$SANDY_HOME" "${BUILD_HASH_FILE_NAME#.build_hash}"; }
 _sandy_build_fail_key() { printf '%s %s %s' "$IMAGE_NAME" "$BUILD_HASH" "${_SANDY_AGENT_BUILD_TARGET:--}"; }
@@ -15923,10 +15945,21 @@ _sandy_build_fail_key() { printf '%s %s %s' "$IMAGE_NAME" "$BUILD_HASH" "${_SAND
 _sandy_build_fail_recent() {
     local _f _e _rc _rest _now
     _f="$(_sandy_build_fail_file)"
-    [ -f "$_f" ] || return 1
-    IFS=' ' read -r _e _rc _rest < "$_f" || return 1
-    case "$_e" in ''|*[!0-9]*) return 1 ;; esac
-    case "$_rc" in ''|*[!0-9]*) return 1 ;; esac
+    [ -e "$_f" ] || [ -L "$_f" ] || return 1
+    _e="" _rc="" _rest=""
+    if [ -L "$_f" ] || [ ! -f "$_f" ]; then
+        warn "Ignoring $_f: it is not a plain file. Retrying the agent image rebuild."
+        return 1
+    fi
+    IFS=' ' read -r _e _rc _rest < "$_f" || true
+    # Digits only, and no leading zero: $(( )) would read 0123 as octal and
+    # abort the whole build step on an 8 or a 9.
+    case "$_e" in ''|0*|*[!0-9]*) _e="" ;; esac
+    case "$_rc" in ''|*[!0-9]*) _rc="" ;; esac
+    if [ -z "$_e" ] || [ -z "$_rc" ] || [ -z "$_rest" ]; then
+        warn "Ignoring the unreadable failed-rebuild record $_f. Retrying the agent image rebuild."
+        return 1
+    fi
     [ "$_rest" = "$(_sandy_build_fail_key)" ] || return 1
     _now="$(date +%s)" || return 1
     [ "$_now" -ge "$_e" ] && [ $((_now - _e)) -lt "$_SANDY_BUILD_FAIL_TTL" ] || return 1
@@ -15936,31 +15969,47 @@ _sandy_build_fail_recent() {
 }
 # $1 = the failed build's exit status. Written through mktemp + mv: rename
 # replaces whatever is at the path, link or not, and never writes through one.
+# Returns 0 only when the record was written.
 _sandy_build_fail_record() {
-    local _f _tmp
-    if [ "$_SANDY_AGENT_BUILD_TARGET" = broken ]; then
+    local _f _tmp=""
+    if [ "$_SANDY_AGENT_BUILD_BROKEN" = true ]; then
         warn "  The existing image's agent reports no version, so the next launch retries the build."
-        return 0
+        return 1
     fi
     _f="$(_sandy_build_fail_file)"
+    # A link at the path is removed, never followed: mv onto a link to a
+    # directory would drop the record inside that directory. A directory (or
+    # anything else that is not a file) is refused.
+    [ -L "$_f" ] && rm -f "$_f"
+    if [ -e "$_f" ] && [ ! -f "$_f" ]; then
+        warn "  Could not record the failure: $_f is not a file. The next launch retries the build."
+        return 1
+    fi
     if _tmp="$(mktemp "$SANDY_HOME/.build_failed.XXXXXX" 2>/dev/null)" \
         && printf '%s %s %s\n' "$(date +%s)" "$1" "$(_sandy_build_fail_key)" > "$_tmp" \
-        && mv -f "$_tmp" "$_f"; then
+        && mv -f "$_tmp" "$_f" && [ -f "$_f" ] && [ ! -L "$_f" ]; then
         warn "  Not retrying this build for $((_SANDY_BUILD_FAIL_TTL / 60)) minutes; sandy --rebuild retries it now."
-    else
-        [ -n "${_tmp:-}" ] && rm -f "$_tmp"
-        warn "  Could not record the failure in $_f, so the next launch retries the build."
+        _SANDY_BUILD_BACKOFF_NOTE="The $IMAGE_NAME rebuild failed (docker build exit $1); it is retried in $((_SANDY_BUILD_FAIL_TTL / 60)) min, or now with sandy --rebuild."
+        return 0
     fi
+    [ -n "$_tmp" ] && rm -f "$_tmp"
+    warn "  Could not record the failure in $_f, so the next launch retries the build."
+    return 1
 }
 
 # SANDY_OFFLINE (#219) skips only this lookup. A build already required above
 # (missing image, changed inputs, rebuilt base) is not a check and still runs.
 if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+    # B8 G7: every agent of a combo is checked, even after one already has an
+    # update, so the failed-rebuild record's target names every release this
+    # build would install; a record naming only the first would hold back a
+    # rebuild for a second agent's newer release. Only probes are added: the
+    # build happens exactly when it did before.
     _sandy_agent_has claude   && _check_claude_update   && NEEDS_BUILD=true
-    _sandy_agent_has gemini   && [ "$NEEDS_BUILD" = false ] && _check_gemini_update   && NEEDS_BUILD=true
-    _sandy_agent_has codex    && [ "$NEEDS_BUILD" = false ] && _check_codex_update    && NEEDS_BUILD=true
-    _sandy_agent_has opencode && [ "$NEEDS_BUILD" = false ] && _check_opencode_update && NEEDS_BUILD=true
-    _sandy_agent_has mirror   && [ "$NEEDS_BUILD" = false ] && _check_mirror_update   && NEEDS_BUILD=true
+    _sandy_agent_has gemini   && _check_gemini_update   && NEEDS_BUILD=true
+    _sandy_agent_has codex    && _check_codex_update    && NEEDS_BUILD=true
+    _sandy_agent_has opencode && _check_opencode_update && NEEDS_BUILD=true
+    _sandy_agent_has mirror   && _check_mirror_update   && NEEDS_BUILD=true
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
@@ -15982,12 +16031,14 @@ if [ "$NEEDS_BUILD" = true ]; then
         docker build -q --no-cache --label sandy.managed=1 -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME" || _agent_build_rc=$?
         if [ "$_agent_build_rc" -eq 0 ]; then
             echo "$BUILD_HASH" > "$HASH_FILE"
-            rm -f "$(_sandy_build_fail_file)"
+            _sandy_build_fail_remove "$(_sandy_build_fail_file)"
             _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
         elif [ -n "$_old_agent_id" ]; then
             warn "Agent image rebuild failed (docker build exit $_agent_build_rc) — continuing on the existing image."
-            _sandy_build_fail_record "$_agent_build_rc"
-            _SANDY_BUILD_DEFERRED=true
+            # A recorded failure has its own session-end line (the retry is
+            # 30 minutes out, not "the next launch"); an unrecorded one keeps
+            # the generic deferred notice.
+            _sandy_build_fail_record "$_agent_build_rc" || _SANDY_BUILD_DEFERRED=true
         else
             error "Agent image build failed (docker build exit $_agent_build_rc) and no previous image exists."
             exit 1
@@ -18883,8 +18934,9 @@ cleanup() {
         printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
     fi
-    # B8 G7: a rebuild held back by the failed-rebuild backoff is the same
-    # erosion with a different cause and retry time, so it gets its own line.
+    # B8 G7: a rebuild that failed and was recorded, or was held back by that
+    # record, is the same erosion with a different cause and retry time, so it
+    # gets its own line.
     if [ -n "${_SANDY_BUILD_BACKOFF_NOTE:-}" ]; then
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. %s\n" "$_SANDY_BUILD_BACKOFF_NOTE" >&2
     fi
