@@ -19472,7 +19472,7 @@ _sandy_secret_env_count=0
 # argv entry (#13). docker --env-file reads NAME=VALUE literally to EOL.
 _sandy_add_secret_env() {
     if [ -z "$SECRET_ENV_FILE" ]; then
-        SECRET_ENV_TMPDIR="$(mktemp -d)"; chmod 700 "$SECRET_ENV_TMPDIR"
+        SECRET_ENV_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-secret-env.XXXXXXXX")"; chmod 700 "$SECRET_ENV_TMPDIR"
         SECRET_ENV_FILE="$SECRET_ENV_TMPDIR/env"
         : > "$SECRET_ENV_FILE"; chmod 600 "$SECRET_ENV_FILE"
     fi
@@ -19503,7 +19503,7 @@ load_gemini_credentials() {
             _gemini_oauth_file="$HOME/.gemini/tokens.json"
         fi
         if [ -n "$_gemini_oauth_file" ]; then
-            GEMINI_CRED_TMPDIR="$(mktemp -d)"
+            GEMINI_CRED_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-gemini-cred.XXXXXXXX")"
             cp "$_gemini_oauth_file" "$GEMINI_CRED_TMPDIR/$(basename "$_gemini_oauth_file")"
             chmod 600 "$GEMINI_CRED_TMPDIR/$(basename "$_gemini_oauth_file")"
             info "Loaded Gemini OAuth credentials from host ($(basename "$_gemini_oauth_file"))"
@@ -19606,7 +19606,7 @@ load_codex_credentials() {
             # path's read-only mount. Never persisted to the sandbox.
             local _k="${OPENAI_API_KEY//\\/\\\\}"
             _k="${_k//\"/\\\"}"
-            CODEX_CRED_TMPDIR="$(mktemp -d)"
+            CODEX_CRED_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-codex-cred.XXXXXXXX")"
             printf '{"OPENAI_API_KEY":"%s"}\n' "$_k" > "$CODEX_CRED_TMPDIR/auth.json"
             chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
             info "Using OPENAI_API_KEY for Codex (ephemeral auth.json, read-only mount; in-container 'codex login' cannot write it -- to log in instead, run 'sandy --login codex')"
@@ -19656,7 +19656,7 @@ load_opencode_credentials() {
     fi
     if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
         if [ -f "$HOME/.local/share/opencode/auth.json" ]; then
-            OPENCODE_CRED_TMPDIR="$(mktemp -d)"
+            OPENCODE_CRED_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-opencode-cred.XXXXXXXX")"
             cp "$HOME/.local/share/opencode/auth.json" "$OPENCODE_CRED_TMPDIR/auth.json"
             chmod 600 "$OPENCODE_CRED_TMPDIR/auth.json"
             info "Loaded OpenCode auth.json from host (read-only mount)"
@@ -19917,7 +19917,7 @@ else
             warn "SANDY_CLAUDE_AUTH=profile but no credentials for profile '$_prof_name' under $_prof_dir/credentials/ (run 'ant auth login' on the host, or set ANTHROPIC_PROFILE); falling back to auto."
             _claude_auth=auto
         else
-            PROFILE_TMPDIR="$(mktemp -d)"
+            PROFILE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-profile.XXXXXXXX")"
             chmod 700 "$PROFILE_TMPDIR"
             mkdir -p "$PROFILE_TMPDIR/configs" "$PROFILE_TMPDIR/credentials"
             if [ -f "$_prof_dir/configs/$_prof_name.json" ]; then
@@ -20048,7 +20048,7 @@ else
     fi
 
     if [ -n "$CRED_JSON" ]; then
-        CRED_TMPDIR="$(mktemp -d)"
+        CRED_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-cred.XXXXXXXX")"
         printf '%s\n' "$CRED_JSON" > "$CRED_TMPDIR/.credentials.json"
         chmod 600 "$CRED_TMPDIR/.credentials.json"
         info "Loaded credentials"
@@ -21975,7 +21975,7 @@ if [ "$_sandy_ssh_stage" = true ]; then
     # the agent usually WORKS, so nothing fails to reveal the copy, which makes
     # the exposure quieter there rather than smaller.
     if [ -d "$HOME/.ssh" ]; then
-        SSH_STAGE_TMPDIR="$(mktemp -d)"
+        SSH_STAGE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/sandy-ssh-stage.XXXXXXXX")"
         chmod 700 "$SSH_STAGE_TMPDIR"
         # Always safe: host aliases and public material. known_hosts rides in
         # via its own mount too; copying it here keeps the staged tree coherent.

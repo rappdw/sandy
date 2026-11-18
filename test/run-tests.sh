@@ -26082,6 +26082,28 @@ if [ -z "$_A6_WHY" ] && ! grep -qx -- -d "$(_a6_agent_args profile-daemon)"; the
 check "§226(4) the daemon supervisor (detached run, stopped by SIGTERM) removes the copy at teardown, after the container (got: ${_A6_WHY:-ok})" \
     test -z "$_A6_WHY"
 
+# (4b) macOS mktemp: `mktemp -d` with no template ignores TMPDIR and uses the
+# per-user temp folder, so (1)-(4) failed on the maintainer's Mac. A stub that
+# does the same (no template -> a dir outside TMPDIR) stands in for it here;
+# every credential dir must be made from an explicit ${TMPDIR:-/tmp} template.
+_A6_BSD="$_A6_DIR/bsd-mktemp"; mkdir -p "$_A6_BSD/bin" "$_A6_BSD/elsewhere"
+cat > "$_A6_BSD/bin/mktemp" <<STUB
+#!/bin/sh
+if [ "\$#" = 1 ] && [ "\$1" = -d ]; then d="$_A6_BSD/elsewhere/tmp.\$\$"; mkdir "\$d" && printf '%s\\n' "\$d"; exit; fi
+PATH="\$(printf '%s' "\$PATH" | sed 's#^$_A6_BSD/bin:##')" exec mktemp "\$@"
+STUB
+chmod +x "$_A6_BSD/bin/mktemp"
+_a6_profile_fixture profile-bsd
+_a6_launch profile-bsd SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-bsd/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic PATH="$_A6_BSD/bin:$_A6_DIR/bin:$PATH"
+_A6_WHY="$(_a6_profile_residue profile-bsd 0)"
+[ -z "$(ls -A "$_A6_BSD/elsewhere" 2>/dev/null)" ] || _A6_WHY="${_A6_WHY:+$_A6_WHY; }a dir was made by a bare mktemp -d: $(ls "$_A6_BSD/elsewhere" | head -3 | tr '\n' ' ')"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(4b)" profile-bsd
+check "§226(4b) with a mktemp that ignores TMPDIR without a template (macOS), the profile copy still lands under TMPDIR and is removed (got: ${_A6_WHY:-ok}; mutation: PROFILE_TMPDIR=\$(mktemp -d) -> lands outside)" \
+    test -z "$_A6_WHY"
+check "§226(4c) no credential temp dir in sandy is made with a bare mktemp -d (the macOS form ignores TMPDIR)" \
+    bash -c '! grep -nE "(CRED|PROFILE|SECRET_ENV|SSH_STAGE)_TMPDIR=\"\\\$\(mktemp -d\)\"" "$1"' _ "$SANDY_SCRIPT"
+
 # (5) Every name cleanup() rm -rf's, kills or force-removes is cleared before
 # the trap is armed. Each is inherited here pointing at something precious,
 # and the launch fails at `network create`, after the trap is armed and before
