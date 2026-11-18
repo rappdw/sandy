@@ -520,7 +520,7 @@ class ProductionContracts(unittest.TestCase):
 
     def test_symlinks_use_the_production_resolver(self):
         names = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
-                 "_sandy_is_protected_rel", "_sandy_resolve_symlinks")
+                 "_sandy_is_protected_rel") + self.SCAN + ("_sandy_resolve_symlinks",)
         code = "".join(function(name) for name in names)
         code += '\n_sandy_resolve_symlinks\nprintf "%s\\n" "${SYMLINK_HOST_PATHS[@]+"${SYMLINK_HOST_PATHS[@]}"}"\n'
         (self.home / "outside").mkdir()
@@ -539,8 +539,13 @@ class ProductionContracts(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn(str(self.home / "outside"), run.stdout)
 
+    # The scan helpers _sandy_resolve_symlinks calls (optimization pass B2).
+    SCAN = ("_sandy_symlink_recorded", "_sandy_symlink_classify", "_sandy_fnmatch_escape", "_sandy_dir_has_entry", "_sandy_symlink_skip_parse", "_sandy_symlink_copied",
+            "_sandy_symlink_inside", "_sandy_symlink_resolve", "_sandy_gitdir_rel", "_sandy_gitdir_host", "_sandy_submodule_gitdirs", "_sandy_symlink_byname_rels",
+            "_sandy_symlink_canon", "_sandy_symlink_target_judged", "_sandy_symlink_walk",
+            "_sandy_symlink_protected_sweep", "_sandy_symlink_scan", "_sandy_ws_physical")
     RESOLVER = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
-                "_sandy_is_protected_rel", "_sandy_resolve_symlinks")
+                "_sandy_is_protected_rel") + SCAN + ("_sandy_resolve_symlinks",)
 
     def counted_resolver(self):
         # Each list generator appends its name to $COUNT_FILE, then runs the
