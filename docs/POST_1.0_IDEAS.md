@@ -29,7 +29,7 @@ the design record. "On main" means merged after 2.8.0 and due in 2.9.0.
 | rw ephemeral credential copies | **Shipped** for Gemini OAuth (#486, on main); the Claude credential copy was already rw; Codex OAuth moved to sandbox seeding (#238). See the entry's own update. |
 | Doc note: `SANDY_SSH=agent` + FIDO2 | Open. Not in `docs/guide/`. |
 | Doc note: cmux orphan-on-close | Open. `docs/guide/channels.md` has no such caveat. |
-| Role-based orchestration (`SANDY_ROLE`) | Not implemented; see `docs/ROLES_DESIGN.md` for its status. |
+| Role-based orchestration (`SANDY_ROLE`) | Superseded 2026-11-17 (in-session subagents); not planned. See `docs/ROLES_DESIGN.md`. |
 | Warn on env-vs-config credential conflict | Open. The env-set key is still skipped silently in `_load_sandy_config`, and `oauthAccount` is not stripped. |
 | "Which org am I running as?" | **Partly addressed.** `sandy --accounts` (#438, 2.8.0) reports each sandbox's account, and on main names a long-lived token or API key by fingerprint or label (`--fingerprint-token`, `$SANDY_HOME/credential-labels`, #453) instead of trusting `oauthAccount` (#454); #482 (on main) puts plan usage and the credential on Claude's status line. Resolving the org of an opaque token is still unsolved. |
 | Scoped overlay/VPN egress | Open. |
@@ -665,9 +665,10 @@ terminals would generalize it).
 
 ## Role-based multi-session orchestration (`SANDY_ROLE`) — plan/implement/verify
 
-**Target: 1.1 (prototype on a branch sooner).** Filed 2026-07-07. **Full design
-doc: `docs/ROLES_DESIGN.md`** — decisions are settled there; this is just the
-pointer.
+**Superseded 2026-11-17; not planned.** Plan → implement → verify runs inside
+one sandy session with separate implementer and verifier subagents instead; see
+the status note in `docs/ROLES_DESIGN.md`. Originally targeted at 1.1, filed
+2026-07-07. The summary below is kept for the record.
 
 One-paragraph version: run plan → implement → verify as three *independent
 long-lived interactive sandy sessions* in tmux panes (subscription-friendly —
