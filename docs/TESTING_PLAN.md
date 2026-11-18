@@ -352,6 +352,12 @@ Why the rest needs no action:
   you lack a pair, note §4.1/§4.2 skipped, same as any other credential gap.
   §21 itself needs no credentials (the agent doesn't need to authenticate for
   its pane to exist and print its marker) so it always runs on a Docker host.
+- **Single-agent pane tagging** (the `@sandy_pane_agent` pane option, #378) is
+  proven against a live tmux server by `bash test/host-check-pane-tag.sh`. It
+  is host-only and wired into no suite (`run-tests.sh §171` covers the mapping
+  with fixtures). It uses a private tmux socket and refuses to run inside a
+  sandy sandbox. Run it when the daemon or foreground single-agent tmux
+  commands change.
 
 Sign-off (tick when the manual rows have been walked this RC):
 
