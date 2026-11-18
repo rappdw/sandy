@@ -12686,7 +12686,7 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 # The scan: its helper functions (optimization pass B2 split the loop out of
 # _sandy_resolve_symlinks), then one call of it.
 : > "$_S130_DIR/scan.sh"
-for _f in _sandy_symlink_classify _sandy_fnmatch_escape _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_protected_sweep _sandy_symlink_scan; do
+for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_resolve _sandy_symlink_protected_sweep _sandy_symlink_scan; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
 done
 unset _f
@@ -25590,7 +25590,7 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219, 225 and 226-231 (removed at the end of §231,
+# The stubs, shared by 215-219, 225 and 226-232 (removed at the end of §232,
 # which follows §225, which follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
@@ -26336,7 +26336,7 @@ _a6_launch "$_S230" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 check "§230(1) SANDY_SYMLINK_SCAN_SKIP=.claude from a workspace config does not hide .claude/commands -> \$HOME/secret: refused, no agent run, and the entry is named as covering a copied tree (rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".claude/commands -> $_A6_DIR/$_S230/secret"
 check "§230(1b) ...the warning names the entry and the copied tree" \
-    grep -qF "'.claude' covers .claude/commands, which sandy copies into the sandbox" "$_A6_DIR/$_S230/out"
+    grep -qF "'.claude' covers .claude/" "$_A6_DIR/$_S230/out"
 # a1 inside: a link INSIDE a copied tree, skip key over its parent.
 _S230=s230-a1i; mkdir -p "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands" "$_A6_DIR/$_S230/ws/.sandy"
 ln -s "$_A6_DIR/$_S230/secret" "$_A6_DIR/$_S230/ws/.claude/commands/x"
@@ -26384,7 +26384,7 @@ _s228_sup "$_S230" "${_S228_ID:-}"
 check "§230(7) an approved .claude link retargeted after the pass is judged with its new target and refused, not waved through as listed (mutation: any listed path counts as checked; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".claude -> $_A6_DIR/$_S230/o2"
 unset _S230
-unset -f _s230_refused _s230_sup_after _s230_a5 _s230_a6 _s230_a7
+unset -f _s230_a5 _s230_a6 _s230_a7   # _s230_refused/_s230_sup_after: §232 uses them
 
 section "§231: skip entries are literal and workspace-relative; the link list is honoured only by the supervisor, written only to a real launch/, and validated entry by entry (B2 send-back)"
 # ============================================================
@@ -26431,6 +26431,141 @@ _s228_sup s231-ent "${_S228_ID:-}"
 check "§231(5) a list entry whose path has a .. component makes the list corrupt (named) and the supervisor scans (mutation: entry paths not validated; rc ${_A6_RC:-none})" \
     bash -c 'test "$1" = 0 && grep -q "symlink list is corrupt" "$2"' _ "$_S231_OK" "$_A6_DIR/s231-ent/out"
 unset _S231 _S231_F _S231_OK
+
+section "§232: a path sandy mounts or copies by name is judged where it RESOLVES, through any internal link, whatever the key hides; copied trees are copied with cp -R (B2 send-back 2)"
+# ============================================================
+# Round 2 of the verifier: `.claude -> vendor` with `vendor/hooks ->
+# ~/secret` and SANDY_SYMLINK_SCAN_SKIP=vendor launched with the secret
+# mounted at .claude/hooks, because the sweep judged only the first link it
+# met (vendor, inside the workspace). Now every by-name path and each prefix
+# is resolved and judged as the full scan would (cases b1-b4, b6), skip
+# entries are compared with where the copied trees resolve, and the copied
+# trees are copied with `cp -R`: BSD/Apple `cp -r` follows links (-RL), so
+# content behind a skipped link would leak BY COPY (b5, b8). A cp stub that
+# makes `-r` mean `-RL`, as on macOS, shows the copy never follows a link.
+_S232_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_s232_alias() {   # $1 = CASE  $2 = by-name path's first component  $3 = rest  -> ws/$2 -> vendor, vendor/$3 -> secret
+    mkdir -p "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor" "$_A6_DIR/$1/ws/.sandy"
+    mkdir -p "$(dirname "$_A6_DIR/$1/ws/vendor/$3")"
+    ln -s vendor "$_A6_DIR/$1/ws/$2"
+    ln -s "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor/$3"
+    printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$1/ws/.sandy/config"
+}
+for _S232_C in "b1 .claude hooks" "b2 .claude commands" "b4 .claude settings.json" "b6 .github workflows"; do
+    read -r _S232_N _S232_P _S232_R <<<"$_S232_C"
+    _s232_alias "s232-$_S232_N" "$_S232_P" "$_S232_R"
+    _a6_launch "s232-$_S232_N" "${_S232_K[@]}"
+    check "§232($_S232_N) $_S232_P -> vendor, vendor/$_S232_R -> \$HOME/secret, SANDY_SYMLINK_SCAN_SKIP=vendor: $_S232_P/$_S232_R is judged where it resolves and refused, no agent run (mutation: the sweep follows no internal link; rc ${_A6_RC:-none})" \
+        _s230_refused "s232-$_S232_N" "$_S232_P/$_S232_R -> $_A6_DIR/s232-$_S232_N/secret"
+done
+# A link INSIDE a copied tree reached through an alias: the skip entry
+# `vendor` is where .claude/commands resolves, so it is ignored (compared
+# canonically, not by spelling) and the link is found by the scan.
+_S232_C=s232-b2i; mkdir -p "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor/commands" "$_A6_DIR/$_S232_C/ws/.sandy"
+ln -s vendor "$_A6_DIR/$_S232_C/ws/.claude"
+ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor/commands/x"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S232_C/ws/.sandy/config"
+_a6_launch "$_S232_C" "${_S232_K[@]}"
+check "§232(b2i) a skip entry that is where a copied tree resolves (vendor, behind .claude -> vendor) is ignored by name, and a link inside the tree is refused (mutation: entries compared with the trees by spelling; rc ${_A6_RC:-none})" \
+    bash -c 'grep -qF "'"'"'vendor'"'"' covers .claude/" "$1/out" && test "$2" != 0 && grep -qF "vendor/commands/x -> $1/secret" "$1/out"' _ "$_A6_DIR/$_S232_C" "$_A6_RC"
+# A by-name path that is not itself a link, reached through one: .claude ->
+# a directory outside $HOME (a link the scan ignores, as main does) holding a
+# REGULAR settings.json. The protected-path mount would follow it, so the
+# by-name sweep judges .claude/settings.json where it lands (on main this
+# launched with the file mounted and no prompt).
+_S232_C=s232-judge; mkdir -p "$_A6_DIR/s232-judge-out" "$_A6_DIR/$_S232_C/ws"
+printf '{}\n' > "$_A6_DIR/s232-judge-out/settings.json"
+ln -s "$_A6_DIR/s232-judge-out" "$_A6_DIR/$_S232_C/ws/.claude"
+_a6_launch "$_S232_C" "${_S232_K[@]}"
+check "§232(judge) .claude -> a directory outside \$HOME with a regular settings.json: .claude/settings.json is judged where it lands and refused (mutation: the sweep judges only paths that are links; rc ${_A6_RC:-none})" \
+    _s230_refused "$_S232_C" ".claude/settings.json -> $_A6_DIR/s232-judge-out/settings.json"
+# b3: no key; the alias planted between the pass and the supervisor.
+_s232_b3() { mkdir -p "$_A6_DIR/s232-b3/ws/vendor"; ln -s vendor "$_A6_DIR/s232-b3/ws/.claude"; ln -s "$_A6_DIR/s232-b3/secret" "$_A6_DIR/s232-b3/ws/vendor/commands"; }
+_s230_sup_after s232-b3 _s232_b3
+check "§232(b3) under --start, .claude -> vendor and vendor/commands -> \$HOME/secret planted after the pass are refused by the supervisor (rc ${_A6_RC:-none})" \
+    _s230_refused s232-b3 ".claude/commands -> $_A6_DIR/s232-b3/secret"
+# N6/N7: each of the five copied trees, under --start: a link AT the tree
+# planted after the pass (judged by the by-name sweep), and a link INSIDE it
+# (found by the supervisor's walk of that tree). Each tree is the only route
+# to its refusal, so leaving any one out of the list fails its two checks.
+for _S232_T in .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands; do
+    _S232_C="s232-at$(printf '%s' "$_S232_T" | tr -c 'a-z\n' '-')"
+    _s228_ws "$_S232_C"; mkdir -p "$_A6_DIR/$_S232_C/secret"; _s228_pass "$_S232_C"
+    mkdir -p "$_A6_DIR/$_S232_C/ws/${_S232_T%/*}"; ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/$_S232_T"
+    _s228_sup "$_S232_C" "${_S228_ID:-}"
+    check "§232(at $_S232_T) a link AT the copied tree $_S232_T planted after the pass is refused (mutation: $_S232_T left out of the copied trees; rc ${_A6_RC:-none})" \
+        _s230_refused "$_S232_C" "$_S232_T -> $_A6_DIR/$_S232_C/secret"
+    _S232_C="s232-in$(printf '%s' "$_S232_T" | tr -c 'a-z\n' '-')"
+    _s228_ws "$_S232_C"; mkdir -p "$_A6_DIR/$_S232_C/secret"; _s228_pass "$_S232_C"
+    mkdir -p "$_A6_DIR/$_S232_C/ws/$_S232_T"; ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/$_S232_T/x"
+    _s228_sup "$_S232_C" "${_S228_ID:-}"
+    check "§232(in $_S232_T) a link INSIDE $_S232_T planted after the pass is refused (rc ${_A6_RC:-none})" \
+        _s230_refused "$_S232_C" "$_S232_T/x -> $_A6_DIR/$_S232_C/secret"
+done
+# N2: an entry INSIDE a copied tree is ignored, so a link beside it is judged.
+_S232_C=s232-inside; mkdir -p "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/.claude/commands/sub" "$_A6_DIR/$_S232_C/ws/.sandy"
+ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/.claude/commands/sub/x"
+printf 'SANDY_SYMLINK_SCAN_SKIP=.claude/commands/sub\n' > "$_A6_DIR/$_S232_C/ws/.sandy/config"
+_a6_launch "$_S232_C" "${_S232_K[@]}"
+check "§232(N2) an entry inside a copied tree is ignored, by name (mutation: only entries that cover a tree are ignored; rc ${_A6_RC:-none})" \
+    grep -qF "'.claude/commands/sub' covers .claude/commands" "$_A6_DIR/$_S232_C/out"
+check "§232(N2b) ...refused" _s230_refused "$_S232_C" ".claude/commands/sub/x -> $_A6_DIR/$_S232_C/secret"
+# N4: the supervisor walks a copied tree at every depth.
+_s232_n4() { mkdir -p "$_A6_DIR/s232-n4/ws/.claude/commands/a/b"; ln -s "$_A6_DIR/s232-n4/secret" "$_A6_DIR/s232-n4/ws/.claude/commands/a/b/x"; }
+_s230_sup_after s232-n4 _s232_n4
+check "§232(N4) a link three levels inside a copied tree, planted after the pass, is refused by the supervisor (mutation: the tree walk bounded to depth 1; rc ${_A6_RC:-none})" \
+    _s230_refused s232-n4 ".claude/commands/a/b/x -> $_A6_DIR/s232-n4/secret"
+# N8: an approved link at a by-name path, re-checked from the list, is
+# mounted once (the sweep does not judge the same pair again).
+_S232_C=s232-once; mkdir -p "$_A6_DIR/$_S232_C/wf" "$_A6_DIR/$_S232_C/ws/.github"
+ln -s "$_A6_DIR/$_S232_C/wf" "$_A6_DIR/$_S232_C/ws/.github/workflows"
+_s226_seed "$_S232_C" ".github/workflows -> $_A6_DIR/$_S232_C/wf"
+_s228_pass "$_S232_C"
+_s228_sup "$_S232_C" "${_S228_ID:-}"
+_S232_A="$(_a6_agent_args "$_S232_C")"
+check "§232(N8) a listed link at a by-name path is mounted exactly once, and no -v value repeats (id '${_S228_ID:-}')" \
+    bash -c 'test -n "$1" && test "$(awk -v h="$2/wf:" '"'"'p=="-v" && index($0,h)==1 {n++} {p=$0} END {print n+0}'"'"' "$1")" = 1 && test -z "$(awk '"'"'p=="-v" {print} {p=$0}'"'"' "$1" | sort | uniq -d)"' _ "$_S232_A" "$_A6_DIR/$_S232_C"
+# b5 / b8: nothing is copied through a link. The cp stub runs `cp -r` as
+# macOS does (-RL); sandy must call cp -R, which copies a link as a link.
+_S232_CP="$_A6_DIR/s232-cpbin"; mkdir -p "$_S232_CP"
+printf '#!/bin/sh\nif [ "$1" = -r ]; then shift; exec %s -RL "$@"; fi\nexec %s "$@"\n' "$(command -v cp)" "$(command -v cp)" > "$_S232_CP/cp"
+chmod +x "$_S232_CP/cp"
+_S232_C=s232-b5; mkdir -p "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor" "$_A6_DIR/$_S232_C/ws/.claude/commands" "$_A6_DIR/$_S232_C/ws/.sandy"
+printf 'S232-SECRET\n' > "$_A6_DIR/$_S232_C/secret/id_fake"
+ln -s ../../vendor "$_A6_DIR/$_S232_C/ws/.claude/commands/a"
+ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor/x"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S232_C/ws/.sandy/config"
+_a6_launch "$_S232_C" "${_S232_K[@]}" PATH="$_S232_CP:$_A6_DIR/bin:$PATH"
+_S232_W="$(_a6_sandbox "$_S232_C")/workspace-commands"
+check "§232(b5) the copied tree is copied with links as links: workspace-commands/a is a link and no host secret is copied in, even where cp -r follows links (mutation: cp -r; rc ${_A6_RC:-none})" \
+    bash -c 'test -d "$1" && test -L "$1/a" && ! grep -rqs S232-SECRET "$1"' _ "$_S232_W"
+_S232_C=s232-b5g; mkdir -p "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor" "$_A6_DIR/$_S232_C/ws/.gemini/commands" "$_A6_DIR/$_S232_C/ws/.sandy"
+printf 'S232-SECRET\n' > "$_A6_DIR/$_S232_C/secret/id_fake"
+ln -s ../../vendor "$_A6_DIR/$_S232_C/ws/.gemini/commands/a"
+ln -s "$_A6_DIR/$_S232_C/secret" "$_A6_DIR/$_S232_C/ws/vendor/x"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S232_C/ws/.sandy/config"
+_a6_launch "$_S232_C" SANDY_AGENT=gemini GEMINI_API_KEY=fixture PATH="$_S232_CP:$_A6_DIR/bin:$PATH"
+_S232_W="$(_a6_sandbox "$_S232_C")/workspace-gemini-commands"
+check "§232(b5g) the same for the gemini copy (mutation: cp -r for .gemini; rc ${_A6_RC:-none})" \
+    bash -c 'test -d "$1" && test -L "$1/a" && ! grep -rqs S232-SECRET "$1"' _ "$_S232_W"
+_s232_b8() { mkdir -p "$_A6_DIR/s232-b8/ws/vendor" "$_A6_DIR/s232-b8/ws/.claude/commands"; printf 'S232-SECRET\n' > "$_A6_DIR/s232-b8/secret/id_fake"
+    ln -s ../../vendor "$_A6_DIR/s232-b8/ws/.claude/commands/a"; ln -s "$_A6_DIR/s232-b8/secret" "$_A6_DIR/s232-b8/ws/vendor/x"; }
+_s228_ws s232-b8; mkdir -p "$_A6_DIR/s232-b8/secret"
+_s228_pass s232-b8
+_s232_b8
+_a6_launch s232-b8 "${_S232_K[@]}" PATH="$_S232_CP:$_A6_DIR/bin:$PATH" SANDY_DAEMON_SUPERVISOR=1 \
+    SANDY_PREPASS_SYMLINKS="${_S228_ID:-}" A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/s232-b8/ws"
+_S232_W="$(_a6_sandbox s232-b8)/workspace-commands"
+check "§232(b8) ...and the same under --start with the links planted after the pass (rc ${_A6_RC:-none})" \
+    bash -c 'test -d "$1" && test -L "$1/a" && ! grep -rqs S232-SECRET "$1"' _ "$_S232_W"
+# An entry naming a directory in another case is warned about (it would match
+# on a case-insensitive file system, but find's -path would prune nothing).
+_S232_C=s232-case; mkdir -p "$_A6_DIR/$_S232_C/ws/.claude"
+_a6_launch "$_S232_C" "${_S232_K[@]}" SANDY_SYMLINK_SCAN_SKIP=.CLAUDE
+check "§232(case) an entry spelled in another case than the directory (.CLAUDE for .claude) is named in a warning" \
+    grep -qF "'.CLAUDE' matches no directory" "$_A6_DIR/$_S232_C/out"
+unset _S232_K _S232_C _S232_T _S232_A _S232_CP _S232_W _S232_N _S232_P _S232_R
+unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8 _s230_refused _s230_sup_after
 
 unset _S228_ID _S229_LOG _S226_ETC
 unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup _s228_list
