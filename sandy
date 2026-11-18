@@ -18921,6 +18921,25 @@ cleanup() {
 # which is how the nightly's "--stop cleans it up" check failed. Returning
 # resumes the interrupted teardown, and the first handler exits when it ends.
 _sandy_on_signal() { [ -n "${_SANDY_CLEANED:-}" ] && return 0; cleanup; trap - EXIT; exit "$1"; }
+# Every name cleanup() deletes, kills or force-removes is cleared BEFORE the
+# trap is armed. Most are assigned only later in the launch, so an exit in
+# between (a failed ensure_network, a Ctrl-C during proxy start) would
+# otherwise run cleanup() on a value inherited from the caller's environment:
+# `PROFILE_TMPDIR=~/work sandy` and a failed network create was enough to
+# rm -rf ~/work. The later assignments stay: they are where each value is set.
+# (PROXY_*, EGRESS_NETWORK and the subnet globals are cleared where they are
+# declared, above ensure_network; NETWORK_NAME is assigned before both.)
+_SANDY_CLEANED=""
+CONTAINER_NAME=""
+CRED_TMPDIR=""
+PROFILE_TMPDIR=""
+GEMINI_CRED_TMPDIR=""
+CODEX_CRED_TMPDIR=""
+OPENCODE_CRED_TMPDIR=""
+SECRET_ENV_TMPDIR=""
+SSH_STAGE_TMPDIR=""
+SSH_RELAY_PID=""
+CHANNEL_RELAY_PID=""
 trap 'rc=$?; cleanup; exit $rc' EXIT
 trap '_sandy_on_signal 130' INT
 trap '_sandy_on_signal 143' TERM
