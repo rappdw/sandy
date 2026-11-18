@@ -13,7 +13,6 @@ fi
 # cannot set it. See _resolve_passive_privileged_approval() in sandy.
 export SANDY_AUTO_APPROVE_PRIVILEGED=1
 
-IMAGE_NAME="sandy-claude-code"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
@@ -191,13 +190,12 @@ _run_provenance() {
 }
 
 # Every host fixture lives under the runner-owned temporary directory.
-TEST_PROJECT="$(mktemp -d)"
 SANDBOX_DIR="$(mktemp -d)"
 mkdir -p "$SANDBOX_DIR/claude"
 _SCHEMA_CACHE="$(mktemp)"
 cleanup() {
     _emit_summary
-    rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
+    rm -rf "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
     [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -2877,11 +2875,6 @@ $(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }"
 
 # Ref resolution: release -> version tag; -dev -> main; override wins.
-_px_ref() {
-    local ver="$1" override="$2"
-    SANDY_VERSION="$ver" SANDY_PROXY_REF="$override" bash -c "$_PX_FNS
-_sandy_proxy_ref"
-}
 # GITHUB_HEAD_REF is unset in these so the version/branch logic is what's
 # asserted (it would otherwise be set when the suite itself runs in PR CI).
 check "proxy ref: release version pins to vX.Y.Z tag" \
@@ -3585,11 +3578,6 @@ case "$1" in
 esac
 DOCKERSHIM
 chmod +x "$_PS_BIN/docker"
-_ps_run() { # $1=mode(""|light) → emits JSON on stdout, spawn log to $DOCKER_CALL_LOG
-    DOCKER_CALL_LOG="$(mktemp)"; export DOCKER_CALL_LOG
-    PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" bash "$_SBX_SCRIPT" --print-state ${1:+$1} 2>/dev/null
-}
-
 # #19: workspace_path present + correct in full mode; empty for legacy sandbox.
 _ps_full="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
 check "print-state emits workspace_path from WORKSPACE.json (#19)" \
@@ -4533,7 +4521,7 @@ check "bare sandy verifies inner-session liveness before the DEC-B block" \
     grep -q '_sandy_bare_live' "$_S73"
 # B5: the probe is now the entry-window readiness probe (session AND verdict),
 # polled, with five no-session polls before a container counts as a zombie;
-# §226(W10a)/(W10b) run that loop for real.
+# §235(W10a)/(W10b) run that loop for real.
 check "restart probes the session with a mid-startup retry (not a one-shot): the readiness probe, polled, 5 no-session polls before the zombie path" \
     bash -c 'grep -A20 "_sandy_session_live=0" "$1" | grep -qF "_sandy_ew_probe \"\$_sandy_daemon_existing\"" && grep -A40 "_sandy_session_live=0" "$1" | grep -qF "[ \"\$_sandy_d6_nosess\" -ge 5 ] && break"' -- "$_S73"
 check "a dead-session daemon zombie is reaped via \$0 --stop (both --start + bare)" \
@@ -5536,7 +5524,6 @@ check "--help documents SANDY_EFFORT" \
 check "--print-schema lists SANDY_EFFORT as a passive enum key" \
     bash -c 'cat "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_EFFORT\"]; assert e and e[0][\"type\"]==\"enum\", e"' -- "$_SCHEMA_CACHE"
 # marker effort field: string when set, null when unset (behavioral, no docker)
-_eff_mk() { local SANDY_EFFORT="$1" j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf '{"effort":%s}\n' "$j"; }
 check "marker effort field: set→JSON string, unset→null" \
     bash -c '
       set="$(SANDY_EFFORT=high; j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf "%s" "$j")"
@@ -11718,7 +11705,7 @@ exit 0')"
     check "§123(27) a relay that exits ZERO does NOT fail the session — a relay is allowed to be a one-shot; B5: the verdict is passed (got: $_S123_W2)" \
         bash -c '[ "$1" = "rc=0 passed" ]' -- "$_S123_W2"
     # "§123(28) a relay that stays up does NOT fail the session": since B5 that
-    # is §226(W2), which runs the window over an entry that stays up.
+    # is §235(W2), which runs the window over an entry that stays up.
     # (28b)/(28c): nothing (26)-(27) started outlives them. The supervisor loop
     # is a fork of this suite, so its command line is just
     # `bash test/run-tests.sh`; it is identified by what it holds instead.
@@ -11888,21 +11875,6 @@ _S124_AFTER="$(find "$_S124_PSH/sandboxes" | sort | sha256 2>/dev/null || find "
 check "§124(6) --print-state REPAIRS NOTHING — the tree is byte-identical after reporting on a broken pair (the consumer relies on a hand-made pair staying distinguishable)" \
     bash -c '[ "$1" = "$2" ]' -- "$_S124_BEFORE" "$_S124_AFTER"
 
-# Slice the ONE sandbox object out first, then read the field from it. The
-# previous form anchored on the neighbours -- `"name":"$1"[^}]*"handoff":{` --
-# which worked only because nothing nested happened to sit between those two
-# fields. It is the same tripwire that broke §123, §124(8), and (while this
-# section was green) acceptance-handoff-dirs.sh Phase F, which reported
-# relay.state=started FAILING against an emitter that was emitting exactly that.
-# index/substr only: no regex, so no BRE-vs-ERE question and BWK-awk safe.
-_s124_obj() {   # _s124_obj <sandbox-name> -> the JSON object for that sandbox
-    # ONE LINE on purpose: a multi-line single-quoted program argument is the
-    # shape lint-bash32.sh cannot track (it desynchronized the APOSQ span and
-    # reported three unrelated comments 20 lines below as findings), and it is
-    # the same shape CLAUDE.md records as untellable from host shell.
-    printf '%s' "$_S124_PS" | tr -d ' \n' | awk -v key="\"name\":\"$1\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
-}
-_s124_field() { _s124_obj "$1" | sed -n 's/.*"handoff":{"state":"\([a-z]*\)".*/\1/p' | head -1; }
 # (7)-(11) REMOVED with the handoff{} field they read (#355). They asserted
 # that --print-state reported the classifier's verdict; there is no longer a
 # field for it, because the tree it described is gone. The classifier itself
@@ -12458,8 +12430,6 @@ _s128_exec() {   # _s128_exec <var> <value> -> raw output of the built command
     ) 2>/dev/null
     return 0
 }
-# ran-and-did-not-execute, as one predicate
-_s128_inert() { printf '%s\n' "$1" | grep -q '^CLAUDE-ARGV:' && ! printf '%s\n' "$1" | grep -q '^S128_PWNED'; }
 _S128_SEMI="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux; echo S128_PWNED')"
 _S128_AND="$(trap - ERR;   _s128_exec SANDY_TEAMMATE_MODE 'tmux && echo S128_PWNED')"
 _S128_PIPE="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux | echo S128_PWNED')"
@@ -13068,7 +13038,6 @@ _S132_MISS="$(trap - ERR; _s132_stage 'id_typo' 0)"
 _S132_SUSP="$(trap - ERR; _s132_stage 'id_wanted' 1)"
 _S132_PATH="$(trap - ERR; _s132_stage '../../.bashrc' 0)"
 
-_s132_has() { printf '%s\n' "$2" | grep -qx "F=$1"; }
 check "§132(1a) DEFAULT (no allowlist): no private key is staged at all (got: $(printf '%s' "$_S132_DEF" | tr '\n' ' '))" \
     bash -c '! printf "%s\n" "$1" | grep -qxE "F=(id_wanted|corp_secret|id_nopub|aws\.pem)"' -- "$_S132_DEF"
 check "§132(1b) ...including gitCredentials.csv — credential-shaped with NO 'BEGIN PRIVATE KEY' line, so a content-sniff blocklist waves it through. This one assertion is the case for default-deny" \
@@ -24562,8 +24531,10 @@ check "§204(12b) inactive: the flag is still forwarded as 0 (a forged env is al
 _S204_GUARD='if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then'
 check "§204(12c) container side: sessions come up BEFORE the pane is created, gated on the flag and never headless or --remote, right after the blocking entry window (B5)" \
     awk -v g="$_S204_GUARD" 'index($0, g) == 1 {gl = NR} $0 == "    _sandy_entry_window || _sandy_ew_fail_exit" && gl == NR - 1 {w = NR} $0 == "    _sandy_claude_sessions_up" && w == NR - 1 {u = NR} index($0, "if [ \"$_SANDY_IS_MULTI\" = false ]; then") == 1 && !m {m = NR} END {exit !(u && m && u < m)}' "$SANDY_SCRIPT"
+# Anchored on the relay block's comment: CHANNEL_RELAY_PID="" also appears
+# before the cleanup trap, where cleanup()'s inputs are cleared.
 check "§204(12d) the host relay stands down while a named session receives channels (agent view cannot take keystrokes)" \
-    bash -c 'grep -A1 "Launch host-side channel relay" "$1" >/dev/null && awk "/^CHANNEL_RELAY_PID=\"\"\$/{p=1} p&&/_SANDY_CS_ACTIVE:-0}\" != 1/{f=1} p&&/^    case /{exit} END{exit !f}" "$1"' -- "$SANDY_SCRIPT"
+    bash -c 'grep -A1 "Launch host-side channel relay" "$1" >/dev/null && awk "/^# Launch host-side channel relay/{p=1} p&&/_SANDY_CS_ACTIVE:-0}\" != 1/{f=1} p&&/^    case /{exit} END{exit !f}" "$1"' -- "$SANDY_SCRIPT"
 rm -rf "$_S204_D"
 unset _S204_D _S204_PARSE _S204_OK _S204_TWO _S204_DUPN _S204_LNK _S204_CRLF _S204_CH _S204_H1 _S204_H2 _S204_H3 _S204_L2
 unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_GATE _S204_FILT _S204_CSI _S204_SC
@@ -25365,6 +25336,9 @@ section "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, a
 # contracts group (suite_runner.py CONTRACT_FILES), so on macOS CI too.
 # The host group alone (`--only host`, or this script under SANDY_TEST_CHILD=1)
 # does NOT run it: use `--only contracts`, `--host-only` or no flags.
+# Its guards are mutation-audited by test/mutate-codex-activity.py (run by
+# hand, not by any suite): each mutation breaks one guard in a temporary copy
+# of sandy and must make a named test in test_codex_activity.py fail.
 
 
 echo ""
@@ -25639,14 +25613,21 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219 and 225 (removed at the end of §225, which
-# follows §219):
+# The stubs, shared by 215-219, 225 and 226 (removed at the end of §226,
+# which follows §225, which follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
 #             copy of its --env-file, under runs/; for the agent's run (the one
 #             with --name) it plays Docker's bind-mount auto-creation: each
 #             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
 #             is created in the workspace, and A6_AGENT_WRITES gets a file.
+#             With A6_SNAP_DST set, the source of the agent's mount onto that
+#             container path goes to runs/snap.src and the files it holds at
+#             that moment to runs/snap.files. A6_RUN_RC is the agent run's rc;
+#             A6_TERM_AT_RUN SIGTERMs the launcher (its parent) from inside
+#             the agent run. When the agent container is force-removed, whether
+#             that mount source still exists goes to runs/snap.at-rm.
+#             A6_NETFAIL makes `network create` fail.
 #             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
 #   curl      fails, except the two build-dependency probes when A6_NET=1, so a
 #             missing image builds instead of being deferred.
@@ -25690,8 +25671,27 @@ if [ "${1:-}" = run ]; then
                 esac
             done
         done
+        if [ -n "${A6_SNAP_DST:-}" ]; then
+            for _a in "$@"; do
+                case "$_a" in
+                    *":$A6_SNAP_DST")
+                        _src="${_a%":$A6_SNAP_DST"}"
+                        printf '%s\n' "$_src" > "$A6_LOG/runs/snap.src"
+                        (cd "$_src" 2>/dev/null && find . -type f | LC_ALL=C sort) > "$A6_LOG/runs/snap.files" ;;
+                esac
+            done
+        fi
+        if [ -n "${A6_TERM_AT_RUN:-}" ]; then kill -TERM "$PPID"; sleep 1; fi
+        [ -z "${A6_RUN_RC:-}" ] || exit "$A6_RUN_RC"
     fi
 fi
+case "$*" in
+    "network create"*) [ -z "${A6_NETFAIL:-}" ] || exit 1 ;;
+    "rm -f sandy-ws-"*)
+        if [ -f "$A6_LOG/runs/snap.src" ]; then
+            if [ -e "$(cat "$A6_LOG/runs/snap.src")" ]; then echo present; else echo gone; fi > "$A6_LOG/runs/snap.at-rm"
+        fi ;;
+esac
 exit 0
 EOF
 cat > "$_A6_DIR/bin/curl" <<'EOF'
@@ -26064,6 +26064,114 @@ unset _A6_NV
 unset -f _a6_gpus
 unset _A6_A _A6_WHY
 unset -f _hardening_unmet
+
+section "§226: a SANDY_CLAUDE_AUTH=profile launch removes its copy of the profile's credentials when it exits"
+# ============================================================
+# cleanup() removed the profile copy (PROFILE_TMPDIR) only inside its
+# CRED_TMPDIR block, and profile mode empties CRED_JSON, so CRED_TMPDIR never
+# exists on a profile launch: every one left a 0700 dir in $TMPDIR holding a
+# 0600 copy of the profile's credentials. Each case launches with its own
+# TMPDIR and has the docker stub record the profile mount's source and its
+# files while the agent "runs", which proves the copy existed under that
+# TMPDIR with the credential in it. After the launch, the mount source must be
+# gone and no file under TMPDIR may hold the fixture credential, and the copy
+# must still have existed when cleanup() force-removed the agent container
+# (the container mounts it). Exits: clean, a failing agent run, SIGTERM during
+# the run, and the daemon supervisor's teardown. (5) is the reverse hazard:
+# cleanup() deleting what a caller's environment named.
+# $1 = CASE  $2 = the launch's expected rc. Prints the first unmet condition.
+_a6_profile_residue() {
+    local t="$_A6_DIR/$1/tmp" src left
+    [ "$_A6_RC" = "$2" ] || { echo "launch rc $_A6_RC, wanted $2"; return 0; }
+    grep -qF "using Anthropic profile 'default'" "$_A6_DIR/$1/out" || { echo "not a profile launch"; return 0; }
+    src="$(cat "$_A6_DIR/$1/runs/snap.src" 2>/dev/null || true)"
+    [ -n "$src" ] || { echo "no profile mount on the agent's docker run"; return 0; }
+    case "$src" in
+        "$t"/*) : ;;
+        *) echo "mount source $src is not under the launch's TMPDIR"; return 0 ;;
+    esac
+    grep -qxF ./credentials/default.json "$_A6_DIR/$1/runs/snap.files" 2>/dev/null \
+        || { echo "the copy held no credentials/default.json during the run"; return 0; }
+    # The container mounts the copy, so it must outlive the container.
+    [ "$(cat "$_A6_DIR/$1/runs/snap.at-rm" 2>/dev/null || true)" = present ] \
+        || { echo "the copy was not there when the agent container was force-removed (at-rm: $(cat "$_A6_DIR/$1/runs/snap.at-rm" 2>/dev/null || echo 'no rm -f seen'))"; return 0; }
+    if [ -e "$src" ]; then echo "$src still exists after the launch"; return 0; fi
+    left="$(grep -rlF fixture-profile-rt "$t" 2>/dev/null || true)"
+    [ -z "$left" ] || echo "a file under TMPDIR still holds the credential: $left"
+}
+_a6_profile_fixture() {   # $1 = CASE
+    mkdir -p "$_A6_DIR/$1/.config/anthropic/credentials" "$_A6_DIR/$1/tmp"
+    printf '{"access_token":"fixture-profile-at","refresh_token":"fixture-profile-rt"}\n' \
+        > "$_A6_DIR/$1/.config/anthropic/credentials/default.json"
+}
+_a6_profile_fixture profile-clean
+_a6_launch profile-clean SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-clean/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic
+_A6_WHY="$(_a6_profile_residue profile-clean 0)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(1)" profile-clean
+check "§226(1) a profile launch that exits cleanly leaves no copy of the profile's credentials in TMPDIR (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_profile_fixture profile-fail
+_a6_launch profile-fail SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-fail/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_RUN_RC=7
+_A6_WHY="$(_a6_profile_residue profile-fail 7)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(2)" profile-fail
+check "§226(2) a profile launch whose agent run fails (rc 7) leaves none either (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_profile_fixture profile-term
+_a6_launch profile-term SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-term/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_TERM_AT_RUN=1
+_A6_WHY="$(_a6_profile_residue profile-term 143)"
+[ -z "$_A6_WHY" ] || _a6_diag "§226(3)" profile-term
+check "§226(3) SIGTERM during the agent run (rc 143): none left either (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+# The daemon supervisor: `docker run -d`, then the watch loop; --stop is a
+# SIGTERM to the supervisor, delivered here from inside the detached run.
+_a6_profile_fixture profile-daemon
+_a6_launch profile-daemon SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile \
+    TMPDIR="$_A6_DIR/profile-daemon/tmp" A6_SNAP_DST=/home/sandy/.config/anthropic A6_TERM_AT_RUN=1 \
+    SANDY_DAEMON_SUPERVISOR=1 SANDY_DAEMON_LOG="$_A6_DIR/profile-daemon/daemon.log" \
+    -- --start --workspace "$_A6_DIR/profile-daemon/ws"
+_A6_WHY="$(_a6_profile_residue profile-daemon 143)"
+if [ -z "$_A6_WHY" ] && ! grep -qx -- -d "$(_a6_agent_args profile-daemon)"; then _A6_WHY="the agent run was not detached (-d): not the supervisor path"; fi
+[ -z "$_A6_WHY" ] || _a6_diag "§226(4)" profile-daemon
+check "§226(4) the daemon supervisor (detached run, stopped by SIGTERM) removes the copy at teardown, after the container (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+
+# (5) Every name cleanup() rm -rf's, kills or force-removes is cleared before
+# the trap is armed. Each is inherited here pointing at something precious,
+# and the launch fails at `network create`, after the trap is armed and before
+# any of them is assigned. The failure point is proven reached (the create was
+# called, no agent run happened) and cleanup() proven run (its network rm).
+_A6_V="$_A6_DIR/inherit/victims"
+mkdir -p "$_A6_V"
+_A6_VARS="CRED_TMPDIR PROFILE_TMPDIR GEMINI_CRED_TMPDIR CODEX_CRED_TMPDIR OPENCODE_CRED_TMPDIR SECRET_ENV_TMPDIR SSH_STAGE_TMPDIR"
+_A6_ENVS=()
+for _A6_N in $_A6_VARS; do
+    mkdir -p "$_A6_V/$_A6_N"; echo keep > "$_A6_V/$_A6_N/precious"
+    _A6_ENVS+=("$_A6_N=$_A6_V/$_A6_N")
+done
+sleep 120 &
+_A6_PID=$!
+_a6_launch inherit SANDY_AGENT=claude A6_NETFAIL=1 "${_A6_ENVS[@]}" \
+    CONTAINER_NAME=sandy-decoy-a6 SSH_RELAY_PID="$_A6_PID" CHANNEL_RELAY_PID="$_A6_PID"
+_A6_WHY=""
+[ "$_A6_RC" != 0 ] || _A6_WHY="launch rc 0: the network create failure did not stop it"
+grep -q '^docker network create' "$_A6_DIR/inherit/events.log" || _A6_WHY="${_A6_WHY:+$_A6_WHY; }never reached network create"
+grep -q '^docker network rm sandy_net_' "$_A6_DIR/inherit/events.log" || _A6_WHY="${_A6_WHY:+$_A6_WHY; }cleanup() did not run"
+[ -z "$(_a6_agent_args inherit)" ] || _A6_WHY="${_A6_WHY:+$_A6_WHY; }an agent run happened"
+for _A6_N in $_A6_VARS; do
+    [ -f "$_A6_V/$_A6_N/precious" ] || _A6_WHY="${_A6_WHY:+$_A6_WHY; }$_A6_N's target was deleted"
+done
+! grep -q 'sandy-decoy-a6' "$_A6_DIR/inherit/events.log" || _A6_WHY="${_A6_WHY:+$_A6_WHY; }the inherited CONTAINER_NAME was force-removed"
+kill -0 "$_A6_PID" 2>/dev/null || _A6_WHY="${_A6_WHY:+$_A6_WHY; }the inherited relay pid was killed"
+kill "$_A6_PID" 2>/dev/null || true
+wait "$_A6_PID" 2>/dev/null || true
+[ -z "$_A6_WHY" ] || _a6_diag "§226(5)" inherit
+check "§226(5) an exit between arming the trap and the credential setup leaves alone what the caller's environment names in cleanup()'s variables (got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+unset _A6_WHY _A6_V _A6_VARS _A6_ENVS _A6_N _A6_PID
+unset -f _a6_profile_residue _a6_profile_fixture
 
 rm -rf "$_A6_DIR"
 unset _A6_DIR _A6_SCRIPT _A6_RC
@@ -26845,7 +26953,405 @@ unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S2
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
 
 # ============================================================
-section "§226: the feature-entry window runs alongside the agent, and its verdict decides --start (B5)"
+section "§233: --update-sessions --rebuild rebuilds each shared image once, not once per session (B8 G5)"
+# ============================================================
+# A child's --rebuild only clears the build cache (_sandy_clear_build_cache):
+# the --build-only child exits after the agent phase, so it never builds a
+# skill pack or project image, and with the hashes gone the version probe is
+# skipped anyway. Passing it to every child made N sessions rebuild the shared
+# base image N times, each child clearing the hash the one before had just
+# written. The orchestrator now clears once. Three daemon sessions behind a
+# stub docker: A (claude), C (codex) and B (claude), refreshed in that order by
+# the REAL --update-sessions dispatcher and its REAL --build-only children.
+# The build log counts `docker build -t <image>` per image: --rebuild must
+# rebuild sandy-base once, sandy-claude-code once (A builds, B finds it fresh)
+# and sandy-codex once (a different agent still gets its own rebuild).
+_S233_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S233_D/bin" "$_S233_D/sh" "$_S233_D/wsA" "$_S233_D/wsB" "$_S233_D/wsC/.sandy"
+printf 'SANDY_AGENT=codex\n' > "$_S233_D/wsC/.sandy/config"
+cat > "$_S233_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        printf 'cidA|%s|%s|sandy-claude-code\n' "${S233_SESSA:-sessA}" "$S233_D/wsA"
+        printf 'cidC|sessC|%s|sandy-codex\n' "$S233_D/wsC"
+        printf 'cidB|sessB|%s|sandy-claude-code\n' "$S233_D/wsB"
+        exit 0 ;;
+    build)
+        _p=""
+        _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S233_D/builds.log"
+        if [ -n "${S233_FAILIMG:-}" ] && [ "$_t" = "$S233_FAILIMG" ]; then
+            [ -f "$S233_D/buildmsg" ] && cat "$S233_D/buildmsg" >&2
+            exit 17
+        fi
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ -n "$_f" ] && echo "sha256:current-$_n"
+        exit 0 ;;
+    inspect) exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+EOF
+cat > "$_S233_D/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in *deb.debian.org*|*registry.npmjs.org*) exit 0 ;; esac
+exit 1
+EOF
+chmod +x "$_S233_D/bin/docker" "$_S233_D/bin/curl"
+_sleep_stub "$_S233_D/bin" "$_S233_D/sleep.log" 0.05
+# _s233_run [sandy-args...]: one --update-sessions --dry-run; the build log
+# holds that run's builds only. Sets _S233_RC.
+_s233_run() {
+    : > "$_S233_D/builds.log"
+    _S233_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$SANDY_SCRIPT" --update-sessions --dry-run "$@" </dev/null >"$_S233_D/out" 2>&1
+    ) || _S233_RC=$?
+}
+_s233_count() { grep -cx "$1" "$_S233_D/builds.log" || true; }
+_s233_run
+_s233_run
+_S233_PRE="$_S233_RC/$(_s233_count sandy-base)/$(_s233_count sandy-claude-code)/$(_s233_count sandy-codex)"
+check "§233(pre) control: a primed fleet refresh without --rebuild refreshes all three sessions and builds nothing (rc/base/claude/codex: $_S233_PRE)" \
+    bash -c 'test "$1" = 0/0/0/0 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_PRE" "$_S233_D/out"
+_s233_run --rebuild
+_S233_R="$_S233_RC/$(_s233_count sandy-base)/$(_s233_count sandy-claude-code)/$(_s233_count sandy-codex)"
+check "§233(1) --update-sessions --rebuild over three sessions builds sandy-base exactly once, sandy-claude-code once (two sessions share it) and sandy-codex once (mutation: pass --rebuild to each child again -> 3/2/1; rc/base/claude/codex: $_S233_R)" \
+    bash -c 'test "$1" = 0/1/1/1 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_R" "$_S233_D/out"
+check "§233(2) ...and says the cache was cleared once, by the orchestrator" \
+    bash -c 'test "$(grep -c "Build cache cleared" "$1")" = 1' _ "$_S233_D/out"
+# (3) A failed optional claude rebuild in session A is recorded, so session B
+# (same image) is held back by it instead of repeating the build, and the
+# orchestrator's own output says so for both: the children succeed, so their
+# warnings would otherwise stay in the captured logs.
+rm -f "$_S233_D/sh/.build_hash"
+export S233_FAILIMG=sandy-claude-code
+_s233_run
+unset S233_FAILIMG
+_S233_R="$_S233_RC/$(_s233_count sandy-claude-code)"
+check "§233(3) a failed optional rebuild is built once across the fleet, and the plan output names the record for A and the skip for B (mutation: drop the orchestrator's note; rc/claude builds $_S233_R)" \
+    bash -c 'test "$1" = 0/1 && grep -q "sessA: Not retrying this build for 30 minutes" "$2" && grep -q "sessB: Skipping the agent image rebuild: The sandy-claude-code rebuild failed" "$2"' _ "$_S233_R" "$_S233_D/out"
+# (4) The note is sandy's own line, never the build's output, and nothing in
+# it is interpreted: the failing build prints a look-alike line (and one that
+# even starts with "[sandy]") carrying an escape sequence, and session A's
+# label carries a literal \033 that `echo -e` would turn into a real one.
+rm -f "$_S233_D/sh/.build_failed"
+printf 'npm ERR! Not retrying this build PWNED1\n[sandy]   Not retrying this build \\033]0;PWNED2\\007 now\n' > "$_S233_D/buildmsg"
+export S233_FAILIMG=sandy-claude-code
+export S233_SESSA='sessA\033[7m'
+_s233_run
+unset S233_FAILIMG S233_SESSA
+_S233_NOTE="$(grep -F 'Not retrying this build' "$_S233_D/out" || true)"
+_S233_ESC="$(printf '%s' "$_S233_NOTE" | LC_ALL=C tr -cd '\033' | wc -c | tr -d ' ')"
+check "§233(4) the orchestrator's note is the child's own sandy line, the last one, printed verbatim with no escape interpreted (mutation: unanchored first match, or echo -e; note: $(printf '%s' "$_S233_NOTE" | cat -v | tr '\n' '|'))" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep -c .)" = 1 && test "$2" = 0 && case "$1" in *"sessA\033[7m: Not retrying this build for 30 minutes; sandy --rebuild retries it now.") ;; *) exit 1 ;; esac && case "$1" in *PWNED*) exit 1 ;; esac' \
+    _ "$_S233_NOTE" "$_S233_ESC"
+rm -rf "$_S233_D"
+unset _S233_D _S233_RC _S233_PRE _S233_R _S233_NOTE _S233_ESC
+unset -f _s233_run _s233_count
+
+section "§234: a failed optional agent rebuild is not retried for 30 minutes; --rebuild, a new target or a missing image retries (B8 G7)"
+# ============================================================
+# The REAL launcher's --build-only (the agent phase runs before it exits)
+# behind a stub docker whose build of $S234_FAILIMG fails (exit 17) and whose
+# agent image is absent when S234_NOIMG=1. Installed agent versions come from
+# $S234_D/ver_<dir> (default 1.0.0) and published ones from latest_claude /
+# latest_codex, so the update checks run for real when SANDY_OFFLINE is off.
+# The 30 minutes are crossed by rewriting the epoch the record carries, never
+# by faking the clock or mtime.
+_S234_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S234_D/bin" "$_S234_D/sh" "$_S234_D/ws"
+cat > "$_S234_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    build)
+        _p=""; _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S234_D/builds.log"
+        [ -n "${S234_FAILIMG:-}" ] && [ "$_t" = "$S234_FAILIMG" ] && exit 17
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ "$_n" = sandy-claude-code ] && [ "${S234_NOIMG:-0}" = 1 ] && exit 1
+        [ -n "$_f" ] && echo "sha256:id-$_n"
+        exit 0 ;;
+    run)
+        _last=""; for _a in "$@"; do _last="$_a"; done
+        case "$*" in
+            *"--entrypoint cat "*)
+                _a="$(printf '%s' "$_last" | cut -d/ -f3)"
+                cat "$S234_D/ver_$_a" 2>/dev/null || echo 1.0.0
+                exit 0 ;;
+            *"--entrypoint test "*)
+                _a="$(printf '%s' "$_last" | cut -d/ -f3)"
+                [ -f "$S234_D/ver_$_a" ] && [ ! -s "$S234_D/ver_$_a" ] && exit 1
+                exit 0 ;;
+        esac
+        exit 0 ;;
+    network)
+        case "$*" in
+            *Subnet*) echo 172.30.0.0/16 ;;
+            *Gateway*) echo 172.30.0.1 ;;
+            *bridge.name*) echo br-s234 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+cat > "$_S234_D/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *registry.npmjs.org/@openai/codex/latest*)
+        [ -f "$S234_D/latest_codex" ] || exit 1
+        printf '{"version":"%s"}\n' "$(cat "$S234_D/latest_codex")"; exit 0 ;;
+    *claude-code-releases/latest*)
+        [ -f "$S234_D/latest_claude" ] || exit 1
+        cat "$S234_D/latest_claude"; exit 0 ;;
+    *deb.debian.org*|*registry.npmjs.org/) exit 0 ;;
+esac
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$_S234_D/bin/gh"
+printf '#!/bin/sh\nexit 0\n' > "$_S234_D/bin/sudo"
+printf '#!/bin/sh\nexit 44\n' > "$_S234_D/bin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S234_D/bin/uname"
+chmod +x "$_S234_D/bin/docker" "$_S234_D/bin/curl" "$_S234_D/bin/gh" "$_S234_D/bin/sudo" "$_S234_D/bin/security" "$_S234_D/bin/uname"
+_S234_REC="$_S234_D/sh/.build_failed"
+_S234_IMG=sandy-claude-code
+# _s234_run [VAR=value ...] [-- sandy-args ...]: one launch (default
+# --build-only as claude, offline); sets _S234_RC and _S234_AG (builds of
+# $_S234_IMG).
+_s234_run() {
+    local envs args
+    envs=(SANDY_AGENT=claude SANDY_OFFLINE=1); args=(--build-only)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
+    : > "$_S234_D/builds.log"
+    _S234_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$_S234_D/ws" && env PATH="$_S234_D/bin:$PATH" HOME="$_S234_D" SANDY_HOME="$_S234_D/sh" S234_D="$_S234_D" \
+            SANDY_EGRESS=off "${envs[@]}" bash "$SANDY_SCRIPT" "${args[@]}" </dev/null >"$_S234_D/out" 2>&1
+    ) || _S234_RC=$?
+    _S234_AG="$(grep -cx "$_S234_IMG" "$_S234_D/builds.log" || true)"
+}
+# _s234_age SECONDS: move the record's epoch that far into the past (a
+# missing record stays missing, and the check that needed it fails).
+_s234_age() {
+    local e rest
+    read -r e rest < "$_S234_REC" 2>/dev/null || return 0
+    printf '%s %s\n' "$((e - $1))" "$rest" > "$_S234_REC"
+}
+# _s234_fail: a fresh failure record for the solo claude image.
+_s234_fail() {
+    rm -f "$_S234_D/sh/.build_hash"
+    _s234_run S234_FAILIMG=sandy-claude-code
+}
+_s234_run
+_S234_P="$_S234_RC/$_S234_AG"
+_s234_fail
+_S234_F="$_S234_RC/$_S234_AG"
+# The record's shape: <epoch> <exit> <image> <hash> <target>, nothing more.
+_S234_SHAPE="unread"
+if read -r _f1 _f2 _f3 _f4 _f5 _f6 < "$_S234_REC"; then
+    case "$_f1" in ''|*[!0-9]*) _S234_SHAPE="epoch $_f1" ;; *) _S234_SHAPE="$_f2 $_f3 ${_f4:+hash} $_f5${_f6:+ extra}" ;; esac
+fi
+unset _f1 _f2 _f3 _f4 _f5 _f6
+check "§234(pre) control: a primed home builds the agent; with its hash gone a failing rebuild is attempted, the launch continues on the existing image (rc 0), and the failure is recorded as <epoch> <exit> <image> <hash> <target> (prime rc/agent builds $_S234_P, failing $_S234_F, record: $_S234_SHAPE)" \
+    bash -c 'test "$1" = 0/1 && test "$2" = 0/1 && test "$4" = "17 sandy-claude-code hash -" && grep -q "Agent image rebuild failed (docker build exit 17)" "$3" && grep -q "Not retrying this build for 30 minutes" "$3"' \
+    _ "$_S234_P" "$_S234_F" "$_S234_D/out" "$_S234_SHAPE"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(1) the next launch within 30 minutes does not build the agent, continues (rc 0), and its warning names the failure, the retry time and sandy --rebuild (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/0 && grep -qF "Skipping the agent image rebuild: The sandy-claude-code rebuild failed 0 min ago (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3"' \
+    _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_age 1801
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(2) after 30 minutes the build is retried (mutation: drop the TTL comparison -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_run S234_FAILIMG=sandy-claude-code -- --build-only --rebuild
+check "§234(3) --rebuild retries at once despite a fresh record (mutation: --rebuild no longer clears the records -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_S234_H=""; _e=0; _x=""; _i=""; _t=""
+read -r _e _x _i _S234_H _t < "$_S234_REC" 2>/dev/null || true
+printf '%s %s %s other-hash %s\n' "$_e" "$_x" "$_i" "$_t" > "$_S234_REC"
+_s234_run S234_FAILIMG=sandy-claude-code
+_S234_H2=""
+read -r _e _x _i _S234_H2 _t < "$_S234_REC" 2>/dev/null || true
+unset _e _x _i _t
+check "§234(4) a fresh record for a different target (other build inputs) does not hold this build back, and the new failure replaces it (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && test -n "$3" && test "$3" = "$4"' _ "$_S234_RC" "$_S234_AG" "$_S234_H" "$_S234_H2"
+_s234_run S234_FAILIMG=sandy-claude-code S234_NOIMG=1
+check "§234(5) a REQUIRED build (no agent image to fall back to) is attempted despite a fresh record, and its failure fails the launch (mutation: consult the record without the image check -> no build, rc 0; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 1/1 && grep -q "no previous image exists" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_age 1801
+_s234_run
+check "§234(6) a successful rebuild deletes the record (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && test ! -e "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_REC"
+
+# (7) A leading-zero epoch would be octal to $(( )): an 8 or 9 in it aborted
+# the build step silently. Fresh or backdated, it is ignored with a warning
+# and the build runs.
+for _S234_LZ in 0 1801; do
+    _s234_fail
+    _rest=""; read -r _e _rest < "$_S234_REC" 2>/dev/null || true
+    printf '0%s %s\n' "$(($(date +%s) - _S234_LZ))" "$_rest" > "$_S234_REC"
+    _s234_run S234_FAILIMG=sandy-claude-code
+    check "§234(7) a record whose epoch has a leading zero (backdated ${_S234_LZ}s) is ignored with a warning and the build is retried (mutation: accept a leading zero; rc/agent builds $_S234_RC/$_S234_AG)" \
+        bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+done
+unset _e _rest _S234_LZ
+
+# (8) A link planted at the record path is replaced, never written through:
+# the record lands at the path itself, nothing appears in the link's target,
+# and the next launch is held back by it.
+mkdir -p "$_S234_D/elsewhere"
+rm -f "$_S234_REC"; ln -s "$_S234_D/elsewhere" "$_S234_REC"
+_s234_fail
+_S234_R8="$_S234_RC/$_S234_AG"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(8) a link to a directory at the record path is removed, not followed: the record is a plain file at the path, the directory stays empty, and the next launch is held back (mutation: mv through the link; failing rc/builds $_S234_R8, next $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = 0/1 && test "$2/$3" = 0/0 && test -f "$4" && test ! -L "$4" && test -z "$(ls -A "$5")"' \
+    _ "$_S234_R8" "$_S234_RC" "$_S234_AG" "$_S234_REC" "$_S234_D/elsewhere"
+
+# (9) A real directory at the record path cannot hold a record: the failure
+# says so (no false "not retrying"), the next launch retries, and --rebuild
+# leaves the directory alone with a warning instead of failing under set -e.
+rm -f "$_S234_REC"; mkdir "$_S234_REC"
+_s234_fail
+_S234_R9="$_S234_RC/$_S234_AG"
+check "§234(9) a directory at the record path: the failure is reported as not recorded, never as held back (rc/agent builds $_S234_R9)" \
+    bash -c 'test "$1" = 0/1 && grep -q "Could not record the failure: .* is not a file" "$2" && ! grep -q "Not retrying this build" "$2"' _ "$_S234_R9" "$_S234_D/out"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(10) ...and the next launch retries the build, saying why (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && grep -q "is not a plain file. Retrying" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_run -- --build-only --rebuild
+check "§234(11) --rebuild with a directory matching the records still succeeds, leaving it with a warning (mutation: rm -f the glob -> rc 1; rc $_S234_RC)" \
+    bash -c 'test "$1" = 0 && test -d "$2" && grep -q "Leaving .* alone: it is not a file" "$3"' _ "$_S234_RC" "$_S234_REC" "$_S234_D/out"
+rm -rf "$_S234_REC"
+
+# (12) Session end, on a real (-p) launch whose rebuild failed and was
+# recorded: the closing line names the 30-minute retry, never "the next
+# launch".
+rm -f "$_S234_D/sh/.build_hash"
+_s234_run S234_FAILIMG=sandy-claude-code ANTHROPIC_API_KEY=sk-fixture-s234 -- -p fixture
+check "§234(12) a recorded failure's session-end notice gives the 30-minute retry and not 'rebuilds on the next launch' (mutation: set the generic deferred flag anyway; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$2" = 1 && grep -qF "You ran on the existing image. The sandy-claude-code rebuild failed (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3" && ! grep -q "rebuilds on the next launch" "$3"' \
+    _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+
+# (14) An agent that reports no version makes its image unusable: that
+# failure is never recorded, so the next launch retries it.
+rm -f "$_S234_REC"
+: > "$_S234_D/ver_claude-code"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+_S234_B1="$_S234_RC/$_S234_AG"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+check "§234(14) a failed rebuild of an image whose agent reports no version is never recorded, and the next launch retries it (mutation: record it, or never set the broken flag; rc/agent builds $_S234_B1 then $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = 0/1 && test "$2/$3" = 0/1 && test ! -e "$4" && grep -q "reports no version, so the next launch retries the build" "$5"' \
+    _ "$_S234_B1" "$_S234_RC" "$_S234_AG" "$_S234_REC" "$_S234_D/out"
+rm -f "$_S234_D/ver_claude-code"
+
+# (15) After a failure its INPUTS triggered (target "-"), a claude release
+# appearing within the 30 minutes changes the key: the update check runs even
+# though the build is already forced.
+rm -f "$_S234_REC" "$_S234_D/latest_claude"
+_s234_fail
+_S234_T15="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+printf '2.0.0\n' > "$_S234_D/latest_claude"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+_S234_T15b="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+check "§234(15) an inputs-triggered failure (target $_S234_T15) does not hold back a claude release that appears within 30 minutes: it is built, and the record names it (mutation: skip the checks when the build is already forced; rc/agent builds $_S234_RC/$_S234_AG, target now $_S234_T15b)" \
+    bash -c 'test "$1" = - && test "$2/$3" = 0/1 && test "$4" = claude@2.0.0' _ "$_S234_T15" "$_S234_RC" "$_S234_AG" "$_S234_T15b"
+rm -f "$_S234_D/latest_claude"
+
+# (16) An epoch too long for shell integers is unreadable, not an error.
+read -r _e _rest < "$_S234_REC" 2>/dev/null || _rest=""
+printf '12345678901234567890 %s\n' "$_rest" > "$_S234_REC"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+check "§234(16) a 20-digit epoch is ignored with the unreadable-record warning, with no shell error, and the build is retried (mutation: no length bound; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3" && ! grep -q "integer expression" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+unset _e _rest
+
+# (17) A base image rebuilt in this launch is never held back by a fresh
+# record: the agent image would otherwise stay on the old base. The record's
+# key (image, build hash, target) still matches, so only the base rebuild can
+# let the build through.
+_s234_fail
+_S234_K17="$(cut -d' ' -f3- "$_S234_REC" 2>/dev/null || true)"
+_S234_K17s="$(awk '{ print $3, substr($4, 1, 8), $5 }' "$_S234_REC" 2>/dev/null || true)"
+rm -f "$_S234_D/sh/.base_build_hash"
+_s234_run
+_S234_B17="$(grep -cx sandy-base "$_S234_D/builds.log" || true)"
+check "§234(17) a fresh record does not hold back the agent rebuild when the base was rebuilt in the same launch: base and agent are built, and the record is gone (mutation: drop the BASE_REBUILT guard -> agent held back; rc/base/agent builds $_S234_RC/$_S234_B17/$_S234_AG, record key $_S234_K17s)" \
+    bash -c 'test -n "$5" && test "$1/$2/$3" = 0/1/1 && test ! -e "$4" && ! grep -q "Skipping the agent image rebuild" "$6"' \
+    _ "$_S234_RC" "$_S234_B17" "$_S234_AG" "$_S234_REC" "$_S234_K17" "$_S234_D/out"
+
+# (18) An agent build that the base rebuild forced, and that failed, is held
+# back and then retried. BUILD_HASH does not cover the base, so the build hash
+# left from before still matches: unless the failure drops it, every later
+# launch reports the image up to date and never rebuilds it on the new base.
+# Starts from (17): a current .build_hash and no record.
+_S234_H18="absent"; [ -f "$_S234_D/sh/.build_hash" ] && _S234_H18="present"
+rm -f "$_S234_D/sh/.base_build_hash"
+_s234_run S234_FAILIMG=sandy-claude-code
+_S234_F18="$_S234_RC/$(grep -cx sandy-base "$_S234_D/builds.log" || true)/$_S234_AG"
+_S234_K18="$(cut -d' ' -f3 "$_S234_REC" 2>/dev/null || true)"
+_s234_run
+_S234_N18="$_S234_RC/$_S234_AG"
+_S234_S18=no; grep -q "Skipping the agent image rebuild" "$_S234_D/out" && _S234_S18=yes
+_S234_U18=no; grep -q "Sandbox image up to date" "$_S234_D/out" && _S234_U18=yes
+_s234_age 1860
+_s234_run
+check "§234(18) a base-triggered agent build that fails is held back on the next launch and built once after 30 minutes (mutation: keep the build hash on failure -> 'up to date' forever; hash before $_S234_H18, failing rc/base/agent $_S234_F18, record image $_S234_K18, next rc/agent $_S234_N18 held $_S234_S18 up-to-date $_S234_U18, after 31 min $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = present && test "$2" = 0/1/1 && test "$3" = sandy-claude-code && test "$4" = 0/0 && test "$5/$6" = yes/no && test "$7/$8" = 0/1' \
+    _ "$_S234_H18" "$_S234_F18" "$_S234_K18" "$_S234_N18" "$_S234_S18" "$_S234_U18" "$_S234_RC" "$_S234_AG"
+
+# (13) A combo's target names every agent with a newer release, so a second
+# agent's release is not held back by a record made for the first.
+rm -rf "$_S234_D/sh"; mkdir -p "$_S234_D/sh"
+rm -f "$_S234_D/latest_claude" "$_S234_D/latest_codex"
+_S234_IMG=sandy-full
+_S234_REC="$_S234_D/sh/.build_failed_full"
+_S234_CB=(SANDY_AGENT=claude,codex SANDY_OFFLINE=0)
+_s234_run "${_S234_CB[@]}"
+_S234_C0="$_S234_RC/$_S234_AG"
+printf '2.0.0\n' > "$_S234_D/latest_claude"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C1="$_S234_RC/$_S234_AG"
+_S234_T1="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C2="$_S234_RC/$_S234_AG"
+printf '3.0.0\n' > "$_S234_D/latest_codex"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C3="$_S234_RC/$_S234_AG"
+_S234_T3="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+check "§234(13) claude,codex: a failed rebuild for claude 2.0.0 is held back on the next launch, but codex 3.0.0 appearing retries it, and the record names both (mutation: stop the checks at the first update -> held back; builds prime/fail/same/codex $_S234_C0 $_S234_C1 $_S234_C2 $_S234_C3, targets $_S234_T1 / $_S234_T3)" \
+    bash -c 'test "$1 $2 $3 $4" = "0/1 0/1 0/0 0/1" && test "$5" = "claude@2.0.0" && test "$6" = "claude@2.0.0,codex@3.0.0"' \
+    _ "$_S234_C0" "$_S234_C1" "$_S234_C2" "$_S234_C3" "$_S234_T1" "$_S234_T3"
+rm -rf "$_S234_D"
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b _S234_K17 _S234_K17s _S234_B17 _S234_H18 _S234_F18 _S234_K18 _S234_N18 _S234_S18 _S234_U18
+unset -f _s234_run _s234_age _s234_fail
+
+# ============================================================
+section "§235: the feature-entry window runs alongside the agent, and its verdict decides --start (B5)"
 # ============================================================
 # B5 moved the 5s entry startup window from before the first pane to after
 # it. A verdict file carries the result: `pending` before the first
@@ -26855,23 +27361,23 @@ section "§226: the feature-entry window runs alongside the agent, and its verdi
 # supervisor poll) against stub tmux and docker executables on PATH. No real
 # tmux or docker is ever run, and no pane is a real tmux pane: a "pane" is a
 # python process in its own process group, as a tmux pane is.
-_S226_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
-_S226_TMPL="$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
-mkdir -p "$_S226_D/bin"
-awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S226_TMPL" > "$_S226_D/entries.sh"
-sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S226_TMPL" >> "$_S226_D/entries.sh"
-awk '/^cd "\$WORKSPACE"$/{f=1} f' "$_S226_TMPL" > "$_S226_D/tail.sh"
-sed -n '/^# BEGIN entry window host$/,/^# END entry window host$/p' "$SANDY_SCRIPT" > "$_S226_D/host.sh"
-awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S226_D/host.sh"
+_S235_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S235_TMPL="$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
+mkdir -p "$_S235_D/bin"
+awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S235_TMPL" > "$_S235_D/entries.sh"
+sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S235_TMPL" >> "$_S235_D/entries.sh"
+awk '/^cd "\$WORKSPACE"$/{f=1} f' "$_S235_TMPL" > "$_S235_D/tail.sh"
+sed -n '/^# BEGIN entry window host$/,/^# END entry window host$/p' "$SANDY_SCRIPT" > "$_S235_D/host.sh"
+awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S235_D/host.sh"
 # The REAL info/error (echo -e): a verdict message must never pass through them.
-grep -E '^(info|error)\(\) \{' "$SANDY_SCRIPT" >> "$_S226_D/host.sh"
+grep -E '^(info|error)\(\) \{' "$SANDY_SCRIPT" >> "$_S235_D/host.sh"
 # A forged verdict: literal backslash-033 text (inert unless something runs it
 # through echo -e) and real ESC/BEL bytes (inert only if stripped).
-_S226_FORGED="$(printf 'failed\tsandy-entry w\t3\tforged \\033]52;c;ZQ==\\007 \033]52;c;ZQ==\007 \033[2J \302\2332J \302\23552;c;ZQ==\007 end')"
+_S235_FORGED="$(printf 'failed\tsandy-entry w\t3\tforged \\033]52;c;ZQ==\\007 \033]52;c;ZQ==\007 \033[2J \302\2332J \302\23552;c;ZQ==\007 end')"
 # nocontrol.py FILE [STRIP...]: no ESC or BEL byte in FILE once each STRIP
 # literal (sandy's own colour codes) has been removed.
-_S226_NC="$_S226_D/nocontrol.py"
-cat > "$_S226_NC" <<'PY'
+_S235_NC="$_S235_D/nocontrol.py"
+cat > "$_S235_NC" <<'PY'
 import sys
 data = open(sys.argv[1], "rb").read()
 for literal in sys.argv[2:]:
@@ -26888,18 +27394,18 @@ if b"forged" not in data:
 PY
 # The supervisor tail of the launch: everything after the agent's docker run
 # (and its tty restore), to the script's last line.
-awk 'index($0,"docker run \"${RUN_FLAGS[@]}\" \"$IMAGE_NAME\" \"$@\" || _run_rc=$?")==1{f=1;next} f&&index($0,"_sandy_tty_restore"){next} f' "$SANDY_SCRIPT" > "$_S226_D/suptail.sh"
-check "§226(pre) the entry-window block, the launch tail, the host probe block and the supervisor tail were all extracted (mutation: a renamed marker empties one and its checks below go vacuous)" \
+awk 'index($0,"docker run \"${RUN_FLAGS[@]}\" \"$IMAGE_NAME\" \"$@\" || _run_rc=$?")==1{f=1;next} f&&index($0,"_sandy_tty_restore"){next} f' "$SANDY_SCRIPT" > "$_S235_D/suptail.sh"
+check "§235(pre) the entry-window block, the launch tail, the host probe block and the supervisor tail were all extracted (mutation: a renamed marker empties one and its checks below go vacuous)" \
     bash -c 'grep -q "^_sandy_entry_window() {" "$1" && grep -q "^_sandy_hold_session() {" "$1" && grep -q "^_sandy_ew_begin() {" "$1" \
         && grep -q "_sandy_hold_session" "$2" && grep -q "^_sandy_ew_supervise() {" "$3" && grep -q "^_sandy_daemon_fatal() {" "$3" \
         && grep -q "_sandy_ew_supervise" "$4" && grep -q "_sandy_session_gone" "$4"' \
-    _ "$_S226_D/entries.sh" "$_S226_D/tail.sh" "$_S226_D/host.sh" "$_S226_D/suptail.sh"
+    _ "$_S235_D/entries.sh" "$_S235_D/tail.sh" "$_S235_D/host.sh" "$_S235_D/suptail.sh"
 
 # Stub tmux. Every call it sees is appended to $S226_LOG, with the verdict's
 # first field at that moment. list-panes prints $S226_PANES. attach returns at
 # once, or (S226_ATTACH_PID set) once that pane process has exited, which is
 # when a real attach returns: the last pane closing ends the session.
-cat > "$_S226_D/bin/tmux" <<'S226TMUX'
+cat > "$_S235_D/bin/tmux" <<'S226TMUX'
 #!/bin/sh
 v="$(head -n 1 "$HOME/.sandy-entry-window" 2>/dev/null | cut -f1)"
 case "$1" in
@@ -26917,7 +27423,7 @@ case "$1" in
 esac
 exit 0
 S226TMUX
-cat > "$_S226_D/bin/tail" <<'S226TAIL'
+cat > "$_S235_D/bin/tail" <<'S226TAIL'
 #!/bin/sh
 printf 'exec tail\n' >> "$S226_LOG"
 exit 0
@@ -26925,7 +27431,7 @@ S226TAIL
 # A pane: its own process group (a tmux pane is a session leader), logs the
 # TERM it gets, takes $3 seconds to exit, and is never this shell's child
 # (started through a subshell that exits), so init reaps it as tmux would.
-cat > "$_S226_D/pane.py" <<'S226PANE'
+cat > "$_S235_D/pane.py" <<'S226PANE'
 import os, signal, sys, time
 os.setpgid(0, 0)
 log, ready, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
@@ -26946,24 +27452,24 @@ os.rename(ready + ".tmp", ready)
 time.sleep(30)
 os._exit(0)
 S226PANE
-chmod +x "$_S226_D/bin/tmux" "$_S226_D/bin/tail"
+chmod +x "$_S235_D/bin/tmux" "$_S235_D/bin/tail"
 
-# _s226_kill_tree <pid>: as §123's -- stop each level before listing its
+# _s235_kill_tree <pid>: as §123's -- stop each level before listing its
 # children, so a supervisor loop cannot respawn its entry in between.
-_s226_kill_tree() {
+_s235_kill_tree() {
     local _p="$1" _c
     kill -STOP "$_p" 2>/dev/null || return 0
-    for _c in $(pgrep -P "$_p" 2>/dev/null || true); do _s226_kill_tree "$_c"; done
+    for _c in $(pgrep -P "$_p" 2>/dev/null || true); do _s235_kill_tree "$_c"; done
     kill -KILL "$_p" 2>/dev/null || true
 }
-# _s226_case <name> <entry body or ""> <script>: run <script> in a fresh
+# _s235_case <name> <entry body or ""> <script>: run <script> in a fresh
 # fixture (HOME=$h, one entry "w" when a body is given) with the extracted
 # entry functions sourced, stub tmux/tail first on PATH, and the launch's
 # own ERR trap shape removed (the window is called the way user-setup calls
 # it). stdout -> $h/out, stderr -> $h/err, status -> $h/rc. Every supervisor
 # loop it forks is recorded (the disown shim, as §123) and killed after.
-_s226_case() {
-    local h="$_S226_D/$1" body="$2" script="$3" rc=0 _p
+_s235_case() {
+    local h="$_S235_D/$1" body="$2" script="$3" rc=0 _p
     rm -rf "$h"; mkdir -p "$h/ws" "$h/fs/w"
     : > "$h/log"; : > "$h/panes"; : > "$h/loops"
     if [ -n "$body" ]; then printf '%s\n' "$body" > "$h/r.sh"; chmod +x "$h/r.sh"; fi
@@ -26971,93 +27477,93 @@ _s226_case() {
         trap - ERR
         set +e
         unset SANDY_DAEMON SANDY_FEATURE_ENTRIES SANDY_CLAUDE_SESSIONS_ACTIVE SANDY_REMOTE_CONTROL SANDY_HANDOFF_RELAY SANDY_RELAY_STATE SANDY_VERBOSE
-        export HOME="$h" PATH="$_S226_D/bin:$PATH" S226_LOG="$h/log" S226_PANES="$h/panes"
+        export HOME="$h" PATH="$_S235_D/bin:$PATH" S226_LOG="$h/log" S226_PANES="$h/panes"
         WORKSPACE="$h/ws"; SANDY_FEATURE_STATE_ROOT="$h/fs"
         [ -n "$body" ] && SANDY_FEATURE_ENTRIES="w=$h/r.sh"
         sandy_log() { :; }
         sandy_err() { printf '[sandy] ERROR: %s\n' "$*" >&2; }
-        . "$_S226_D/entries.sh"
+        . "$_S235_D/entries.sh"
         disown() { printf '%s\n' "${!:-}" >> "$h/loops"; builtin disown "$@"; }
         eval "$script"
     ) >"$h/out" 2>"$h/err" </dev/null || rc=$?
     echo "$rc" > "$h/rc"
-    while IFS= read -r _p; do [ -n "$_p" ] && _s226_kill_tree "$_p"; done < "$h/loops"
+    while IFS= read -r _p; do [ -n "$_p" ] && _s235_kill_tree "$_p"; done < "$h/loops"
     if [ -s "$h/pane.pid" ]; then kill -KILL "$(cat "$h/pane.pid")" 2>/dev/null || true; fi
     return 0
 }
 # A pane started the way tmux starts one, recorded for the stub list-panes.
-_S226_PANE='( python3 "$_S226_D/pane.py" "$S226_LOG" "$HOME/pane.ready" "${S226_PANE_DELAY:-0}" & )
+_S235_PANE='( python3 "$_S235_D/pane.py" "$S226_LOG" "$HOME/pane.ready" "${S226_PANE_DELAY:-0}" & )
 _i=0; while [ ! -s "$HOME/pane.ready" ] && [ "$_i" -lt 50 ]; do sleep 0.1; _i=$((_i + 1)); done
 cat "$HOME/pane.ready" > "$HOME/pane.pid"; cat "$HOME/pane.ready" > "$S226_PANES"'
 
 # The launch tail, run the way user-setup runs it (set -e), single agent.
-_S226_TAILRUN='_sandy_is_headless=false; _SANDY_IS_MULTI=false; _SANDY_AGENTS=(claude); SANDY_AGENT=claude
+_S235_TAILRUN='_sandy_is_headless=false; _SANDY_IS_MULTI=false; _SANDY_AGENTS=(claude); SANDY_AGENT=claude
 _sandy_build_agent_cmd() { echo fakeagent; }
 set -e
-. "$_S226_D/tail.sh"'
+. "$_S235_D/tail.sh"'
 if command -v flock >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
     # --- W1: teardown order -------------------------------------------------
-    _s226_case w1 '#!/bin/sh
-exit 3' "S226_PANE_DELAY=1; $_S226_PANE"'
+    _s235_case w1 '#!/bin/sh
+exit 3' "S226_PANE_DELAY=1; $_S235_PANE"'
 _sandy_start_entries; _sandy_ew_begin
 _sandy_entry_window; echo "window=$?"'
-    check "§226(W1a) a failing entry: the pane's process group gets TERM (not KILL), the teardown waits for it to exit, THEN kill-server, and only then is the verdict failed (mutations: SIGKILL, no wait, no kill-server, failed written first)" \
+    check "§235(W1a) a failing entry: the pane's process group gets TERM (not KILL), the teardown waits for it to exit, THEN kill-server, and only then is the verdict failed (mutations: SIGKILL, no wait, no kill-server, failed written first)" \
         bash -c '
             grep -qx "window=1" "$1/out" || { echo "window rc: $(cat "$1/out")"; exit 1; }
             t=$(grep -n -m1 "^pane TERM$" "$1/log" | cut -d: -f1)
             x=$(grep -n -m1 "^pane exit$" "$1/log" | cut -d: -f1)
             k=$(grep -n -m1 "^kill-server verdict=pending$" "$1/log" | cut -d: -f1)
             cat "$1/log"
-            [ -n "$t" ] && [ -n "$x" ] && [ -n "$k" ] && [ "$t" -lt "$x" ] && [ "$x" -lt "$k" ]' _ "$_S226_D/w1"
-    check "§226(W1b) ...and the verdict, written last, is failed<TAB>sandy-entry w<TAB>3<TAB><message naming the entry and its log>" \
-        bash -c 'IFS="	" read -r a b c d < "$1/.sandy-entry-window"; [ "$a" = failed ] && [ "$b" = "sandy-entry w" ] && [ "$c" = 3 ] && printf "%s" "$d" | grep -q "sandy-entry w exited 3 within 5s of starting.*supervisor.log"' _ "$_S226_D/w1"
+            [ -n "$t" ] && [ -n "$x" ] && [ -n "$k" ] && [ "$t" -lt "$x" ] && [ "$x" -lt "$k" ]' _ "$_S235_D/w1"
+    check "§235(W1b) ...and the verdict, written last, is failed<TAB>sandy-entry w<TAB>3<TAB><message naming the entry and its log>" \
+        bash -c 'IFS="	" read -r a b c d < "$1/.sandy-entry-window"; [ "$a" = failed ] && [ "$b" = "sandy-entry w" ] && [ "$c" = 3 ] && printf "%s" "$d" | grep -q "sandy-entry w exited 3 within 5s of starting.*supervisor.log"' _ "$_S235_D/w1"
 
     # --- W2: a long-running entry -------------------------------------------
-    _s226_case w2 '#!/bin/sh
+    _s235_case w2 '#!/bin/sh
 exec sleep 30' '_sandy_start_entries; _sandy_ew_begin
 _sandy_entry_window & _wp=$!
 sleep 1; _s1="$(_sandy_ew_state)"
 sleep 3.3; _s4="$(_sandy_ew_state)"
 wait "$_wp"; _rw=$?
 echo "$_s1 $_s4 $(_sandy_ew_state) $_rw"'
-    check "§226(W2) a long-running entry: pending at 1s and still pending at 4.3s, then passed with status 0 once the 5s window ends (mutation: passed written at the start)" \
-        bash -c '[ "$(cat "$1/out")" = "pending pending passed 0" ] || { cat "$1/out" "$1/err"; exit 1; }' _ "$_S226_D/w2"
+    check "§235(W2) a long-running entry: pending at 1s and still pending at 4.3s, then passed with status 0 once the 5s window ends (mutation: passed written at the start)" \
+        bash -c '[ "$(cat "$1/out")" = "pending pending passed 0" ] || { cat "$1/out" "$1/err"; exit 1; }' _ "$_S235_D/w2"
 
     # --- W3: a one-shot entry -----------------------------------------------
-    _s226_case w3 '#!/bin/sh
+    _s235_case w3 '#!/bin/sh
 exit 0' '_sandy_start_entries; _sandy_ew_begin
 _sandy_entry_window; echo "window=$? $(_sandy_ew_state)"'
-    check "§226(W3) an entry that exits 0 inside the window is settled: passed, status 0, and no teardown (mutation: rc=0 treated as a failure)" \
-        bash -c '[ "$(cat "$1/out")" = "window=0 passed" ] && ! grep -q kill-server "$1/log"' _ "$_S226_D/w3"
+    check "§235(W3) an entry that exits 0 inside the window is settled: passed, status 0, and no teardown (mutation: rc=0 treated as a failure)" \
+        bash -c '[ "$(cat "$1/out")" = "window=0 passed" ] && ! grep -q kill-server "$1/log"' _ "$_S235_D/w3"
 
     # --- W7: the interactive hold -------------------------------------------
     # (a) the entry fails while attached. The stub attach returns when the
     # pane exits, which is during the teardown, before `failed` exists: the
     # hold must wait for the watcher, not kill it.
-    _s226_case w7a '#!/bin/sh
-sleep 0.5; exit 3' "$_S226_PANE"'
+    _s235_case w7a '#!/bin/sh
+sleep 0.5; exit 3' "$_S235_PANE"'
 export S226_ATTACH_PID="$(cat "$HOME/pane.pid")"
 _sandy_start_entries; _sandy_ew_begin
 _sandy_hold_session; echo "hold returned $?"'
-    check "§226(W7a) interactive: the entry fails while tmux is attached -> the hold exits 1 after attach returns, with the message on stderr exactly once, and the verdict is failed (mutations: the hold ignores the verdict; the watcher dies on the hold's TERM mid-teardown)" \
+    check "§235(W7a) interactive: the entry fails while tmux is attached -> the hold exits 1 after attach returns, with the message on stderr exactly once, and the verdict is failed (mutations: the hold ignores the verdict; the watcher dies on the hold's TERM mid-teardown)" \
         bash -c '
             [ "$(cat "$1/rc")" = 1 ] || { echo "rc=$(cat "$1/rc")"; cat "$1/out" "$1/err" "$1/log"; exit 1; }
             ! grep -q "hold returned" "$1/out" || exit 1
             [ "$(grep -c "sandy-entry w exited 3 within 5s of starting" "$1/err")" = 1 ] || { cat "$1/err"; exit 1; }
             head -n 1 "$1/.sandy-entry-window" | cut -f1 | grep -qx failed
-            grep -q "^attach verdict=pending$" "$1/log"' _ "$_S226_D/w7a"
+            grep -q "^attach verdict=pending$" "$1/log"' _ "$_S235_D/w7a"
     # (b) the user detaches (or the agent exits) while the window is still
     # pending: attach's own status comes back, at once, and the watcher is
     # gone. "Gone" is measured by a lock only it could still hold: fd 8 is
     # opened and locked just before the hold, so the watcher inherits it.
-    _s226_case w7b '#!/bin/sh
+    _s235_case w7b '#!/bin/sh
 exec sleep 30' '_sandy_start_entries; _sandy_ew_begin
 export S226_ATTACH_RC=3
 exec 8>"$HOME/watcher.lock"; flock 8
 _t0=$(date +%s)
 _sandy_hold_session; _r=$?
 echo "rc=$_r elapsed=$(( $(date +%s) - _t0 )) state=$(_sandy_ew_state)"'
-    check "§226(W7b) interactive: detach while pending -> the hold returns attach's own status (3) within 2s, the verdict is still pending, and no watcher outlives it (its inherited lock comes free; mutation: the watcher is left running)" \
+    check "§235(W7b) interactive: detach while pending -> the hold returns attach's own status (3) within 2s, the verdict is still pending, and no watcher outlives it (its inherited lock comes free; mutation: the watcher is left running)" \
         bash -c '
             o="$(cat "$1/out")"
             case "$o" in "rc=3 elapsed="[012]" state=pending") ;; *) echo "got: $o"; cat "$1/err"; exit 1 ;; esac
@@ -27065,92 +27571,92 @@ echo "rc=$_r elapsed=$(( $(date +%s) - _t0 )) state=$(_sandy_ew_state)"'
             until flock -n "$1/watcher.lock" true; do
                 [ "$i" -lt 10 ] || { echo "watcher lock still held 1s after the hold returned"; exit 1; }
                 sleep 0.1; i=$((i + 1))
-            done' _ "$_S226_D/w7b"
+            done' _ "$_S235_D/w7b"
     # --- W1c: the 3s grace bound ------------------------------------------
-    _s226_case w1c '' "S226_PANE_DELAY=-1; $_S226_PANE"'
+    _s235_case w1c '' "S226_PANE_DELAY=-1; $_S235_PANE"'
 _t0=$SECONDS; _sandy_ew_teardown; echo "elapsed=$((SECONDS - _t0))"'
-    check "§226(W1c) a pane that ignores TERM gets kill-server after the 3s grace, not before and not much later (mutations: no wait; a longer bound)" \
-        bash -c 'e="$(sed -n "s/^elapsed=//p" "$1/out")"; [ -n "$e" ] && [ "$e" -ge 3 ] && [ "$e" -le 5 ] && grep -q "^kill-server" "$1/log" || { cat "$1/out" "$1/log"; exit 1; }' _ "$_S226_D/w1c"
+    check "§235(W1c) a pane that ignores TERM gets kill-server after the 3s grace, not before and not much later (mutations: no wait; a longer bound)" \
+        bash -c 'e="$(sed -n "s/^elapsed=//p" "$1/out")"; [ -n "$e" ] && [ "$e" -ge 3 ] && [ "$e" -le 5 ] && grep -q "^kill-server" "$1/log" || { cat "$1/out" "$1/log"; exit 1; }' _ "$_S235_D/w1c"
 
     # --- W4c: a daemon whose window failed idles, then exits when unsupervised
-    _S226_T0=$(date +%s)
-    _s226_case w4c '#!/bin/sh
-exit 3' '_SANDY_EW_IDLE_S=2; SANDY_DAEMON=1; '"$_S226_TAILRUN"
-    _S226_EL=$(( $(date +%s) - _S226_T0 ))
-    check "§226(W4c) daemon tail, entry exits 3: the pane exists, is torn down, and the container IDLES (~2s here, 60s in production) instead of exiting, then exits 1 naming the missing supervisor (mutations: exit at once; idle forever; got ${_S226_EL}s)" \
+    _S235_T0=$(date +%s)
+    _s235_case w4c '#!/bin/sh
+exit 3' '_SANDY_EW_IDLE_S=2; SANDY_DAEMON=1; '"$_S235_TAILRUN"
+    _S235_EL=$(( $(date +%s) - _S235_T0 ))
+    check "§235(W4c) daemon tail, entry exits 3: the pane exists, is torn down, and the container IDLES (~2s here, 60s in production) instead of exiting, then exits 1 naming the missing supervisor (mutations: exit at once; idle forever; got ${_S235_EL}s)" \
         bash -c '[ "$(cat "$1/rc")" = 1 ] && [ "$2" -ge 2 ] && grep -q "^new-session" "$1/log" && grep -q "^kill-server" "$1/log" && ! grep -q "^exec tail" "$1/log" \
-            && grep -q "sandy-entry w exited 3 within 5s" "$1/err" && grep -q "no supervisor removed this container within 2s" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w4c" "$_S226_EL"
+            && grep -q "sandy-entry w exited 3 within 5s" "$1/err" && grep -q "no supervisor removed this container within 2s" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S235_D/w4c" "$_S235_EL"
 
     # --- W8b: named sessions, entry fails in the blocking window -----------
-    _s226_case w8b '#!/bin/sh
+    _s235_case w8b '#!/bin/sh
 exit 3' 'SANDY_CLAUDE_SESSIONS_ACTIVE=1
 _sandy_claude_sessions_up() { printf "sessions_up\n" >> "$S226_LOG"; }
-'"$_S226_TAILRUN"
-    check "§226(W8b) named sessions active and the entry fails in the blocking window: no session comes up, no new-session, exit 1 with the message (mutation: the window failure ignored)" \
-        bash -c '[ "$(cat "$1/rc")" = 1 ] && ! grep -q "^sessions_up" "$1/log" && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry w exited 3" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w8b"
+'"$_S235_TAILRUN"
+    check "§235(W8b) named sessions active and the entry fails in the blocking window: no session comes up, no new-session, exit 1 with the message (mutation: the window failure ignored)" \
+        bash -c '[ "$(cat "$1/rc")" = 1 ] && ! grep -q "^sessions_up" "$1/log" && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry w exited 3" "$1/err" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S235_D/w8b"
     # --- W7d (R10): the REAL interactive launch tail, entry fails ----------
     # Not the hold alone: the launch gate must write `pending` for an
     # interactive launch too, or the hold starts no watcher and the failure
     # is never noticed. The stub attach returns when the pane exits.
-    _s226_case w7d '#!/bin/sh
-sleep 0.5; exit 3' "$_S226_PANE"'
+    _s235_case w7d '#!/bin/sh
+sleep 0.5; exit 3' "$_S235_PANE"'
 export S226_ATTACH_PID="$(cat "$HOME/pane.pid")"
-'"$_S226_TAILRUN"
-    check "§226(W7d) interactive launch tail, entry exits 3 while attached: pending before new-session, the pane is torn down, exit 1 with the message once (mutation: pending written only for daemon launches)" \
+'"$_S235_TAILRUN"
+    check "§235(W7d) interactive launch tail, entry exits 3 while attached: pending before new-session, the pane is torn down, exit 1 with the message once (mutation: pending written only for daemon launches)" \
         bash -c '[ "$(cat "$1/rc")" = 1 ] && [ "$(grep -m1 "^new-session" "$1/log")" = "new-session verdict=pending" ] && grep -q "^pane TERM$" "$1/log" && grep -q "^kill-server" "$1/log" \
-            && [ "$(grep -c "sandy-entry w exited 3 within 5s of starting" "$1/err")" = 1 ] || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w7d"
+            && [ "$(grep -c "sandy-entry w exited 3 within 5s of starting" "$1/err")" = 1 ] || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S235_D/w7d"
 else
-    skip "§226(W1-W4c, W7, W8b) entry-window behaviour: needs flock, python3 and pgrep on this host"
+    skip "§235(W1-W4c, W7, W8b) entry-window behaviour: needs flock, python3 and pgrep on this host"
 fi
 
 # --- W7e: a FIFO at the verdict path cannot hang the container side --------
-_s226_case w7e '' 'mkfifo "$HOME/.sandy-entry-window"
+_s235_case w7e '' 'mkfifo "$HOME/.sandy-entry-window"
 ( _sandy_ew_state > "$HOME/st.out"; _sandy_ew_message >> "$HOME/st.out"; echo done >> "$HOME/st.out" ) & _p=$!
 _i=0; while kill -0 "$_p" 2>/dev/null && [ "$_i" -lt 30 ]; do sleep 0.1; _i=$((_i + 1)); done
 kill -9 "$_p" 2>/dev/null; cat "$HOME/st.out" 2>/dev/null'
-check "§226(W7e) a FIFO planted at the verdict path reads as no verdict at once on the container side (mutation: a plain read, which blocks the hold forever)" \
-    bash -c '[ "$(cat "$1/out")" = done ] || { cat "$1/out"; exit 1; }' _ "$_S226_D/w7e"
+check "§235(W7e) a FIFO planted at the verdict path reads as no verdict at once on the container side (mutation: a plain read, which blocks the hold forever)" \
+    bash -c '[ "$(cat "$1/out")" = done ] || { cat "$1/out"; exit 1; }' _ "$_S235_D/w7e"
 
 # --- W7c: the container prints a forged verdict inertly ---------------------
-_s226_case w7c '' 'printf "%s\n" "$_S226_FORGED" > "$HOME/.sandy-entry-window"
+_s235_case w7c '' 'printf "%s\n" "$_S235_FORGED" > "$HOME/.sandy-entry-window"
 _sandy_ew_fail_exit'
-check "§226(W7c) a forged failed verdict (literal backslash-033 text and real ESC/BEL bytes) prints on the user terminal with no control byte beyond sandy_err's own colour (mutation: the container-side strip dropped)" \
-    bash -c '[ "$(cat "$1/rc")" = 1 ] && python3 "$2" "$1/err" "\\033[0;31m" "\\033[0m"' _ "$_S226_D/w7c" "$_S226_NC"
+check "§235(W7c) a forged failed verdict (literal backslash-033 text and real ESC/BEL bytes) prints on the user terminal with no control byte beyond sandy_err's own colour (mutation: the container-side strip dropped)" \
+    bash -c '[ "$(cat "$1/rc")" = 1 ] && python3 "$2" "$1/err" "\\033[0;31m" "\\033[0m"' _ "$_S235_D/w7c" "$_S235_NC"
 
 # --- W4: pending exists before new-session, and a failed write refuses -------
-_s226_case w4 '' "SANDY_DAEMON=1; $_S226_TAILRUN"
-check "§226(W4a) daemon launch tail, no entries: the stub sees new-session only once the verdict is pending, and the window then writes passed before the container idles" \
+_s235_case w4 '' "SANDY_DAEMON=1; $_S235_TAILRUN"
+check "§235(W4a) daemon launch tail, no entries: the stub sees new-session only once the verdict is pending, and the window then writes passed before the container idles" \
     bash -c '
         [ "$(cat "$1/rc")" = 0 ] || { cat "$1/err"; exit 1; }
         [ "$(grep -m1 "^new-session" "$1/log")" = "new-session verdict=pending" ] || { cat "$1/log"; exit 1; }
-        grep -q "^exec tail$" "$1/log" && head -n 1 "$1/.sandy-entry-window" | grep -qx passed' _ "$_S226_D/w4"
-_s226_case w4b '' 'printf x > "$HOME/notadir"; export HOME="$HOME/notadir/home"
-. "$_S226_D/entries.sh"
-SANDY_DAEMON=1; '"$_S226_TAILRUN"
-check "§226(W4b) ...and with a HOME the verdict cannot be written in, the launch refuses (non-zero, naming the verdict file) and new-session is never called (mutation: the refusal dropped)" \
-    bash -c '[ "$(cat "$1/rc")" != 0 ] && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry-window" "$1/err"' _ "$_S226_D/w4b"
+        grep -q "^exec tail$" "$1/log" && head -n 1 "$1/.sandy-entry-window" | grep -qx passed' _ "$_S235_D/w4"
+_s235_case w4b '' 'printf x > "$HOME/notadir"; export HOME="$HOME/notadir/home"
+. "$_S235_D/entries.sh"
+SANDY_DAEMON=1; '"$_S235_TAILRUN"
+check "§235(W4b) ...and with a HOME the verdict cannot be written in, the launch refuses (non-zero, naming the verdict file) and new-session is never called (mutation: the refusal dropped)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && ! grep -q "^new-session" "$1/log" && grep -q "sandy-entry-window" "$1/err"' _ "$_S235_D/w4b"
 
 # --- W8: named sessions run the window blocking, before they come up --------
-_s226_case w8 '' 'SANDY_DAEMON=1; SANDY_CLAUDE_SESSIONS_ACTIVE=1
+_s235_case w8 '' 'SANDY_DAEMON=1; SANDY_CLAUDE_SESSIONS_ACTIVE=1
 _sandy_claude_sessions_up() { printf "sessions_up verdict=%s\n" "$(_sandy_ew_state)" >> "$S226_LOG"; }
-'"$_S226_TAILRUN"
-check "§226(W8) named sessions active: _sandy_claude_sessions_up already sees passed, and new-session comes after it (mutation: the blocking window dropped)" \
+'"$_S235_TAILRUN"
+check "§235(W8) named sessions active: _sandy_claude_sessions_up already sees passed, and new-session comes after it (mutation: the blocking window dropped)" \
     bash -c '
         s=$(grep -n -m1 "^sessions_up verdict=passed$" "$1/log" | cut -d: -f1)
         n=$(grep -n -m1 "^new-session" "$1/log" | cut -d: -f1)
-        [ -n "$s" ] && [ -n "$n" ] && [ "$s" -lt "$n" ] || { cat "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w8"
+        [ -n "$s" ] && [ -n "$n" ] && [ "$s" -lt "$n" ] || { cat "$1/log" "$1/err"; exit 1; }' _ "$_S235_D/w8"
 
 # --- W5: the --start client's readiness, over every probe outcome ------------
 # The REAL probe script (run by sh, as docker exec runs it) against a fixture
 # verdict file and a stub tmux whose has-session answers $S226_SESSION, then
 # the real classifier.
-cat > "$_S226_D/bin5-tmux" <<'S226T5'
+cat > "$_S235_D/bin5-tmux" <<'S226T5'
 #!/bin/sh
 [ "$1" = has-session ] && [ "${S226_SESSION:-0}" = 1 ]
 S226T5
-mkdir -p "$_S226_D/bin5"; mv "$_S226_D/bin5-tmux" "$_S226_D/bin5/tmux"; chmod +x "$_S226_D/bin5/tmux"
-# _s226_w5_verdict <state> <file>: absent leaves no file.
-_s226_w5_verdict() {
+mkdir -p "$_S235_D/bin5"; mv "$_S235_D/bin5-tmux" "$_S235_D/bin5/tmux"; chmod +x "$_S235_D/bin5/tmux"
+# _s235_w5_verdict <state> <file>: absent leaves no file.
+_s235_w5_verdict() {
     rm -f "$2"
     case "$1" in
         absent) ;;
@@ -27161,34 +27667,34 @@ _s226_w5_verdict() {
         *) printf '%s\n' "$1" > "$2" ;;
     esac
 }
-# _s226_w5_probe <session 0|1> <file>: run the real probe under a 3s
+# _s235_w5_probe <session 0|1> <file>: run the real probe under a 3s
 # watchdog; prints its output, or HANG.
-_s226_w5_probe() {
-    local o="$_S226_D/w5.out" p i=0
+_s235_w5_probe() {
+    local o="$_S235_D/w5.out" p i=0
     rm -f "$o"
-    ( S226_SESSION="$1" PATH="$_S226_D/bin5:$PATH" exec sh -c "$_SANDY_EW_PROBE_SH" _ "$2" > "$o" 2>/dev/null ) &
+    ( S226_SESSION="$1" PATH="$_S235_D/bin5:$PATH" exec sh -c "$_SANDY_EW_PROBE_SH" _ "$2" > "$o" 2>/dev/null ) &
     p=$!
     while kill -0 "$p" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
     if kill -0 "$p" 2>/dev/null; then kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; echo HANG; return 0; fi
     wait "$p" 2>/dev/null
     cat "$o"
 }
-_S226_W5="$(
+_S235_W5="$(
     trap - ERR; set +e
-    . "$_S226_D/host.sh"
+    . "$_S235_D/host.sh"
     for row in "0 absent" "0 pending" "1 pending" "1 passed" "1 absent" "1 failed" "0 failed" "0 passed" \
                "1 garbage" "1 empty" "1 fifo" "1 big"; do
-        sess="${row%% *}"; st="${row#* }"; f="$_S226_D/w5.verdict"
-        _s226_w5_verdict "$st" "$f"
-        out="$(_s226_w5_probe "$sess" "$f")"
+        sess="${row%% *}"; st="${row#* }"; f="$_S235_D/w5.verdict"
+        _s235_w5_verdict "$st" "$f"
+        out="$(_s235_w5_probe "$sess" "$f")"
         if [ "$out" = HANG ]; then c=HANG; else c="$(_sandy_ew_classify "$out")"; fi
         [ "${#out}" -le 4097 ] || c="$c(long:${#out})"
         printf '%s:%s=%s\n' "$sess" "$st" "$c"
     done
-    rm -f "$_S226_D/w5.verdict"
+    rm -f "$_S235_D/w5.verdict"
 )"
-check "§226(W5) --start readiness = session AND (passed or no file); pending, no session, and an unrecognised, empty, FIFO or oversized verdict all wait (never ready, never a hang, at most 4096 bytes read); failed is fatal with or without a session (mutations: pending ready, failed not fatal, none not ready, unrecognised ready, plain cat)" \
-    bash -c '[ "$1" = "$2" ] || { printf "got:\n%s\n" "$1"; exit 1; }' _ "$_S226_W5" \
+check "§235(W5) --start readiness = session AND (passed or no file); pending, no session, and an unrecognised, empty, FIFO or oversized verdict all wait (never ready, never a hang, at most 4096 bytes read); failed is fatal with or without a session (mutations: pending ready, failed not fatal, none not ready, unrecognised ready, plain cat)" \
+    bash -c '[ "$1" = "$2" ] || { printf "got:\n%s\n" "$1"; exit 1; }' _ "$_S235_W5" \
     "$(printf '%s\n' '0:absent=wait' '0:pending=wait' '1:pending=wait' '1:passed=ready' '1:absent=ready' '1:failed=fatal' '0:failed=fatal' '0:passed=wait' \
         '1:garbage=wait' '1:empty=wait' '1:fifo=wait' '1:big=wait')"
 
@@ -27196,8 +27702,8 @@ check "§226(W5) --start readiness = session AND (passed or no file); pending, n
 # Stub docker: inspect says running, exec runs the real probe script against
 # the fixture verdict ($S226_VFILE) or logs a tmux has-session that fails,
 # rm is logged. A stub sleep returns at once.
-mkdir -p "$_S226_D/bin6"
-cat > "$_S226_D/bin6/docker" <<'S226D6'
+mkdir -p "$_S235_D/bin6"
+cat > "$_S235_D/bin6/docker" <<'S226D6'
 #!/bin/sh
 printf 'docker %s\n' "$*" >> "$S226_LOG"
 case "$1" in
@@ -27210,20 +27716,20 @@ case "$1" in
 esac
 exit 0
 S226D6
-printf '#!/bin/sh\nexit 0\n' > "$_S226_D/bin6/sleep"
-printf '#!/bin/sh\n[ "$1" = has-session ] && [ "${S226_SESSION:-0}" = 1 ]\n' > "$_S226_D/bin6/tmux"
-chmod +x "$_S226_D/bin6/docker" "$_S226_D/bin6/sleep" "$_S226_D/bin6/tmux"
-# _s226_sup <name> <verdict line or ""> <session 0|1> <mode: fn|tail>
-_s226_sup() {
-    local h="$_S226_D/$1" rc=0
+printf '#!/bin/sh\nexit 0\n' > "$_S235_D/bin6/sleep"
+printf '#!/bin/sh\n[ "$1" = has-session ] && [ "${S226_SESSION:-0}" = 1 ]\n' > "$_S235_D/bin6/tmux"
+chmod +x "$_S235_D/bin6/docker" "$_S235_D/bin6/sleep" "$_S235_D/bin6/tmux"
+# _s235_sup <name> <verdict line or ""> <session 0|1> <mode: fn|tail>
+_s235_sup() {
+    local h="$_S235_D/$1" rc=0
     rm -rf "$h"; mkdir -p "$h"; : > "$h/log"
     [ -n "$2" ] && printf '%s\n' "$2" > "$h/verdict"
     (
         trap - ERR; set +e
-        export PATH="$_S226_D/bin6:$PATH" S226_LOG="$h/log" S226_VFILE="$h/verdict" S226_SESSION="$3" S226_RUNNING="${S226_RUNNING:-true}"
+        export PATH="$_S235_D/bin6:$PATH" S226_LOG="$h/log" S226_VFILE="$h/verdict" S226_SESSION="$3" S226_RUNNING="${S226_RUNNING:-true}"
         SANDY_DAEMON_LOG="$h/daemon.log"
         RED=""; NC=""; GREEN=""
-        . "$_S226_D/host.sh"
+        . "$_S235_D/host.sh"
         info() { :; }
         if [ "$4" = fn ]; then
             _sandy_ew_supervise c226; exit $?
@@ -27234,34 +27740,34 @@ _s226_sup() {
         trap 'rc=$?; cleanup; exit $rc' EXIT
         set -euo pipefail
         SANDY_DAEMON_SUPERVISOR=1; _run_rc=0; CONTAINER_NAME=c226
-        . "$_S226_D/suptail.sh"
+        . "$_S235_D/suptail.sh"
     ) >"$h/out" 2>"$h/err" </dev/null || rc=$?
     echo "$rc" > "$h/rc"
     return 0
 }
-_s226_sup w6a "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 0 fn
-check "§226(W6a) supervisor poll, verdict failed: returns non-zero, writes the .fatal marker the --start client exits 6 on, and names the entry (mutation: _sandy_daemon_fatal skipped)" \
-    bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "sandy-entry w exited 3" "$1/err"' _ "$_S226_D/w6a"
-_s226_sup w6d "$_S226_FORGED" 0 fn
-check "§226(W6d) supervisor poll, forged failed verdict: the daemon log gets the message with no ESC or BEL byte (mutations: printed through error(), which is echo -e; the host-side strip dropped)" \
-    bash -c '[ "$(cat "$1/rc")" != 0 ] && python3 "$2" "$1/err"' _ "$_S226_D/w6d" "$_S226_NC"
-S226_RUNNING=false _s226_sup w6e "$(printf 'failed\tsandy-entry w\t3\tx')" 0 fn
-check "§226(W6e) supervisor poll, container already stopped: returns 0 to the watch loop (which tears down) and writes no .fatal, even with a failed verdict on disk (mutation: a stopped container treated as failed)" \
-    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S226_D/w6e"
-_s226_sup w6b passed 1 fn
-check "§226(W6b) supervisor poll, verdict passed with the session up: returns 0 and writes no .fatal" \
-    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S226_D/w6b"
-_s226_sup w6c "$(printf 'failed\tsandy-entry w\t3\tboom')" 0 tail
-check "§226(W6c) the real supervisor tail, verdict failed: it exits non-zero BEFORE its 30s watch loop, and its EXIT trap removes the container (mutation: the poll's failure ignored, which falls into the watch loop and exits 0)" \
-    bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "^docker rm -f c226$" "$1/log" && ! grep -q "c226 tmux has-session" "$1/log" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S226_D/w6c"
+_s235_sup w6a "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 0 fn
+check "§235(W6a) supervisor poll, verdict failed: returns non-zero, writes the .fatal marker the --start client exits 6 on, and names the entry (mutation: _sandy_daemon_fatal skipped)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "sandy-entry w exited 3" "$1/err"' _ "$_S235_D/w6a"
+_s235_sup w6d "$_S235_FORGED" 0 fn
+check "§235(W6d) supervisor poll, forged failed verdict: the daemon log gets the message with no ESC or BEL byte (mutations: printed through error(), which is echo -e; the host-side strip dropped)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && python3 "$2" "$1/err"' _ "$_S235_D/w6d" "$_S235_NC"
+S226_RUNNING=false _s235_sup w6e "$(printf 'failed\tsandy-entry w\t3\tx')" 0 fn
+check "§235(W6e) supervisor poll, container already stopped: returns 0 to the watch loop (which tears down) and writes no .fatal, even with a failed verdict on disk (mutation: a stopped container treated as failed)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S235_D/w6e"
+_s235_sup w6b passed 1 fn
+check "§235(W6b) supervisor poll, verdict passed with the session up: returns 0 and writes no .fatal" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ ! -e "$1/daemon.log.fatal" ]' _ "$_S235_D/w6b"
+_s235_sup w6c "$(printf 'failed\tsandy-entry w\t3\tboom')" 0 tail
+check "§235(W6c) the real supervisor tail, verdict failed: it exits non-zero BEFORE its 30s watch loop, and its EXIT trap removes the container (mutation: the poll's failure ignored, which falls into the watch loop and exits 0)" \
+    bash -c '[ "$(cat "$1/rc")" != 0 ] && [ -e "$1/daemon.log.fatal" ] && grep -q "^docker rm -f c226$" "$1/log" && ! grep -q "c226 tmux has-session" "$1/log" || { cat "$1/rc" "$1/log" "$1/err"; exit 1; }' _ "$_S235_D/w6c"
 
 # --- W9/W10: the REAL --start client, against stub docker and nohup ---------
 # nohup is the supervisor fork, so a stub nohup starts nothing; it records the
 # "container" as up. docker ps reports the container once that marker exists
 # (or from the start, for the already-running cases); docker exec answers the
 # verdict probe from $S226_VFILE as if the session were up.
-mkdir -p "$_S226_D/bin9"
-cat > "$_S226_D/bin9/docker" <<'S226D9'
+mkdir -p "$_S235_D/bin9"
+cat > "$_S235_D/bin9/docker" <<'S226D9'
 #!/bin/bash
 printf 'docker %s\n' "$*" >> "$S226_LOG"
 case "$1" in
@@ -27275,25 +27781,25 @@ case "$1" in
 esac
 exit 0
 S226D9
-printf '#!/bin/sh\necho nohup >> "$S226_LOG"\n: > "$S226_UP"\nexit 0\n' > "$_S226_D/bin9/nohup"
-chmod +x "$_S226_D/bin9/docker" "$_S226_D/bin9/nohup"
+printf '#!/bin/sh\necho nohup >> "$S226_LOG"\n: > "$S226_UP"\nexit 0\n' > "$_S235_D/bin9/nohup"
+chmod +x "$_S235_D/bin9/docker" "$_S235_D/bin9/nohup"
 # bin9f: the same, plus a sleep that returns at once, so a 600-poll budget
 # runs out in seconds.
-mkdir -p "$_S226_D/bin9f"
-cp "$_S226_D/bin9/docker" "$_S226_D/bin9/nohup" "$_S226_D/bin9f/"
-printf '#!/bin/sh\nexit 0\n' > "$_S226_D/bin9f/sleep"; chmod +x "$_S226_D/bin9f/sleep"
-# _s226_client <name> <verdict> <already-up 0|1> [<verdict after 2s>]
+mkdir -p "$_S235_D/bin9f"
+cp "$_S235_D/bin9/docker" "$_S235_D/bin9/nohup" "$_S235_D/bin9f/"
+printf '#!/bin/sh\nexit 0\n' > "$_S235_D/bin9f/sleep"; chmod +x "$_S235_D/bin9f/sleep"
+# _s235_client <name> <verdict> <already-up 0|1> [<verdict after 2s>]
 # Optional env: S226_C_BIN (stub dir, default bin9), S226_C_DEADLINE (tenths
 # of a second, default 200), S226_C_SUP_PID (the sandy.daemon_pid label),
 # S226_C_ON_RM (the verdict once the container is removed).
-_s226_client() {
-    local h="$_S226_D/$1" pid i=0 t0
+_s235_client() {
+    local h="$_S235_D/$1" pid i=0 t0
     rm -rf "$h"; mkdir -p "$h/ws" "$h/home"; : > "$h/log"
     printf '%s\n' "$2" > "$h/verdict"
     [ "$3" = 1 ] && : > "$h/up"
     if [ -n "${4:-}" ]; then ( sleep 2; printf '%s\n' "$4" > "$h/verdict.n"; mv -f "$h/verdict.n" "$h/verdict" ) & fi
     t0=$(date +%s)
-    ( cd "$h/ws" && exec env -i PATH="$_S226_D/${S226_C_BIN:-bin9}:$PATH" HOME="$h/home" SANDY_HOME="$h/home/.sandy" TERM=dumb \
+    ( cd "$h/ws" && exec env -i PATH="$_S235_D/${S226_C_BIN:-bin9}:$PATH" HOME="$h/home" SANDY_HOME="$h/home/.sandy" TERM=dumb \
         S226_LOG="$h/log" S226_UP="$h/up" S226_VFILE="$h/verdict" S226_SUP_PID="${S226_C_SUP_PID:-}" S226_ON_RM="${S226_C_ON_RM:-}" \
         bash "$SANDY_SCRIPT" --start --workspace "$h/ws" ) \
         </dev/null >"$h/out" 2>&1 &
@@ -27308,42 +27814,42 @@ _s226_client() {
     echo $(( $(date +%s) - t0 )) > "$h/elapsed"
     return 0
 }
-_s226_client w9a "$_S226_FORGED" 0
-check "§226(W9a) the --start client, entry failed in its window: exit 6 (not 7, not a hang), the message is shown with no ESC/BEL byte, and the container is removed (mutations: failed mapped to 7; fatal ignored; message through error())" \
-    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "A feature entry exited during its startup window: forged" "$1/out" && grep -q "^docker rm -f c226abcdef12" "$1/log" && python3 "$2" "$1/out" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S226_D/w9a" "$_S226_NC"
-_s226_client w9b pending 0 passed
-check "§226(W9b) the --start client, verdict pending then passed after 2s: exit 0, and not before the verdict passed (mutation: pending counted as ready)" \
-    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S226_D/w9b"
-_s226_client w10a pending 1 passed
-check "§226(W10a) a second --start while the running session is still in its window: it waits for passed, then exits 0 as already running, and starts nothing (mutation: has-session alone counted as live)" \
-    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] && grep -q "already running" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S226_D/w10a"
+_s235_client w9a "$_S235_FORGED" 0
+check "§235(W9a) the --start client, entry failed in its window: exit 6 (not 7, not a hang), the message is shown with no ESC/BEL byte, and the container is removed (mutations: failed mapped to 7; fatal ignored; message through error())" \
+    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "A feature entry exited during its startup window: forged" "$1/out" && grep -q "^docker rm -f c226abcdef12" "$1/log" && python3 "$2" "$1/out" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S235_D/w9a" "$_S235_NC"
+_s235_client w9b pending 0 passed
+check "§235(W9b) the --start client, verdict pending then passed after 2s: exit 0, and not before the verdict passed (mutation: pending counted as ready)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S235_D/w9b"
+_s235_client w10a pending 1 passed
+check "§235(W10a) a second --start while the running session is still in its window: it waits for passed, then exits 0 as already running, and starts nothing (mutation: has-session alone counted as live)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] && grep -q "already running" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S235_D/w10a"
 # A stand-in live supervisor: its own process, never this suite's shell, since
 # a regression that reaps would --stop (TERM) whatever pid the label names.
-sleep 60 & _S226_SUP=$!
-S226_C_SUP_PID=$_S226_SUP _s226_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
-kill "$_S226_SUP" 2>/dev/null || true; wait "$_S226_SUP" 2>/dev/null || true; unset _S226_SUP
-check "§226(W10b) a second --start while the running session's window has failed: exit 6 with the message, and starts nothing" \
-    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "sandy-entry w exited 3" "$1/out" && ! grep -q "^nohup" "$1/log" && ! grep -qE "^docker (rm|stop|kill)" "$1/log" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S226_D/w10b"
+sleep 60 & _S235_SUP=$!
+S226_C_SUP_PID=$_S235_SUP _s235_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
+kill "$_S235_SUP" 2>/dev/null || true; wait "$_S235_SUP" 2>/dev/null || true; unset _S235_SUP
+check "§235(W10b) a second --start while the running session's window has failed: exit 6 with the message, and starts nothing" \
+    bash -c '[ "$(cat "$1/rc")" = 6 ] && grep -q "sandy-entry w exited 3" "$1/out" && ! grep -q "^nohup" "$1/log" && ! grep -qE "^docker (rm|stop|kill)" "$1/log" || { cat "$1/rc" "$1/out"; exit 1; }' _ "$_S235_D/w10b"
 # (c) reviewer repro: the same failed window in a container NO supervisor
 # watches (its sandy.daemon_pid is dead: it came back after a reboot). It
 # must be reaped and a fresh session started, or every --start is 6 forever.
 # A pid known to be dead (a child that has exited and been reaped), never a
 # fixed number some unrelated process could hold.
-sleep 0 & _S226_DEAD=$!; wait "$_S226_DEAD" 2>/dev/null || true
-S226_C_SUP_PID=$_S226_DEAD S226_C_ON_RM=passed _s226_client w10c "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
-unset _S226_DEAD
-check "§226(W10c) a second --start over an UNSUPERVISED container whose window failed: it is reaped (--stop removes it) and a fresh session starts and comes up, exit 0 (mutation: never reap, exit 6 forever)" \
-    bash -c '[ "$(cat "$1/rc")" = 0 ] && grep -q "unsupervised daemon container" "$1/out" && grep -qE "^docker (rm|stop|kill)" "$1/log" && grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/out" "$1/log"; exit 1; }' _ "$_S226_D/w10c"
+sleep 0 & _S235_DEAD=$!; wait "$_S235_DEAD" 2>/dev/null || true
+S226_C_SUP_PID=$_S235_DEAD S226_C_ON_RM=passed _s235_client w10c "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
+unset _S235_DEAD
+check "§235(W10c) a second --start over an UNSUPERVISED container whose window failed: it is reaped (--stop removes it) and a fresh session starts and comes up, exit 0 (mutation: never reap, exit 6 forever)" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && grep -q "unsupervised daemon container" "$1/out" && grep -qE "^docker (rm|stop|kill)" "$1/log" && grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/out" "$1/log"; exit 1; }' _ "$_S235_D/w10c"
 # (d) pending past the D6 budget (600 polls, with a sleep that returns at
 # once): exit 8, and the running session is neither reaped nor replaced.
-S226_C_BIN=bin9f S226_C_DEADLINE=900 _s226_client w10d pending 1
-check "§226(W10d) a second --start over a session whose window never finishes: exit 8 once the budget is spent, nothing reaped, nothing started (mutation: fall through to the zombie reap)" \
-    bash -c '[ "$(cat "$1/rc")" = 8 ] && ! grep -q "^nohup" "$1/log" && ! grep -qE "^docker (rm|stop|kill)" "$1/log" || { cat "$1/rc" "$1/out"; tail -5 "$1/log"; exit 1; }' _ "$_S226_D/w10d"
-unset -f _s226_client
+S226_C_BIN=bin9f S226_C_DEADLINE=900 _s235_client w10d pending 1
+check "§235(W10d) a second --start over a session whose window never finishes: exit 8 once the budget is spent, nothing reaped, nothing started (mutation: fall through to the zombie reap)" \
+    bash -c '[ "$(cat "$1/rc")" = 8 ] && ! grep -q "^nohup" "$1/log" && ! grep -qE "^docker (rm|stop|kill)" "$1/log" || { cat "$1/rc" "$1/out"; tail -5 "$1/log"; exit 1; }' _ "$_S235_D/w10d"
+unset -f _s235_client
 
-unset -f _s226_case _s226_kill_tree _s226_sup _s226_w5_verdict _s226_w5_probe
-rm -rf "$_S226_D"
-unset _S226_D _S226_TMPL _S226_PANE _S226_TAILRUN _S226_W5 _S226_FORGED _S226_T0 _S226_EL _S226_NC
+unset -f _s235_case _s235_kill_tree _s235_sup _s235_w5_verdict _s235_w5_probe
+rm -rf "$_S235_D"
+unset _S235_D _S235_TMPL _S235_PANE _S235_TAILRUN _S235_W5 _S235_FORGED _S235_T0 _S235_EL _S235_NC
 
 # BEGIN SUMMARY
 # ============================================================

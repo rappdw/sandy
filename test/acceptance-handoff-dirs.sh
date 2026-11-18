@@ -128,7 +128,7 @@ command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on th
 # because the trailing quote is part of the key, so the sandbox `mbx-x` is not
 # matched by the container `sandy-mbx-x`.
 _ps_obj() {   # _ps_obj <print-state-output-with-whitespace-stripped> <sandbox-name>
-    # One line: see the note in run-tests.sh _s124_obj -- a multi-line
+    # One line (docs/DESIGN-NOTES.md, "Do not anchor a JSON assertion") -- a multi-line
     # single-quoted program argument desynchronizes the portability lint.
     printf '%s' "$1" | awk -v key="\"name\":\"$2\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
 }

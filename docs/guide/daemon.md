@@ -101,7 +101,7 @@ Daemon sessions can sit up for days, running an ever-staler image. `sandy --upda
 sandy --update-sessions --dry-run           # show the plan, refresh images, restart nothing
 sandy --update-sessions --yes               # restart every stale session, no confirmation prompt
 sandy --update-sessions --idle-for 30 --yes # only restart sessions idle 30+ minutes (cron-friendly)
-sandy --update-sessions --rebuild --yes     # force a rebuild before checking staleness
+sandy --update-sessions --rebuild --yes     # force a rebuild before checking staleness (each image once, however many sessions share it)
 sandy --update-sessions --yes --workspace ~/dev/myproj   # scope to ONE session (per-session update)
 ```
 
