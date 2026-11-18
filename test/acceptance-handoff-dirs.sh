@@ -444,6 +444,35 @@ rm -f "$_e10_out"
 mv "$_E_FEAT/feature.json.bak" "$_E_FEAT/feature.json"
 rm -f "$_E_FEAT/payload/not-executable"
 
+echo "-- E11. B5: an entry that STARTS and then exits inside its window fails --start with 6 --"
+# Since B5 the 5s window runs alongside the agent, after the panes exist. A
+# failure tears the session down inside the container, which then idles, so
+# --restart unless-stopped never turns it into a crash loop; the verdict
+# (/home/sandy/.sandy-entry-window) reaches the supervisor and the client as
+# exit 6. Contrast E10: an entry that cannot start at all is still 7.
+"$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
+cp "$_E_FEAT/feature.json" "$_E_FEAT/feature.json.bak"
+cat > "$_E_FEAT/feature.json" <<'E11_MANIFEST'
+{ "sandboxes": {"include": ["*"]}, "agents": {"include": ["*"]},
+  "mounts": [ { "name": "payload", "from": "payload" } ],
+  "entry": "payload/exits-3" }
+E11_MANIFEST
+printf '#!/bin/sh\nsleep 1\nexit 3\n' > "$_E_FEAT/payload/exits-3"
+chmod +x "$_E_FEAT/payload/exits-3"
+_e11_out="$(mktemp)"
+_e11_rc=0
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" > "$_e11_out" 2>&1 || _e11_rc=$?
+ck "--start exits 6 (not 7, not 0) when the entry starts and exits 3 inside its window" "[ $_e11_rc -eq 6 ]"
+ck "...naming the entry and its exit code" "grep -q 'sandy-entry acc-relay exited 3 within 5s of starting' \"$_e11_out\""
+# The supervisor's cleanup removes the container; give it a few seconds.
+_e11_i=0
+while [ -n "$(docker ps -aq --filter "label=sandy.workspace_path=$WS3" 2>/dev/null)" ] && [ "$_e11_i" -lt 15 ]; do sleep 1; _e11_i=$((_e11_i + 1)); done
+ck "...and nothing is left running or stopped for the workspace (docker ps -a is empty)" \
+   "[ -z \"\$(docker ps -aq --filter label=sandy.workspace_path=$WS3)\" ]"
+rm -f "$_e11_out"
+mv "$_E_FEAT/feature.json.bak" "$_E_FEAT/feature.json"
+rm -f "$_E_FEAT/payload/exits-3"
+
 # Remove phase E's feature before anything else runs: its manifest selects
 # every sandbox, so leaving it installed would enrol it in phase G too and
 # start a relay there for no reason.
