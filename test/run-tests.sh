@@ -26876,6 +26876,16 @@ _s238_okstart() { local w="$_A6_DIR/s238-oks/ws"; _s238_fakegit "$w/vendor/fakeg
 _s238_home s238-oks; _s230_sup_after s238-oks _s238_okstart
 check "§238(ok2) control: the same planted after the pass, under --start, reaches the agent run (rc ${_A6_RC:-none})" \
     test -n "$(_a6_agent_args s238-oks)"
+# A workspace given as //path: pwd -P keeps the leading //, readlink -f does
+# not. Without stripping it every path inside compared as outside, so an
+# ordinary repo with an internal link was refused (main launches it).
+_S238_C=s238-dslash; _s238_home "$_S238_C"; _S238_W="$_A6_DIR/$_S238_C/ws"
+mkdir -p "$_S238_W/sub" "$_S238_W/.git/hooks"; printf '[core]\n' > "$_S238_W/.git/config"; ln -s sub "$_S238_W/lnk"
+_a6_launch "$_S238_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 -- --workspace "/$_S238_W" -p fixture
+_S238_A="$(_a6_agent_args "$_S238_C")"
+[ "$_A6_RC" = 0 ] && [ -n "$_S238_A" ] || _a6_diag "§238(dslash)" "$_S238_C"
+check "§238(dslash) control: a workspace given as //path with a .git dir and an internal link launches, as on main (rc ${_A6_RC:-none}; mutation: drop the // strip of REAL_WORK_DIR -> refused)" \
+    bash -c '[ "$1" = 0 ] && [ -n "$2" ]' _ "$_A6_RC" "$_S238_A"
 # --- the check before docker run ---
 # A link planted AFTER the gate: a git stub plants .git/modules/sub/hooks ->
 # an outside directory at the core.hooksPath lookup, which runs after the

@@ -15674,6 +15674,7 @@ _sandy_ws_physical() {
     _real="${REAL_WORK_DIR:-}"
     [ -n "$_real" ] || _real="$(cd "$WORK_DIR" 2>/dev/null && pwd -P)" || return 1
     [ -n "$_real" ] || return 1
+    while case "$_real" in //*) true ;; *) false ;; esac; do _real="${_real#/}"; done
     case "$_p" in /*) ;; *) return 1 ;; esac
     while case "$_p" in /|//) false ;; */) true ;; *) false ;; esac; do _p="${_p%/}"; done
     _base="${_p##*/}"; _par="${_p%/*}"; [ -n "$_par" ] || _par=/
@@ -15989,6 +15990,9 @@ _sandy_resolve_symlinks() {
     # Check for symlinks that escape the workspace (potential sandbox escape).
     # We track both the display info and the mount info needed to make them work.
     REAL_WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+    # `pwd -P` keeps a leading `//` (`--workspace //path`); readlink -f does not,
+    # so strip it or nothing inside the workspace would compare as inside.
+    while case "$REAL_WORK_DIR" in //*) true ;; *) false ;; esac; do REAL_WORK_DIR="${REAL_WORK_DIR#/}"; done
     _SANDY_PROTECTED_RELS_LOADED=""   # #494: re-read the protected lists for this scan
     DANGEROUS_SYMLINKS=()
     # Parallel arrays: resolved host path and the container path where it should be mounted
