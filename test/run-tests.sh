@@ -13,7 +13,6 @@ fi
 # cannot set it. See _resolve_passive_privileged_approval() in sandy.
 export SANDY_AUTO_APPROVE_PRIVILEGED=1
 
-IMAGE_NAME="sandy-claude-code"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
@@ -191,13 +190,12 @@ _run_provenance() {
 }
 
 # Every host fixture lives under the runner-owned temporary directory.
-TEST_PROJECT="$(mktemp -d)"
 SANDBOX_DIR="$(mktemp -d)"
 mkdir -p "$SANDBOX_DIR/claude"
 _SCHEMA_CACHE="$(mktemp)"
 cleanup() {
     _emit_summary
-    rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
+    rm -rf "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
     [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -2877,11 +2875,6 @@ $(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }"
 
 # Ref resolution: release -> version tag; -dev -> main; override wins.
-_px_ref() {
-    local ver="$1" override="$2"
-    SANDY_VERSION="$ver" SANDY_PROXY_REF="$override" bash -c "$_PX_FNS
-_sandy_proxy_ref"
-}
 # GITHUB_HEAD_REF is unset in these so the version/branch logic is what's
 # asserted (it would otherwise be set when the suite itself runs in PR CI).
 check "proxy ref: release version pins to vX.Y.Z tag" \
@@ -3585,11 +3578,6 @@ case "$1" in
 esac
 DOCKERSHIM
 chmod +x "$_PS_BIN/docker"
-_ps_run() { # $1=mode(""|light) → emits JSON on stdout, spawn log to $DOCKER_CALL_LOG
-    DOCKER_CALL_LOG="$(mktemp)"; export DOCKER_CALL_LOG
-    PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" bash "$_SBX_SCRIPT" --print-state ${1:+$1} 2>/dev/null
-}
-
 # #19: workspace_path present + correct in full mode; empty for legacy sandbox.
 _ps_full="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
 check "print-state emits workspace_path from WORKSPACE.json (#19)" \
@@ -5533,7 +5521,6 @@ check "--help documents SANDY_EFFORT" \
 check "--print-schema lists SANDY_EFFORT as a passive enum key" \
     bash -c 'cat "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_EFFORT\"]; assert e and e[0][\"type\"]==\"enum\", e"' -- "$_SCHEMA_CACHE"
 # marker effort field: string when set, null when unset (behavioral, no docker)
-_eff_mk() { local SANDY_EFFORT="$1" j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf '{"effort":%s}\n' "$j"; }
 check "marker effort field: set→JSON string, unset→null" \
     bash -c '
       set="$(SANDY_EFFORT=high; j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf "%s" "$j")"
@@ -11863,21 +11850,6 @@ _S124_AFTER="$(find "$_S124_PSH/sandboxes" | sort | sha256 2>/dev/null || find "
 check "§124(6) --print-state REPAIRS NOTHING — the tree is byte-identical after reporting on a broken pair (the consumer relies on a hand-made pair staying distinguishable)" \
     bash -c '[ "$1" = "$2" ]' -- "$_S124_BEFORE" "$_S124_AFTER"
 
-# Slice the ONE sandbox object out first, then read the field from it. The
-# previous form anchored on the neighbours -- `"name":"$1"[^}]*"handoff":{` --
-# which worked only because nothing nested happened to sit between those two
-# fields. It is the same tripwire that broke §123, §124(8), and (while this
-# section was green) acceptance-handoff-dirs.sh Phase F, which reported
-# relay.state=started FAILING against an emitter that was emitting exactly that.
-# index/substr only: no regex, so no BRE-vs-ERE question and BWK-awk safe.
-_s124_obj() {   # _s124_obj <sandbox-name> -> the JSON object for that sandbox
-    # ONE LINE on purpose: a multi-line single-quoted program argument is the
-    # shape lint-bash32.sh cannot track (it desynchronized the APOSQ span and
-    # reported three unrelated comments 20 lines below as findings), and it is
-    # the same shape CLAUDE.md records as untellable from host shell.
-    printf '%s' "$_S124_PS" | tr -d ' \n' | awk -v key="\"name\":\"$1\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
-}
-_s124_field() { _s124_obj "$1" | sed -n 's/.*"handoff":{"state":"\([a-z]*\)".*/\1/p' | head -1; }
 # (7)-(11) REMOVED with the handoff{} field they read (#355). They asserted
 # that --print-state reported the classifier's verdict; there is no longer a
 # field for it, because the tree it described is gone. The classifier itself
@@ -12433,8 +12405,6 @@ _s128_exec() {   # _s128_exec <var> <value> -> raw output of the built command
     ) 2>/dev/null
     return 0
 }
-# ran-and-did-not-execute, as one predicate
-_s128_inert() { printf '%s\n' "$1" | grep -q '^CLAUDE-ARGV:' && ! printf '%s\n' "$1" | grep -q '^S128_PWNED'; }
 _S128_SEMI="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux; echo S128_PWNED')"
 _S128_AND="$(trap - ERR;   _s128_exec SANDY_TEAMMATE_MODE 'tmux && echo S128_PWNED')"
 _S128_PIPE="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux | echo S128_PWNED')"
@@ -13055,7 +13025,6 @@ _S132_MISS="$(trap - ERR; _s132_stage 'id_typo' 0)"
 _S132_SUSP="$(trap - ERR; _s132_stage 'id_wanted' 1)"
 _S132_PATH="$(trap - ERR; _s132_stage '../../.bashrc' 0)"
 
-_s132_has() { printf '%s\n' "$2" | grep -qx "F=$1"; }
 check "§132(1a) DEFAULT (no allowlist): no private key is staged at all (got: $(printf '%s' "$_S132_DEF" | tr '\n' ' '))" \
     bash -c '! printf "%s\n" "$1" | grep -qxE "F=(id_wanted|corp_secret|id_nopub|aws\.pem)"' -- "$_S132_DEF"
 check "§132(1b) ...including gitCredentials.csv — credential-shaped with NO 'BEGIN PRIVATE KEY' line, so a content-sniff blocklist waves it through. This one assertion is the case for default-deny" \
@@ -25321,6 +25290,9 @@ section "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, a
 # contracts group (suite_runner.py CONTRACT_FILES), so on macOS CI too.
 # The host group alone (`--only host`, or this script under SANDY_TEST_CHILD=1)
 # does NOT run it: use `--only contracts`, `--host-only` or no flags.
+# Its guards are mutation-audited by test/mutate-codex-activity.py (run by
+# hand, not by any suite): each mutation breaks one guard in a temporary copy
+# of sandy and must make a named test in test_codex_activity.py fail.
 
 
 echo ""
@@ -26133,7 +26105,7 @@ section "§227: SANDY_SYMLINK_SCAN_SKIP leaves a directory out of the symlink sc
 # neither prompted for nor mounted, and dangles in the container. The one link
 # the scan must still see is one at a path sandy mounts by name, which the
 # protected-path mount loop would otherwise mount by following it. The key is
-# privileged (a hidden link never reaches the gate, §233), so these launches
+# privileged (a hidden link never reaches the gate, §235), so these launches
 # set it from the WORKSPACE config with SANDY_AUTO_APPROVE_PRIVILEGED=1 (the
 # config-key approval, never the symlink gate's) and no terminal.
 _s227_tree() {   # $1 = HOME  $2 = WS
@@ -26451,7 +26423,7 @@ section "§232: a path sandy mounts or copies by name is judged where it RESOLVE
 # content behind a skipped link would leak BY COPY (b5, b8). A cp stub that
 # makes `-r` mean `-RL`, as on macOS, shows the copy never follows a link.
 # SANDY_AUTO_APPROVE_PRIVILEGED=1: the workspace-config key is approved (it
-# is privileged, §233), so each refusal below is the symlink gate's.
+# is privileged, §235), so each refusal below is the symlink gate's.
 _S232_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1)
 _s232_alias() {   # $1 = CASE  $2 = by-name path's first component  $3 = rest  -> ws/$2 -> vendor, vendor/$3 -> secret
     mkdir -p "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor" "$_A6_DIR/$1/ws/.sandy"
@@ -26582,9 +26554,9 @@ _a6_launch "$_S232_C" "${_S232_K[@]}" SANDY_SYMLINK_SCAN_SKIP=.CLAUDE
 check "§232(case) an entry spelled in another case than the directory (.CLAUDE for .claude) is named in a warning" \
     grep -qF "'.CLAUDE' matches no directory" "$_A6_DIR/$_S232_C/out"
 unset _S232_K _S232_C _S232_T _S232_A _S232_CP _S232_W _S232_N _S232_P _S232_R _S232_E _S232_OK
-unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8   # _s230_refused/_s230_sup_after: §233 uses them
+unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8   # _s230_refused/_s230_sup_after: §235 uses them
 
-section "§233: paths under .git are judged like every by-name path, even through a .git link, and SANDY_SYMLINK_SCAN_SKIP from a workspace config needs approval (B2 send-back 3)"
+section "§235: paths under .git are judged like every by-name path, even through a .git link, and SANDY_SYMLINK_SCAN_SKIP from a workspace config needs approval (B2 send-back 3)"
 # ============================================================
 # Round 3 of the verifier (g4, g5): `.git -> vendor/fakegit`, with
 # vendor/fakegit/config -> ~/.aws/credentials and vendor/fakegit/hooks -> an
@@ -26597,7 +26569,7 @@ section "§233: paths under .git are judged like every by-name path, even throug
 # launch drops it (naming it), so the scan sees the directory; approved (or
 # set from the host config or the environment) it prunes, and the sweep is
 # what still sees the .git paths. No agent run means no mount of anything.
-_s233_git() {   # $1 = CASE: ws/.git -> vendor/fakegit, config -> HOME/.aws/credentials, hooks -> HOME/hooksdir
+_s235_git() {   # $1 = CASE: ws/.git -> vendor/fakegit, config -> HOME/.aws/credentials, hooks -> HOME/hooksdir
     local h="$_A6_DIR/$1"
     mkdir -p "$h/ws/vendor/fakegit" "$h/.aws" "$h/hooksdir"
     printf 'S233-SECRET\n' > "$h/.aws/credentials"; printf 'S233-HOOK\n' > "$h/hooksdir/pre-commit"
@@ -26605,108 +26577,108 @@ _s233_git() {   # $1 = CASE: ws/.git -> vendor/fakegit, config -> HOME/.aws/cred
     ln -s ../../../.aws/credentials "$h/ws/vendor/fakegit/config"
     ln -s "$h/hooksdir" "$h/ws/vendor/fakegit/hooks"
 }
-_s233_seed() {   # $1 = CASE: an approved keep -> HOME/t3, so a refusal must leave the list byte-identical
+_s235_seed() {   # $1 = CASE: an approved keep -> HOME/t3, so a refusal must leave the list byte-identical
     mkdir -p "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws"; ln -s "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws/keep"
     _s226_seed "$1" "keep -> $_A6_DIR/$1/t3"
 }
 # The list as seeded, no config-key approval written, and no docker run of
 # any kind carried the outside path.
-_s233_held() {   # $1 = CASE  $2 = outside path
+_s235_held() {   # $1 = CASE  $2 = outside path
     test "$(cat "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list" 2>/dev/null)" = "keep -> $_A6_DIR/$1/t3" \
         && test -z "$(ls "$_A6_DIR/$1/sh/approvals" 2>/dev/null | grep '^passive-' || true)" \
         && ! grep -rqsF -- "$2" "$_A6_DIR/$1/runs"
 }
 # (1) g4 foreground, key from the workspace config, no terminal: the key is
 # named and dropped, so the scan walks vendor and refuses the link there.
-_S233=s233-g4; _s233_git "$_S233"; _s233_seed "$_S233"; mkdir -p "$_A6_DIR/$_S233/ws/.sandy"
-printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S233/ws/.sandy/config"
-_a6_launch "$_S233" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S233_OK=0
-{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S233")" ] \
-  && grep -q "wants to set privileged keys" "$_A6_DIR/$_S233/out" \
-  && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/$_S233/out" \
-  && grep -qF "dropping these keys" "$_A6_DIR/$_S233/out" \
-  && grep -q "present at previous approval" "$_A6_DIR/$_S233/out" \
-  && grep -qF "vendor/fakegit/config -> $_A6_DIR/$_S233/.aws/credentials" "$_A6_DIR/$_S233/out" \
-  && _s233_held "$_S233" "$_A6_DIR/$_S233/.aws/credentials"; } || _S233_OK=$?
-[ "$_S233_OK" = 0 ] || _a6_diag "§233(1)" "$_S233"
-check "§233(1) g4: SANDY_SYMLINK_SCAN_SKIP=vendor from a workspace config, no terminal: the key is named and dropped, the scan walks vendor, the launch is refused before any docker run, the approved list unchanged, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS; rc ${_A6_RC:-none})" \
-    test "$_S233_OK" = 0
+_S235=s233-g4; _s235_git "$_S235"; _s235_seed "$_S235"; mkdir -p "$_A6_DIR/$_S235/ws/.sandy"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S235/ws/.sandy/config"
+_a6_launch "$_S235" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S235_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S235")" ] \
+  && grep -q "wants to set privileged keys" "$_A6_DIR/$_S235/out" \
+  && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/$_S235/out" \
+  && grep -qF "dropping these keys" "$_A6_DIR/$_S235/out" \
+  && grep -q "present at previous approval" "$_A6_DIR/$_S235/out" \
+  && grep -qF "vendor/fakegit/config -> $_A6_DIR/$_S235/.aws/credentials" "$_A6_DIR/$_S235/out" \
+  && _s235_held "$_S235" "$_A6_DIR/$_S235/.aws/credentials"; } || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(1)" "$_S235"
+check "§235(1) g4: SANDY_SYMLINK_SCAN_SKIP=vendor from a workspace config, no terminal: the key is named and dropped, the scan walks vendor, the launch is refused before any docker run, the approved list unchanged, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS; rc ${_A6_RC:-none})" \
+    test "$_S235_OK" = 0
 # (2) the same with the key approved (the config-key approval, not the symlink
 # gate's): vendor holds where .git resolves (vendor/fakegit), whose config,
 # hooks and info sandy mounts by name, so the entry is ignored, by name, and
 # the scan walks vendor and refuses both links there, each named once.
-_S233=s233-g4a; _s233_git "$_S233"; _s233_seed "$_S233"; mkdir -p "$_A6_DIR/$_S233/ws/.sandy"
-printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S233/ws/.sandy/config"
-_a6_launch "$_S233" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
-_S233_OK=0
-{ _s230_refused "$_S233" "vendor/fakegit/config -> $_A6_DIR/$_S233/.aws/credentials" \
-  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S233/out" \
-  && grep -qF "vendor/fakegit/hooks -> $_A6_DIR/$_S233/hooksdir" "$_A6_DIR/$_S233/out" \
-  && ! grep -qF ".git/config ->" "$_A6_DIR/$_S233/out" \
-  && test "$(grep -cF -- " -> $_A6_DIR/$_S233/.aws/credentials" "$_A6_DIR/$_S233/out" || true)" = 1 \
-  && _s233_held "$_S233" "$_A6_DIR/$_S233/.aws/credentials" \
-  && _s233_held "$_S233" "$_A6_DIR/$_S233/hooksdir"; } || _S233_OK=$?
-[ "$_S233_OK" = 0 ] || _a6_diag "§233(2)" "$_S233"
-check "§233(2) g4 with the key approved: vendor holds where .git -> vendor/fakegit resolves, so the entry is ignored by name, and vendor/fakegit/config -> ~/.aws/credentials and vendor/fakegit/hooks -> an outside directory are refused by the symlink gate, each named once, the list unchanged (mutation: skip entries not compared with where .git resolves; rc ${_A6_RC:-none})" \
-    test "$_S233_OK" = 0
+_S235=s233-g4a; _s235_git "$_S235"; _s235_seed "$_S235"; mkdir -p "$_A6_DIR/$_S235/ws/.sandy"
+printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/$_S235/ws/.sandy/config"
+_a6_launch "$_S235" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1
+_S235_OK=0
+{ _s230_refused "$_S235" "vendor/fakegit/config -> $_A6_DIR/$_S235/.aws/credentials" \
+  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S235/out" \
+  && grep -qF "vendor/fakegit/hooks -> $_A6_DIR/$_S235/hooksdir" "$_A6_DIR/$_S235/out" \
+  && ! grep -qF ".git/config ->" "$_A6_DIR/$_S235/out" \
+  && test "$(grep -cF -- " -> $_A6_DIR/$_S235/.aws/credentials" "$_A6_DIR/$_S235/out" || true)" = 1 \
+  && _s235_held "$_S235" "$_A6_DIR/$_S235/.aws/credentials" \
+  && _s235_held "$_S235" "$_A6_DIR/$_S235/hooksdir"; } || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(2)" "$_S235"
+check "§235(2) g4 with the key approved: vendor holds where .git -> vendor/fakegit resolves, so the entry is ignored by name, and vendor/fakegit/config -> ~/.aws/credentials and vendor/fakegit/hooks -> an outside directory are refused by the symlink gate, each named once, the list unchanged (mutation: skip entries not compared with where .git resolves; rc ${_A6_RC:-none})" \
+    test "$_S235_OK" = 0
 # (3) g5: no key, --start; .git -> vendor/fakegit planted after the approval
 # pass. The supervisor does not rescan; its sweep refuses .git/config.
-_s233_g5() { _s233_git s233-g5; }
-_s230_sup_after s233-g5 _s233_g5
-_S233_OK=0
+_s235_g5() { _s235_git s233-g5; }
+_s230_sup_after s233-g5 _s235_g5
+_S235_OK=0
 { [[ "${_S228_ID:-}" =~ ^[0-9a-f]{16}$ ]] \
   && _s230_refused s233-g5 ".git/config -> $_A6_DIR/s233-g5/.aws/credentials" \
   && ! grep -rqsF -- "$_A6_DIR/s233-g5/.aws/credentials" "$_A6_DIR/s233-g5/runs" \
-  && test "$(cat "$(_a6_sandbox s233-g5)/.sandy-approved-symlinks.list" 2>/dev/null)" = "$(printf '%s\n' "a -> $_A6_DIR/s233-g5/t1" "b -> $_A6_DIR/s233-g5/t2")"; } || _S233_OK=$?
-[ "$_S233_OK" = 0 ] || _a6_diag "§233(3)" s233-g5
-check "§233(3) g5: under --start, .git -> vendor/fakegit with an escaping config planted after the pass is refused by the supervisor, no agent run, no mount of the outside file, the approved list unchanged (mutation: the sweep skips paths under .git; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
-    test "$_S233_OK" = 0
+  && test "$(cat "$(_a6_sandbox s233-g5)/.sandy-approved-symlinks.list" 2>/dev/null)" = "$(printf '%s\n' "a -> $_A6_DIR/s233-g5/t1" "b -> $_A6_DIR/s233-g5/t2")"; } || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(3)" s233-g5
+check "§235(3) g5: under --start, .git -> vendor/fakegit with an escaping config planted after the pass is refused by the supervisor, no agent run, no mount of the outside file, the approved list unchanged (mutation: the sweep skips paths under .git; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    test "$_S235_OK" = 0
 # (3b) .git itself replaced by a link OUT of the workspace after the pass.
-_s233_g5o() { mkdir -p "$_A6_DIR/s233-g5o/other/.git/hooks"; printf '[core]\n' > "$_A6_DIR/s233-g5o/other/.git/config"; ln -s "$_A6_DIR/s233-g5o/other/.git" "$_A6_DIR/s233-g5o/ws/.git"; }
-_s230_sup_after s233-g5o _s233_g5o
-check "§233(3b) under --start, .git replaced after the pass by a link out of the workspace is refused by the supervisor (id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+_s235_g5o() { mkdir -p "$_A6_DIR/s233-g5o/other/.git/hooks"; printf '[core]\n' > "$_A6_DIR/s233-g5o/other/.git/config"; ln -s "$_A6_DIR/s233-g5o/other/.git" "$_A6_DIR/s233-g5o/ws/.git"; }
+_s230_sup_after s233-g5o _s235_g5o
+check "§235(3b) under --start, .git replaced after the pass by a link out of the workspace is refused by the supervisor (id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
     _s230_refused s233-g5o ".git -> $_A6_DIR/s233-g5o/other/.git"
 # (4)-(7) where the key may come from. vendor/x -> HOME/secret is the only
 # escaping link, so the launch runs exactly when vendor is pruned.
-_s233_kt() {   # $1 = CASE
+_s235_kt() {   # $1 = CASE
     mkdir -p "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor" "$_A6_DIR/$1/sh"
     ln -s "$_A6_DIR/$1/secret" "$_A6_DIR/$1/ws/vendor/x"
 }
-_s233_pruned() {   # $1 = CASE: ran, no config-key prompt text, nothing of secret mounted
+_s235_pruned() {   # $1 = CASE: ran, no config-key prompt text, nothing of secret mounted
     [ "$_A6_RC" = 0 ] && [ -n "$(_a6_agent_args "$1")" ] \
         && ! grep -q "wants to set privileged keys\|dropping these keys\|vendor/x ->" "$_A6_DIR/$1/out" \
         && ! grep -qF -- "$_A6_DIR/$1/secret" "$(_a6_agent_args "$1")"
 }
-_s233_kt s233-kw; mkdir -p "$_A6_DIR/s233-kw/ws/.sandy"
+_s235_kt s233-kw; mkdir -p "$_A6_DIR/s233-kw/ws/.sandy"
 printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kw/ws/.sandy/config"
 _a6_launch s233-kw SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S233_OK=0
+_S235_OK=0
 { [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args s233-kw)" ] \
   && grep -q '^\[sandy\]   SANDY_SYMLINK_SCAN_SKIP$' "$_A6_DIR/s233-kw/out" \
   && grep -qF "dropping these keys" "$_A6_DIR/s233-kw/out" \
   && grep -qF "vendor/x -> $_A6_DIR/s233-kw/secret" "$_A6_DIR/s233-kw/out" \
-  && test -z "$(ls "$_A6_DIR/s233-kw/sh/approvals" 2>/dev/null | grep '^passive-' || true)"; } || _S233_OK=$?
-[ "$_S233_OK" = 0 ] || _a6_diag "§233(4)" s233-kw
-check "§233(4) the key from a workspace config without a terminal is named and dropped, not honoured: vendor is scanned and vendor/x refused, no agent run, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS prunes vendor and the launch runs; rc ${_A6_RC:-none})" \
-    test "$_S233_OK" = 0
-_s233_kt s233-kh; printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kh/sh/config"
+  && test -z "$(ls "$_A6_DIR/s233-kw/sh/approvals" 2>/dev/null | grep '^passive-' || true)"; } || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(4)" s233-kw
+check "§235(4) the key from a workspace config without a terminal is named and dropped, not honoured: vendor is scanned and vendor/x refused, no agent run, no approval written (mutation: the key back in SANDY_PASSIVE_KEYS prunes vendor and the launch runs; rc ${_A6_RC:-none})" \
+    test "$_S235_OK" = 0
+_s235_kt s233-kh; printf 'SANDY_SYMLINK_SCAN_SKIP=vendor\n' > "$_A6_DIR/s233-kh/sh/config"
 _a6_launch s233-kh SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S233_OK=0; _s233_pruned s233-kh || _S233_OK=$?
-[ "$_S233_OK" = 0 ] || _a6_diag "§233(5)" s233-kh
-check "§233(5) the key from the host config needs no approval: vendor is pruned, the launch runs, no prompt text, nothing of the secret mounted (rc ${_A6_RC:-none})" \
-    test "$_S233_OK" = 0
-_s233_kt s233-ke
+_S235_OK=0; _s235_pruned s233-kh || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(5)" s233-kh
+check "§235(5) the key from the host config needs no approval: vendor is pruned, the launch runs, no prompt text, nothing of the secret mounted (rc ${_A6_RC:-none})" \
+    test "$_S235_OK" = 0
+_s235_kt s233-ke
 _a6_launch s233-ke SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor
-_S233_OK=0; _s233_pruned s233-ke || _S233_OK=$?
-[ "$_S233_OK" = 0 ] || _a6_diag "§233(6)" s233-ke
-check "§233(6) ...and the same from the environment (rc ${_A6_RC:-none})" \
-    test "$_S233_OK" = 0
-_s233_kt s233-kc
+_S235_OK=0; _s235_pruned s233-ke || _S235_OK=$?
+[ "$_S235_OK" = 0 ] || _a6_diag "§235(6)" s233-ke
+check "§235(6) ...and the same from the environment (rc ${_A6_RC:-none})" \
+    test "$_S235_OK" = 0
+_s235_kt s233-kc
 _a6_launch s233-kc SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-check "§233(7) control: the same tree with no key is refused for vendor/x, so (5) and (6) ran because of the prune (rc ${_A6_RC:-none})" \
+check "§235(7) control: the same tree with no key is refused for vendor/x, so (5) and (6) ran because of the prune (rc ${_A6_RC:-none})" \
     _s230_refused s233-kc "vendor/x -> $_A6_DIR/s233-kc/secret"
-section "§234: every path sandy mounts by name is judged, a gitdir named by a .git FILE and the submodule gitdirs under .git/modules included, and every -v source is re-checked before docker run (B2 send-back 4)"
+section "§236: every path sandy mounts by name is judged, a gitdir named by a .git FILE and the submodule gitdirs under .git/modules included, and every -v source is re-checked before docker run (B2 send-back 4)"
 # ============================================================
 # Round 4 of the verifier: a .git FILE (`gitdir: vendor/fakegit`) whose
 # config or hooks link out of the workspace, `gitdir: lnk` with lnk -> an
@@ -26719,194 +26691,194 @@ section "§234: every path sandy mounts by name is judged, a gitdir named by a .
 # entry that is, holds or lies inside where .git or the gitdir resolves is
 # ignored by name, and just before docker run every -v source in the
 # workspace is checked against what the gate judged.
-_s234_fakegit() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
-_s234_home() {   # $1 = CASE: HOME/.aws/credentials, HOME/hooksdir, HOME/otherrepo/.git
+_s236_fakegit() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+_s236_home() {   # $1 = CASE: HOME/.aws/credentials, HOME/hooksdir, HOME/otherrepo/.git
     local h="$_A6_DIR/$1"
     mkdir -p "$h/.aws" "$h/hooksdir" "$h/ws"
     printf 'S234-SECRET\n' > "$h/.aws/credentials"; printf 'S234-HOOK\n' > "$h/hooksdir/pre-commit"
-    _s234_fakegit "$h/otherrepo/.git"
+    _s236_fakegit "$h/otherrepo/.git"
 }
 # Refused by the symlink gate, naming $2; no docker run of any kind carried
 # the outside path $3; the approved list is $4 (one entry per line).
-_s234_refused() {   # $1 = CASE  $2 = named link  $3 = outside path  $4 = expected list
+_s236_refused() {   # $1 = CASE  $2 = named link  $3 = outside path  $4 = expected list
     _s230_refused "$1" "$2" \
         && ! grep -rqsF -- "$3" "$_A6_DIR/$1/runs" \
         && test "$(cat "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list" 2>/dev/null)" = "$4"
 }
-_s234_ab() { printf '%s\n' "a -> $_A6_DIR/$1/t1" "b -> $_A6_DIR/$1/t2"; }
+_s236_ab() { printf '%s\n' "a -> $_A6_DIR/$1/t1" "b -> $_A6_DIR/$1/t2"; }
 # --- under --start, planted after the approval pass, no key ---
-_s234_s1() { local w="$_A6_DIR/s234-s1/ws"; _s234_fakegit "$w/vendor/fakegit"; ln -s ../../../.aws/credentials "$w/vendor/fakegit/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
-_s234_home s234-s1; _s230_sup_after s234-s1 _s234_s1
-_S234_OK=0; _s234_refused s234-s1 "vendor/fakegit/config -> $_A6_DIR/s234-s1/.aws/credentials" "$_A6_DIR/s234-s1/.aws" "$(_s234_ab s234-s1)" || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(s1)" s234-s1
-check "§234(s1) under --start, a .git FILE naming vendor/fakegit with config -> ~/.aws/credentials, planted after the pass, is refused by the supervisor's gate: no agent run, nothing outside mounted, the approved list unchanged (mutation: the sweep does not judge the gitdir a .git file names; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
-_s234_s1h() { local w="$_A6_DIR/s234-s1h/ws"; _s234_fakegit "$w/vendor/fakegit"; printf '[core]\n' > "$w/vendor/fakegit/config"; ln -s "$_A6_DIR/s234-s1h/hooksdir" "$w/vendor/fakegit/hooks"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
-_s234_home s234-s1h; _s230_sup_after s234-s1h _s234_s1h
-_S234_OK=0; _s234_refused s234-s1h "vendor/fakegit/hooks -> $_A6_DIR/s234-s1h/hooksdir" "$_A6_DIR/s234-s1h/hooksdir" "$(_s234_ab s234-s1h)" || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(s1h)" s234-s1h
-check "§234(s1h) ...and the same gitdir with a real config and hooks -> an outside directory is refused (rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
-_s234_s3() { ln -s "$_A6_DIR/s234-s3/otherrepo/.git" "$_A6_DIR/s234-s3/ws/lnk"; printf 'gitdir: lnk\n' > "$_A6_DIR/s234-s3/ws/.git"; }
-_s234_home s234-s3; _s230_sup_after s234-s3 _s234_s3
-_S234_OK=0; _s234_refused s234-s3 "lnk -> $_A6_DIR/s234-s3/otherrepo/.git" "$_A6_DIR/s234-s3/otherrepo" "$(_s234_ab s234-s3)" || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(s3)" s234-s3
-check "§234(s3) under --start, \`gitdir: lnk\` with lnk -> an outside git directory, planted after the pass, is refused: the gitdir would have been mounted read-write (mutation: the sweep does not judge the gitdir; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
-_s234_m1() { local w="$_A6_DIR/s234-m1/ws"; mkdir -p "$w/vendor/fakegit/modules/sub"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"
+_s236_s1() { local w="$_A6_DIR/s234-s1/ws"; _s236_fakegit "$w/vendor/fakegit"; ln -s ../../../.aws/credentials "$w/vendor/fakegit/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s236_home s234-s1; _s230_sup_after s234-s1 _s236_s1
+_S236_OK=0; _s236_refused s234-s1 "vendor/fakegit/config -> $_A6_DIR/s234-s1/.aws/credentials" "$_A6_DIR/s234-s1/.aws" "$(_s236_ab s234-s1)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s1)" s234-s1
+check "§236(s1) under --start, a .git FILE naming vendor/fakegit with config -> ~/.aws/credentials, planted after the pass, is refused by the supervisor's gate: no agent run, nothing outside mounted, the approved list unchanged (mutation: the sweep does not judge the gitdir a .git file names; id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+_s236_s1h() { local w="$_A6_DIR/s234-s1h/ws"; _s236_fakegit "$w/vendor/fakegit"; printf '[core]\n' > "$w/vendor/fakegit/config"; ln -s "$_A6_DIR/s234-s1h/hooksdir" "$w/vendor/fakegit/hooks"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s236_home s234-s1h; _s230_sup_after s234-s1h _s236_s1h
+_S236_OK=0; _s236_refused s234-s1h "vendor/fakegit/hooks -> $_A6_DIR/s234-s1h/hooksdir" "$_A6_DIR/s234-s1h/hooksdir" "$(_s236_ab s234-s1h)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s1h)" s234-s1h
+check "§236(s1h) ...and the same gitdir with a real config and hooks -> an outside directory is refused (rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+_s236_s3() { ln -s "$_A6_DIR/s234-s3/otherrepo/.git" "$_A6_DIR/s234-s3/ws/lnk"; printf 'gitdir: lnk\n' > "$_A6_DIR/s234-s3/ws/.git"; }
+_s236_home s234-s3; _s230_sup_after s234-s3 _s236_s3
+_S236_OK=0; _s236_refused s234-s3 "lnk -> $_A6_DIR/s234-s3/otherrepo/.git" "$_A6_DIR/s234-s3/otherrepo" "$(_s236_ab s234-s3)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s3)" s234-s3
+check "§236(s3) under --start, \`gitdir: lnk\` with lnk -> an outside git directory, planted after the pass, is refused: the gitdir would have been mounted read-write (mutation: the sweep does not judge the gitdir; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+_s236_m1() { local w="$_A6_DIR/s234-m1/ws"; mkdir -p "$w/vendor/fakegit/modules/sub"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"
     ln -s "$_A6_DIR/s234-m1/hooksdir" "$w/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$w/.git"; }
-_s234_home s234-m1; _s230_sup_after s234-m1 _s234_m1
-_S234_OK=0; _s234_refused s234-m1 ".git/modules/sub/hooks -> $_A6_DIR/s234-m1/hooksdir" "$_A6_DIR/s234-m1/hooksdir" "$(_s234_ab s234-m1)" || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(m1)" s234-m1
-check "§234(m1) under --start, .git -> vendor/fakegit with a submodule gitdir whose hooks -> an outside directory, planted after the pass, is refused (mutation: the sweep does not judge the submodule gitdirs; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
+_s236_home s234-m1; _s230_sup_after s234-m1 _s236_m1
+_S236_OK=0; _s236_refused s234-m1 ".git/modules/sub/hooks -> $_A6_DIR/s234-m1/hooksdir" "$_A6_DIR/s234-m1/hooksdir" "$(_s236_ab s234-m1)" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(m1)" s234-m1
+check "§236(m1) under --start, .git -> vendor/fakegit with a submodule gitdir whose hooks -> an outside directory, planted after the pass, is refused (mutation: the sweep does not judge the submodule gitdirs; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
 # --- plain launches, SANDY_SYMLINK_SCAN_SKIP=vendor from the environment ---
-_S234_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor)
-_S234_C=s234-k1; _s234_home "$_S234_C"; _S234_W="$_A6_DIR/$_S234_C/ws"; _s234_seed() { mkdir -p "$_A6_DIR/$1/t3"; ln -s "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws/keep"; _s226_seed "$1" "keep -> $_A6_DIR/$1/t3"; }
-_s234_fakegit "$_S234_W/vendor/fakegit"; ln -s ../../../.aws/credentials "$_S234_W/vendor/fakegit/config"; ln -s "$_A6_DIR/$_S234_C/hooksdir" "$_S234_W/vendor/fakegit/hooks"
-printf 'gitdir: vendor/fakegit\n' > "$_S234_W/.git"; _s234_seed "$_S234_C"
-_a6_launch "$_S234_C" "${_S234_K[@]}"
-_S234_OK=0
-{ _s234_refused "$_S234_C" "vendor/fakegit/config -> $_A6_DIR/$_S234_C/.aws/credentials" "$_A6_DIR/$_S234_C/.aws" "keep -> $_A6_DIR/$_S234_C/t3" \
-  && grep -qF "vendor/fakegit/hooks -> $_A6_DIR/$_S234_C/hooksdir" "$_A6_DIR/$_S234_C/out" \
-  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S234_C/out"; } || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(k1)" "$_S234_C"
-check "§234(k1) SANDY_SYMLINK_SCAN_SKIP=vendor from the environment, a .git FILE naming vendor/fakegit: the entry is ignored by name (vendor holds the gitdir), and config and hooks linking out are refused, list unchanged (mutation: skip entries not compared with where the gitdir resolves; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
-_S234_C=s234-s3k; _s234_home "$_S234_C"; _S234_W="$_A6_DIR/$_S234_C/ws"
-mkdir -p "$_S234_W/vendor"; ln -s "$_A6_DIR/$_S234_C/otherrepo/.git" "$_S234_W/vendor/lnk"; printf 'gitdir: vendor/lnk\n' > "$_S234_W/.git"; _s234_seed "$_S234_C"
-_a6_launch "$_S234_C" "${_S234_K[@]}"
-_S234_OK=0; _s234_refused "$_S234_C" "vendor/lnk -> $_A6_DIR/$_S234_C/otherrepo/.git" "$_A6_DIR/$_S234_C/otherrepo" "keep -> $_A6_DIR/$_S234_C/t3" || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(s3k)" "$_S234_C"
-check "§234(s3k) ...\`gitdir: vendor/lnk\` with vendor pruned and vendor/lnk -> an outside git directory: the gitdir is judged by the sweep and refused (mutation: the sweep does not judge the gitdir; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
-_S234_C=s234-m1k; _s234_home "$_S234_C"; _S234_W="$_A6_DIR/$_S234_C/ws"
-mkdir -p "$_S234_W/vendor/fakegit/modules/sub"; printf '[core]\n' > "$_S234_W/vendor/fakegit/config"; printf '[core]\n' > "$_S234_W/vendor/fakegit/modules/sub/config"
-ln -s "$_A6_DIR/$_S234_C/hooksdir" "$_S234_W/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$_S234_W/.git"; _s234_seed "$_S234_C"
-_a6_launch "$_S234_C" "${_S234_K[@]}"
-_S234_OK=0
-{ _s234_refused "$_S234_C" "vendor/fakegit/modules/sub/hooks -> $_A6_DIR/$_S234_C/hooksdir" "$_A6_DIR/$_S234_C/hooksdir" "keep -> $_A6_DIR/$_S234_C/t3" \
-  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S234_C/out" \
-  && test "$(grep -cF -- " -> $_A6_DIR/$_S234_C/hooksdir" "$_A6_DIR/$_S234_C/out" || true)" = 1; } || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(m1k)" "$_S234_C"
-check "§234(m1k) ...and .git -> vendor/fakegit with modules/sub/hooks linking out: the entry is ignored (vendor holds where .git resolves), the link refused and named once, as the scan names it (rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
+_S236_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor)
+_S236_C=s234-k1; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _s236_seed() { mkdir -p "$_A6_DIR/$1/t3"; ln -s "$_A6_DIR/$1/t3" "$_A6_DIR/$1/ws/keep"; _s226_seed "$1" "keep -> $_A6_DIR/$1/t3"; }
+_s236_fakegit "$_S236_W/vendor/fakegit"; ln -s ../../../.aws/credentials "$_S236_W/vendor/fakegit/config"; ln -s "$_A6_DIR/$_S236_C/hooksdir" "$_S236_W/vendor/fakegit/hooks"
+printf 'gitdir: vendor/fakegit\n' > "$_S236_W/.git"; _s236_seed "$_S236_C"
+_a6_launch "$_S236_C" "${_S236_K[@]}"
+_S236_OK=0
+{ _s236_refused "$_S236_C" "vendor/fakegit/config -> $_A6_DIR/$_S236_C/.aws/credentials" "$_A6_DIR/$_S236_C/.aws" "keep -> $_A6_DIR/$_S236_C/t3" \
+  && grep -qF "vendor/fakegit/hooks -> $_A6_DIR/$_S236_C/hooksdir" "$_A6_DIR/$_S236_C/out" \
+  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S236_C/out"; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(k1)" "$_S236_C"
+check "§236(k1) SANDY_SYMLINK_SCAN_SKIP=vendor from the environment, a .git FILE naming vendor/fakegit: the entry is ignored by name (vendor holds the gitdir), and config and hooks linking out are refused, list unchanged (mutation: skip entries not compared with where the gitdir resolves; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+_S236_C=s234-s3k; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+mkdir -p "$_S236_W/vendor"; ln -s "$_A6_DIR/$_S236_C/otherrepo/.git" "$_S236_W/vendor/lnk"; printf 'gitdir: vendor/lnk\n' > "$_S236_W/.git"; _s236_seed "$_S236_C"
+_a6_launch "$_S236_C" "${_S236_K[@]}"
+_S236_OK=0; _s236_refused "$_S236_C" "vendor/lnk -> $_A6_DIR/$_S236_C/otherrepo/.git" "$_A6_DIR/$_S236_C/otherrepo" "keep -> $_A6_DIR/$_S236_C/t3" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(s3k)" "$_S236_C"
+check "§236(s3k) ...\`gitdir: vendor/lnk\` with vendor pruned and vendor/lnk -> an outside git directory: the gitdir is judged by the sweep and refused (mutation: the sweep does not judge the gitdir; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+_S236_C=s234-m1k; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+mkdir -p "$_S236_W/vendor/fakegit/modules/sub"; printf '[core]\n' > "$_S236_W/vendor/fakegit/config"; printf '[core]\n' > "$_S236_W/vendor/fakegit/modules/sub/config"
+ln -s "$_A6_DIR/$_S236_C/hooksdir" "$_S236_W/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$_S236_W/.git"; _s236_seed "$_S236_C"
+_a6_launch "$_S236_C" "${_S236_K[@]}"
+_S236_OK=0
+{ _s236_refused "$_S236_C" "vendor/fakegit/modules/sub/hooks -> $_A6_DIR/$_S236_C/hooksdir" "$_A6_DIR/$_S236_C/hooksdir" "keep -> $_A6_DIR/$_S236_C/t3" \
+  && grep -qF "'vendor' covers where .git or its gitdir resolves" "$_A6_DIR/$_S236_C/out" \
+  && test "$(grep -cF -- " -> $_A6_DIR/$_S236_C/hooksdir" "$_A6_DIR/$_S236_C/out" || true)" = 1; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(m1k)" "$_S236_C"
+check "§236(m1k) ...and .git -> vendor/fakegit with modules/sub/hooks linking out: the entry is ignored (vendor holds where .git resolves), the link refused and named once, as the scan names it (rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
 # --- outside means outside: a sibling sharing the workspace's name as a prefix ---
-_S234_C=s234-sib; _s234_home "$_S234_C"; mkdir -p "$_A6_DIR/$_S234_C/ws-secrets" "$_A6_DIR/$_S234_C/ws/.claude"
-printf '{}\n' > "$_A6_DIR/$_S234_C/ws-secrets/settings.json"
-ln -s ../../ws-secrets/settings.json "$_A6_DIR/$_S234_C/ws/.claude/settings.json"
-_a6_launch "$_S234_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S234_OK=0; _s230_refused "$_S234_C" ".claude/settings.json -> $_A6_DIR/$_S234_C/ws-secrets/settings.json" \
-    && ! grep -rqsF -- "$_A6_DIR/$_S234_C/ws-secrets" "$_A6_DIR/$_S234_C/runs" || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(sib)" "$_S234_C"
-check "§234(sib) a link into a sibling of the workspace whose name begins with the workspace's (ws-secrets beside ws) is outside it: .claude/settings.json -> ../../ws-secrets/settings.json is refused, not mounted (mutation: a bare prefix test for inside; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
+_S236_C=s234-sib; _s236_home "$_S236_C"; mkdir -p "$_A6_DIR/$_S236_C/ws-secrets" "$_A6_DIR/$_S236_C/ws/.claude"
+printf '{}\n' > "$_A6_DIR/$_S236_C/ws-secrets/settings.json"
+ln -s ../../ws-secrets/settings.json "$_A6_DIR/$_S236_C/ws/.claude/settings.json"
+_a6_launch "$_S236_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S236_OK=0; _s230_refused "$_S236_C" ".claude/settings.json -> $_A6_DIR/$_S236_C/ws-secrets/settings.json" \
+    && ! grep -rqsF -- "$_A6_DIR/$_S236_C/ws-secrets" "$_A6_DIR/$_S236_C/runs" || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(sib)" "$_S236_C"
+check "§236(sib) a link into a sibling of the workspace whose name begins with the workspace's (ws-secrets beside ws) is outside it: .claude/settings.json -> ../../ws-secrets/settings.json is refused, not mounted (mutation: a bare prefix test for inside; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
 # --- controls: the same layouts with no escaping link launch ---
-_S234_C=s234-ok; _s234_home "$_S234_C"; _S234_W="$_A6_DIR/$_S234_C/ws"
-_s234_fakegit "$_S234_W/vendor/fakegit"; mkdir -p "$_S234_W/vendor/fakegit/hooks" "$_S234_W/vendor/fakegit/modules/sub/hooks"
-printf '[core]\n' > "$_S234_W/vendor/fakegit/config"; printf '[core]\n' > "$_S234_W/vendor/fakegit/modules/sub/config"
-printf 'gitdir: vendor/fakegit\n' > "$_S234_W/.git"
-_a6_launch "$_S234_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S234_A="$(_a6_agent_args "$_S234_C")"
-_S234_OK=0
-{ [ "$_A6_RC" = 0 ] && [ -n "$_S234_A" ] \
-  && _a6_pair "$_S234_A" -v "$_S234_W/vendor/fakegit/config:/home/sandy/ws/vendor/fakegit/config:ro" \
-  && _a6_pair "$_S234_A" -v "$_S234_W/vendor/fakegit/modules/sub/hooks:/home/sandy/ws/vendor/fakegit/modules/sub/hooks:ro"; } || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(ok)" "$_S234_C"
-check "§234(ok) control: a plain launch with a .git FILE naming a gitdir in the workspace, nothing linking out, runs, with the gitdir's config and a submodule's hooks mounted :ro (rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
-_s234_okstart() { local w="$_A6_DIR/s234-oks/ws"; _s234_fakegit "$w/vendor/fakegit"; mkdir -p "$w/vendor/fakegit/modules/sub/hooks"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
-_s234_home s234-oks; _s230_sup_after s234-oks _s234_okstart
-check "§234(ok2) control: the same planted after the pass, under --start, reaches the agent run (rc ${_A6_RC:-none})" \
+_S236_C=s234-ok; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"
+_s236_fakegit "$_S236_W/vendor/fakegit"; mkdir -p "$_S236_W/vendor/fakegit/hooks" "$_S236_W/vendor/fakegit/modules/sub/hooks"
+printf '[core]\n' > "$_S236_W/vendor/fakegit/config"; printf '[core]\n' > "$_S236_W/vendor/fakegit/modules/sub/config"
+printf 'gitdir: vendor/fakegit\n' > "$_S236_W/.git"
+_a6_launch "$_S236_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S236_A="$(_a6_agent_args "$_S236_C")"
+_S236_OK=0
+{ [ "$_A6_RC" = 0 ] && [ -n "$_S236_A" ] \
+  && _a6_pair "$_S236_A" -v "$_S236_W/vendor/fakegit/config:/home/sandy/ws/vendor/fakegit/config:ro" \
+  && _a6_pair "$_S236_A" -v "$_S236_W/vendor/fakegit/modules/sub/hooks:/home/sandy/ws/vendor/fakegit/modules/sub/hooks:ro"; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(ok)" "$_S236_C"
+check "§236(ok) control: a plain launch with a .git FILE naming a gitdir in the workspace, nothing linking out, runs, with the gitdir's config and a submodule's hooks mounted :ro (rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
+_s236_okstart() { local w="$_A6_DIR/s234-oks/ws"; _s236_fakegit "$w/vendor/fakegit"; mkdir -p "$w/vendor/fakegit/modules/sub/hooks"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s236_home s234-oks; _s230_sup_after s234-oks _s236_okstart
+check "§236(ok2) control: the same planted after the pass, under --start, reaches the agent run (rc ${_A6_RC:-none})" \
     test -n "$(_a6_agent_args s234-oks)"
 # --- the check before docker run ---
 # A link planted AFTER the gate: a git stub plants .git/modules/sub/hooks ->
 # an outside directory at the core.hooksPath lookup, which runs after the
 # gate and before the submodule overlay is assembled. Only the -v check can
 # see it.
-_S234_C=s234-late; _s234_home "$_S234_C"; _S234_W="$_A6_DIR/$_S234_C/ws"; _S234_G="$_A6_DIR/$_S234_C/gitbin"
-mkdir -p "$_S234_W/.git/modules/sub" "$_S234_G"; printf '[core]\n' > "$_S234_W/.git/modules/sub/config"
+_S236_C=s234-late; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _S236_G="$_A6_DIR/$_S236_C/gitbin"
+mkdir -p "$_S236_W/.git/modules/sub" "$_S236_G"; printf '[core]\n' > "$_S236_W/.git/modules/sub/config"
 { printf '#!/bin/sh\n'
   printf 'case "$*" in *core.hooksPath*) [ -e %q ] || { ln -s %q %q; : > %q; } ;; esac\n' \
-      "$_A6_DIR/$_S234_C/planted" "$_A6_DIR/$_S234_C/hooksdir" "$_S234_W/.git/modules/sub/hooks" "$_A6_DIR/$_S234_C/planted"
-  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S234_G/git"
-chmod +x "$_S234_G/git"
-_a6_launch "$_S234_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 PATH="$_S234_G:$_A6_DIR/bin:$PATH"
-_S234_OK=0
-{ [ -e "$_A6_DIR/$_S234_C/planted" ] && [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S234_C")" ] \
-  && grep -qF "leaves the workspace through a link the" "$_A6_DIR/$_S234_C/out" \
-  && grep -qF ".git/modules/sub/hooks -> $_A6_DIR/$_S234_C/hooksdir" "$_A6_DIR/$_S234_C/out" \
-  && ! grep -rqsF -- "$_A6_DIR/$_S234_C/hooksdir" "$_A6_DIR/$_S234_C/runs"; } || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(late)" "$_S234_C"
-check "§234(late) a link planted after the gate under a path sandy mounts by name is caught by the -v check before docker run: refused, named, no agent run, nothing outside mounted (mutation: the check before docker run removed; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
+      "$_A6_DIR/$_S236_C/planted" "$_A6_DIR/$_S236_C/hooksdir" "$_S236_W/.git/modules/sub/hooks" "$_A6_DIR/$_S236_C/planted"
+  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S236_G/git"
+chmod +x "$_S236_G/git"
+_a6_launch "$_S236_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 PATH="$_S236_G:$_A6_DIR/bin:$PATH"
+_S236_OK=0
+{ [ -e "$_A6_DIR/$_S236_C/planted" ] && [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S236_C")" ] \
+  && grep -qF "leaves the workspace through a link the" "$_A6_DIR/$_S236_C/out" \
+  && grep -qF ".git/modules/sub/hooks -> $_A6_DIR/$_S236_C/hooksdir" "$_A6_DIR/$_S236_C/out" \
+  && ! grep -rqsF -- "$_A6_DIR/$_S236_C/hooksdir" "$_A6_DIR/$_S236_C/runs"; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(late)" "$_S236_C"
+check "§236(late) a link planted after the gate under a path sandy mounts by name is caught by the -v check before docker run: refused, named, no agent run, nothing outside mounted (mutation: the check before docker run removed; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
 # The same for a copy: .claude swapped for a link out of the workspace after
 # the gate, before the copied trees are seeded into a new sandbox. The -v
 # check cannot see a copy (the mount source is the sandbox's copy), so the
 # copy site checks its source the same way.
-_S234_C=s234-latecp; _s234_home "$_S234_C"; _S234_W="$_A6_DIR/$_S234_C/ws"; _S234_G="$_A6_DIR/$_S234_C/gitbin"
-mkdir -p "$_S234_W/.claude/commands" "$_A6_DIR/$_S234_C/out-claude/commands" "$_S234_G"
-printf 'x\n' > "$_S234_W/.claude/commands/x.md"; printf 'S234-SECRET\n' > "$_A6_DIR/$_S234_C/out-claude/commands/k.md"
+_S236_C=s234-latecp; _s236_home "$_S236_C"; _S236_W="$_A6_DIR/$_S236_C/ws"; _S236_G="$_A6_DIR/$_S236_C/gitbin"
+mkdir -p "$_S236_W/.claude/commands" "$_A6_DIR/$_S236_C/out-claude/commands" "$_S236_G"
+printf 'x\n' > "$_S236_W/.claude/commands/x.md"; printf 'S234-SECRET\n' > "$_A6_DIR/$_S236_C/out-claude/commands/k.md"
 { printf '#!/bin/sh\n'
   printf 'case "$*" in *core.hooksPath*) [ -e %q ] || { rm -rf %q; ln -s %q %q; : > %q; } ;; esac\n' \
-      "$_A6_DIR/$_S234_C/planted" "$_S234_W/.claude" "$_A6_DIR/$_S234_C/out-claude" "$_S234_W/.claude" "$_A6_DIR/$_S234_C/planted"
-  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S234_G/git"
-chmod +x "$_S234_G/git"
-_a6_launch "$_S234_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 PATH="$_S234_G:$_A6_DIR/bin:$PATH"
-_S234_OK=0
-{ [ -e "$_A6_DIR/$_S234_C/planted" ] && [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S234_C")" ] \
-  && grep -qF ".claude -> $_A6_DIR/$_S234_C/out-claude" "$_A6_DIR/$_S234_C/out" \
-  && ! grep -rqs S234-SECRET "$(_a6_sandbox "$_S234_C")"; } || _S234_OK=$?
-[ "$_S234_OK" = 0 ] || _a6_diag "§234(latecp)" "$_S234_C"
-check "§234(latecp) .claude swapped for a link out of the workspace after the gate is caught where the copied trees are seeded: refused, named, nothing copied from outside into the sandbox (mutation: the copy site does not check its source; rc ${_A6_RC:-none})" \
-    test "$_S234_OK" = 0
+      "$_A6_DIR/$_S236_C/planted" "$_S236_W/.claude" "$_A6_DIR/$_S236_C/out-claude" "$_S236_W/.claude" "$_A6_DIR/$_S236_C/planted"
+  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S236_G/git"
+chmod +x "$_S236_G/git"
+_a6_launch "$_S236_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 PATH="$_S236_G:$_A6_DIR/bin:$PATH"
+_S236_OK=0
+{ [ -e "$_A6_DIR/$_S236_C/planted" ] && [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S236_C")" ] \
+  && grep -qF ".claude -> $_A6_DIR/$_S236_C/out-claude" "$_A6_DIR/$_S236_C/out" \
+  && ! grep -rqs S234-SECRET "$(_a6_sandbox "$_S236_C")"; } || _S236_OK=$?
+[ "$_S236_OK" = 0 ] || _a6_diag "§236(latecp)" "$_S236_C"
+check "§236(latecp) .claude swapped for a link out of the workspace after the gate is caught where the copied trees are seeded: refused, named, nothing copied from outside into the sandbox (mutation: the copy site does not check its source; rc ${_A6_RC:-none})" \
+    test "$_S236_OK" = 0
 # The check itself, on fixture argv: judged targets cover what lies under
 # them, a link back into the workspace and out again is judged afresh, a
 # host link inside a judged target is the host's own, a target outside
 # $HOME counts only at a protected path, and $SANDY_HOME is never covered.
-_S234_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S236_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify \
           _sandy_symlink_walk _sandy_symlink_byname_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
           _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
-    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S234_D/fns.sh"
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S236_D/fns.sh"
 done
-mkdir -p "$_S234_D/h/ws/c" "$_S234_D/h/o" "$_S234_D/h/p" "$_S234_D/h/dots" "$_S234_D/h/stow" "$_S234_D/h/.sandy/x" "$_S234_D/sys"
-printf 'x\n' > "$_S234_D/h/o/f"; printf 'x\n' > "$_S234_D/h/stow/s"; printf 'x\n' > "$_S234_D/sys/settings.json"
-ln -s "$_S234_D/h/o" "$_S234_D/h/ws/a"                  # a -> HOME/o
-ln -s "$_S234_D/h/ws/c" "$_S234_D/h/o/b"                # HOME/o/b -> ws/c (back in)
-ln -s "$_S234_D/h/p" "$_S234_D/h/ws/c/d"                # ws/c/d -> HOME/p (out again)
-ln -s "$_S234_D/h/dots" "$_S234_D/h/ws/dl"              # dl -> HOME/dots
-ln -s "$_S234_D/h/stow/s" "$_S234_D/h/dots/s"           # HOME/dots/s -> HOME/stow/s (the host's own link)
-ln -s "$_S234_D/sys" "$_S234_D/h/ws/sl"                 # sl -> outside HOME
-ln -s "$_S234_D/sys" "$_S234_D/h/ws/.claude"            # .claude -> outside HOME (settings.json protected)
-ln -s "$_S234_D/h/.sandy/x" "$_S234_D/h/ws/st"          # st -> SANDY_HOME
-_s234_chk() {   # $1 = judged targets (space-separated)  $2... = -v sources (workspace-relative) -> rc, output
+mkdir -p "$_S236_D/h/ws/c" "$_S236_D/h/o" "$_S236_D/h/p" "$_S236_D/h/dots" "$_S236_D/h/stow" "$_S236_D/h/.sandy/x" "$_S236_D/sys"
+printf 'x\n' > "$_S236_D/h/o/f"; printf 'x\n' > "$_S236_D/h/stow/s"; printf 'x\n' > "$_S236_D/sys/settings.json"
+ln -s "$_S236_D/h/o" "$_S236_D/h/ws/a"                  # a -> HOME/o
+ln -s "$_S236_D/h/ws/c" "$_S236_D/h/o/b"                # HOME/o/b -> ws/c (back in)
+ln -s "$_S236_D/h/p" "$_S236_D/h/ws/c/d"                # ws/c/d -> HOME/p (out again)
+ln -s "$_S236_D/h/dots" "$_S236_D/h/ws/dl"              # dl -> HOME/dots
+ln -s "$_S236_D/h/stow/s" "$_S236_D/h/dots/s"           # HOME/dots/s -> HOME/stow/s (the host's own link)
+ln -s "$_S236_D/sys" "$_S236_D/h/ws/sl"                 # sl -> outside HOME
+ln -s "$_S236_D/sys" "$_S236_D/h/ws/.claude"            # .claude -> outside HOME (settings.json protected)
+ln -s "$_S236_D/h/.sandy/x" "$_S236_D/h/ws/st"          # st -> SANDY_HOME
+_s236_chk() {   # $1 = judged targets (space-separated)  $2... = -v sources (workspace-relative) -> rc, output
     local t="$1"; shift
     ( trap - ERR; set +e
       error() { printf '%s\n' "$*"; }; warn() { :; }; _sandy_daemon_fatal() { :; }
-      . "$_S234_D/fns.sh"
-      HOME="$_S234_D/h"; SANDY_HOME="$_S234_D/h/.sandy"; WORK_DIR="$_S234_D/h/ws"; REAL_WORK_DIR="$WORK_DIR"
+      . "$_S236_D/fns.sh"
+      HOME="$_S236_D/h"; SANDY_HOME="$_S236_D/h/.sandy"; WORK_DIR="$_S236_D/h/ws"; REAL_WORK_DIR="$WORK_DIR"
       _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=(); RUN_FLAGS=(-v "$WORK_DIR:/w")
-      for _x in $t; do _SANDY_SL_TGTS+=("$_S234_D/$_x"); done
+      for _x in $t; do _SANDY_SL_TGTS+=("$_S236_D/$_x"); done
       for _x in "$@"; do RUN_FLAGS+=(-v "$WORK_DIR/$_x:/w/$_x:ro"); done
       _sandy_symlink_check_mounts; echo "rc=$?" ) 2>&1 || true
 }
-_S234_R1="$(_s234_chk "" a/f)"; _S234_R2="$(_s234_chk "h/o" a/f)"; _S234_R3="$(_s234_chk "h/o" a/b/d)"; _S234_R4="$(_s234_chk "h/o h/p" a/b/d)"
-_S234_R5="$(_s234_chk "h/dots" dl/s)"; _S234_R6="$(_s234_chk "" sl/settings.json)"; _S234_R7="$(_s234_chk "" .claude/settings.json)"
-_S234_R8="$(_s234_chk "h/.sandy/x" st)"; _S234_R9="$(_s234_chk "" c)"
-check "§234(chk1) the -v check refuses a source leaving through an unjudged link, naming it, and passes it once its target is judged (got: $(printf '%s' "$_S234_R1" | tr '\n' ' ')/$(printf '%s' "$_S234_R2" | tr '\n' ' '))" \
-    bash -c 'printf "%s\n" "$1" | grep -qxF "  a -> $3/h/o" && ! printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S234_R1" "$_S234_R2" "$_S234_D"
-check "§234(chk2) ...a link back into the workspace and out again is judged afresh: refused until its own target is judged (mutation: the walk stops at the first judged exit; got: $(printf '%s' "$_S234_R3" | tr '\n' ' '))" \
-    bash -c 'printf "%s\n" "$1" | grep -qxF "  a/b/d -> $3/h/p" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S234_R3" "$_S234_R4" "$_S234_D"
-check "§234(chk3) ...a host link inside a judged target is the host's own (a dotfiles farm), and a target outside \$HOME at an unprotected path passes, as the scan lets it (got: $(printf '%s' "$_S234_R5$_S234_R6" | tr '\n' ' '))" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S234_R5" "$_S234_R6"
-check "§234(chk4) ...but a protected path outside \$HOME is refused, a target in \$SANDY_HOME is refused even when judged, and a source inside the workspace passes (got: $(printf '%s' "$_S234_R7$_S234_R8$_S234_R9" | tr '\n' ' '))" \
-    bash -c 'printf "%s\n" "$1" | grep -qxF "  .claude/settings.json -> $4/sys/settings.json" && printf "%s\n" "$2" | grep -qxF "  st -> $4/h/.sandy/x" && printf "%s\n" "$3" | grep -qx "rc=0"' _ "$_S234_R7" "$_S234_R8" "$_S234_R9" "$_S234_D"
-rm -rf "$_S234_D"
-unset _S234_OK _S234_K _S234_C _S234_W _S234_A _S234_G _S234_D _S234_R1 _S234_R2 _S234_R3 _S234_R4 _S234_R5 _S234_R6 _S234_R7 _S234_R8 _S234_R9 _f _x
-unset -f _s234_fakegit _s234_home _s234_refused _s234_ab _s234_s1 _s234_s1h _s234_s3 _s234_m1 _s234_seed _s234_okstart _s234_chk
-unset _S233 _S233_OK
-unset -f _s233_git _s233_seed _s233_held _s233_g5 _s233_g5o _s233_kt _s233_pruned _s230_refused _s230_sup_after
+_S236_R1="$(_s236_chk "" a/f)"; _S236_R2="$(_s236_chk "h/o" a/f)"; _S236_R3="$(_s236_chk "h/o" a/b/d)"; _S236_R4="$(_s236_chk "h/o h/p" a/b/d)"
+_S236_R5="$(_s236_chk "h/dots" dl/s)"; _S236_R6="$(_s236_chk "" sl/settings.json)"; _S236_R7="$(_s236_chk "" .claude/settings.json)"
+_S236_R8="$(_s236_chk "h/.sandy/x" st)"; _S236_R9="$(_s236_chk "" c)"
+check "§236(chk1) the -v check refuses a source leaving through an unjudged link, naming it, and passes it once its target is judged (got: $(printf '%s' "$_S236_R1" | tr '\n' ' ')/$(printf '%s' "$_S236_R2" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  a -> $3/h/o" && ! printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S236_R1" "$_S236_R2" "$_S236_D"
+check "§236(chk2) ...a link back into the workspace and out again is judged afresh: refused until its own target is judged (mutation: the walk stops at the first judged exit; got: $(printf '%s' "$_S236_R3" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  a/b/d -> $3/h/p" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S236_R3" "$_S236_R4" "$_S236_D"
+check "§236(chk3) ...a host link inside a judged target is the host's own (a dotfiles farm), and a target outside \$HOME at an unprotected path passes, as the scan lets it (got: $(printf '%s' "$_S236_R5$_S236_R6" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S236_R5" "$_S236_R6"
+check "§236(chk4) ...but a protected path outside \$HOME is refused, a target in \$SANDY_HOME is refused even when judged, and a source inside the workspace passes (got: $(printf '%s' "$_S236_R7$_S236_R8$_S236_R9" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  .claude/settings.json -> $4/sys/settings.json" && printf "%s\n" "$2" | grep -qxF "  st -> $4/h/.sandy/x" && printf "%s\n" "$3" | grep -qx "rc=0"' _ "$_S236_R7" "$_S236_R8" "$_S236_R9" "$_S236_D"
+rm -rf "$_S236_D"
+unset _S236_OK _S236_K _S236_C _S236_W _S236_A _S236_G _S236_D _S236_R1 _S236_R2 _S236_R3 _S236_R4 _S236_R5 _S236_R6 _S236_R7 _S236_R8 _S236_R9 _f _x
+unset -f _s236_fakegit _s236_home _s236_refused _s236_ab _s236_s1 _s236_s1h _s236_s3 _s236_m1 _s236_seed _s236_okstart _s236_chk
+unset _S235 _S235_OK
+unset -f _s235_git _s235_seed _s235_held _s235_g5 _s235_g5o _s235_kt _s235_pruned _s230_refused _s230_sup_after
 
 unset _S228_ID _S229_LOG _S226_ETC
 unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup _s228_list
@@ -27689,6 +27661,403 @@ unset -f _s224_host
 rm -rf "$_S224_D"
 unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
+
+section "§233: --update-sessions --rebuild rebuilds each shared image once, not once per session (B8 G5)"
+# ============================================================
+# A child's --rebuild only clears the build cache (_sandy_clear_build_cache):
+# the --build-only child exits after the agent phase, so it never builds a
+# skill pack or project image, and with the hashes gone the version probe is
+# skipped anyway. Passing it to every child made N sessions rebuild the shared
+# base image N times, each child clearing the hash the one before had just
+# written. The orchestrator now clears once. Three daemon sessions behind a
+# stub docker: A (claude), C (codex) and B (claude), refreshed in that order by
+# the REAL --update-sessions dispatcher and its REAL --build-only children.
+# The build log counts `docker build -t <image>` per image: --rebuild must
+# rebuild sandy-base once, sandy-claude-code once (A builds, B finds it fresh)
+# and sandy-codex once (a different agent still gets its own rebuild).
+_S233_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S233_D/bin" "$_S233_D/sh" "$_S233_D/wsA" "$_S233_D/wsB" "$_S233_D/wsC/.sandy"
+printf 'SANDY_AGENT=codex\n' > "$_S233_D/wsC/.sandy/config"
+cat > "$_S233_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        printf 'cidA|%s|%s|sandy-claude-code\n' "${S233_SESSA:-sessA}" "$S233_D/wsA"
+        printf 'cidC|sessC|%s|sandy-codex\n' "$S233_D/wsC"
+        printf 'cidB|sessB|%s|sandy-claude-code\n' "$S233_D/wsB"
+        exit 0 ;;
+    build)
+        _p=""
+        _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S233_D/builds.log"
+        if [ -n "${S233_FAILIMG:-}" ] && [ "$_t" = "$S233_FAILIMG" ]; then
+            [ -f "$S233_D/buildmsg" ] && cat "$S233_D/buildmsg" >&2
+            exit 17
+        fi
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ -n "$_f" ] && echo "sha256:current-$_n"
+        exit 0 ;;
+    inspect) exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+EOF
+cat > "$_S233_D/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in *deb.debian.org*|*registry.npmjs.org*) exit 0 ;; esac
+exit 1
+EOF
+chmod +x "$_S233_D/bin/docker" "$_S233_D/bin/curl"
+_sleep_stub "$_S233_D/bin" "$_S233_D/sleep.log" 0.05
+# _s233_run [sandy-args...]: one --update-sessions --dry-run; the build log
+# holds that run's builds only. Sets _S233_RC.
+_s233_run() {
+    : > "$_S233_D/builds.log"
+    _S233_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$SANDY_SCRIPT" --update-sessions --dry-run "$@" </dev/null >"$_S233_D/out" 2>&1
+    ) || _S233_RC=$?
+}
+_s233_count() { grep -cx "$1" "$_S233_D/builds.log" || true; }
+_s233_run
+_s233_run
+_S233_PRE="$_S233_RC/$(_s233_count sandy-base)/$(_s233_count sandy-claude-code)/$(_s233_count sandy-codex)"
+check "§233(pre) control: a primed fleet refresh without --rebuild refreshes all three sessions and builds nothing (rc/base/claude/codex: $_S233_PRE)" \
+    bash -c 'test "$1" = 0/0/0/0 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_PRE" "$_S233_D/out"
+_s233_run --rebuild
+_S233_R="$_S233_RC/$(_s233_count sandy-base)/$(_s233_count sandy-claude-code)/$(_s233_count sandy-codex)"
+check "§233(1) --update-sessions --rebuild over three sessions builds sandy-base exactly once, sandy-claude-code once (two sessions share it) and sandy-codex once (mutation: pass --rebuild to each child again -> 3/2/1; rc/base/claude/codex: $_S233_R)" \
+    bash -c 'test "$1" = 0/1/1/1 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_R" "$_S233_D/out"
+check "§233(2) ...and says the cache was cleared once, by the orchestrator" \
+    bash -c 'test "$(grep -c "Build cache cleared" "$1")" = 1' _ "$_S233_D/out"
+# (3) A failed optional claude rebuild in session A is recorded, so session B
+# (same image) is held back by it instead of repeating the build, and the
+# orchestrator's own output says so for both: the children succeed, so their
+# warnings would otherwise stay in the captured logs.
+rm -f "$_S233_D/sh/.build_hash"
+export S233_FAILIMG=sandy-claude-code
+_s233_run
+unset S233_FAILIMG
+_S233_R="$_S233_RC/$(_s233_count sandy-claude-code)"
+check "§233(3) a failed optional rebuild is built once across the fleet, and the plan output names the record for A and the skip for B (mutation: drop the orchestrator's note; rc/claude builds $_S233_R)" \
+    bash -c 'test "$1" = 0/1 && grep -q "sessA: Not retrying this build for 30 minutes" "$2" && grep -q "sessB: Skipping the agent image rebuild: The sandy-claude-code rebuild failed" "$2"' _ "$_S233_R" "$_S233_D/out"
+# (4) The note is sandy's own line, never the build's output, and nothing in
+# it is interpreted: the failing build prints a look-alike line (and one that
+# even starts with "[sandy]") carrying an escape sequence, and session A's
+# label carries a literal \033 that `echo -e` would turn into a real one.
+rm -f "$_S233_D/sh/.build_failed"
+printf 'npm ERR! Not retrying this build PWNED1\n[sandy]   Not retrying this build \\033]0;PWNED2\\007 now\n' > "$_S233_D/buildmsg"
+export S233_FAILIMG=sandy-claude-code
+export S233_SESSA='sessA\033[7m'
+_s233_run
+unset S233_FAILIMG S233_SESSA
+_S233_NOTE="$(grep -F 'Not retrying this build' "$_S233_D/out" || true)"
+_S233_ESC="$(printf '%s' "$_S233_NOTE" | LC_ALL=C tr -cd '\033' | wc -c | tr -d ' ')"
+check "§233(4) the orchestrator's note is the child's own sandy line, the last one, printed verbatim with no escape interpreted (mutation: unanchored first match, or echo -e; note: $(printf '%s' "$_S233_NOTE" | cat -v | tr '\n' '|'))" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep -c .)" = 1 && test "$2" = 0 && case "$1" in *"sessA\033[7m: Not retrying this build for 30 minutes; sandy --rebuild retries it now.") ;; *) exit 1 ;; esac && case "$1" in *PWNED*) exit 1 ;; esac' \
+    _ "$_S233_NOTE" "$_S233_ESC"
+rm -rf "$_S233_D"
+unset _S233_D _S233_RC _S233_PRE _S233_R _S233_NOTE _S233_ESC
+unset -f _s233_run _s233_count
+
+section "§234: a failed optional agent rebuild is not retried for 30 minutes; --rebuild, a new target or a missing image retries (B8 G7)"
+# ============================================================
+# The REAL launcher's --build-only (the agent phase runs before it exits)
+# behind a stub docker whose build of $S234_FAILIMG fails (exit 17) and whose
+# agent image is absent when S234_NOIMG=1. Installed agent versions come from
+# $S234_D/ver_<dir> (default 1.0.0) and published ones from latest_claude /
+# latest_codex, so the update checks run for real when SANDY_OFFLINE is off.
+# The 30 minutes are crossed by rewriting the epoch the record carries, never
+# by faking the clock or mtime.
+_S234_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S234_D/bin" "$_S234_D/sh" "$_S234_D/ws"
+cat > "$_S234_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    build)
+        _p=""; _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S234_D/builds.log"
+        [ -n "${S234_FAILIMG:-}" ] && [ "$_t" = "$S234_FAILIMG" ] && exit 17
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ "$_n" = sandy-claude-code ] && [ "${S234_NOIMG:-0}" = 1 ] && exit 1
+        [ -n "$_f" ] && echo "sha256:id-$_n"
+        exit 0 ;;
+    run)
+        _last=""; for _a in "$@"; do _last="$_a"; done
+        case "$*" in
+            *"--entrypoint cat "*)
+                _a="$(printf '%s' "$_last" | cut -d/ -f3)"
+                cat "$S234_D/ver_$_a" 2>/dev/null || echo 1.0.0
+                exit 0 ;;
+            *"--entrypoint test "*)
+                _a="$(printf '%s' "$_last" | cut -d/ -f3)"
+                [ -f "$S234_D/ver_$_a" ] && [ ! -s "$S234_D/ver_$_a" ] && exit 1
+                exit 0 ;;
+        esac
+        exit 0 ;;
+    network)
+        case "$*" in
+            *Subnet*) echo 172.30.0.0/16 ;;
+            *Gateway*) echo 172.30.0.1 ;;
+            *bridge.name*) echo br-s234 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+cat > "$_S234_D/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *registry.npmjs.org/@openai/codex/latest*)
+        [ -f "$S234_D/latest_codex" ] || exit 1
+        printf '{"version":"%s"}\n' "$(cat "$S234_D/latest_codex")"; exit 0 ;;
+    *claude-code-releases/latest*)
+        [ -f "$S234_D/latest_claude" ] || exit 1
+        cat "$S234_D/latest_claude"; exit 0 ;;
+    *deb.debian.org*|*registry.npmjs.org/) exit 0 ;;
+esac
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$_S234_D/bin/gh"
+printf '#!/bin/sh\nexit 0\n' > "$_S234_D/bin/sudo"
+printf '#!/bin/sh\nexit 44\n' > "$_S234_D/bin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S234_D/bin/uname"
+chmod +x "$_S234_D/bin/docker" "$_S234_D/bin/curl" "$_S234_D/bin/gh" "$_S234_D/bin/sudo" "$_S234_D/bin/security" "$_S234_D/bin/uname"
+_S234_REC="$_S234_D/sh/.build_failed"
+_S234_IMG=sandy-claude-code
+# _s234_run [VAR=value ...] [-- sandy-args ...]: one launch (default
+# --build-only as claude, offline); sets _S234_RC and _S234_AG (builds of
+# $_S234_IMG).
+_s234_run() {
+    local envs args
+    envs=(SANDY_AGENT=claude SANDY_OFFLINE=1); args=(--build-only)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
+    : > "$_S234_D/builds.log"
+    _S234_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$_S234_D/ws" && env PATH="$_S234_D/bin:$PATH" HOME="$_S234_D" SANDY_HOME="$_S234_D/sh" S234_D="$_S234_D" \
+            SANDY_EGRESS=off "${envs[@]}" bash "$SANDY_SCRIPT" "${args[@]}" </dev/null >"$_S234_D/out" 2>&1
+    ) || _S234_RC=$?
+    _S234_AG="$(grep -cx "$_S234_IMG" "$_S234_D/builds.log" || true)"
+}
+# _s234_age SECONDS: move the record's epoch that far into the past (a
+# missing record stays missing, and the check that needed it fails).
+_s234_age() {
+    local e rest
+    read -r e rest < "$_S234_REC" 2>/dev/null || return 0
+    printf '%s %s\n' "$((e - $1))" "$rest" > "$_S234_REC"
+}
+# _s234_fail: a fresh failure record for the solo claude image.
+_s234_fail() {
+    rm -f "$_S234_D/sh/.build_hash"
+    _s234_run S234_FAILIMG=sandy-claude-code
+}
+_s234_run
+_S234_P="$_S234_RC/$_S234_AG"
+_s234_fail
+_S234_F="$_S234_RC/$_S234_AG"
+# The record's shape: <epoch> <exit> <image> <hash> <target>, nothing more.
+_S234_SHAPE="unread"
+if read -r _f1 _f2 _f3 _f4 _f5 _f6 < "$_S234_REC"; then
+    case "$_f1" in ''|*[!0-9]*) _S234_SHAPE="epoch $_f1" ;; *) _S234_SHAPE="$_f2 $_f3 ${_f4:+hash} $_f5${_f6:+ extra}" ;; esac
+fi
+unset _f1 _f2 _f3 _f4 _f5 _f6
+check "§234(pre) control: a primed home builds the agent; with its hash gone a failing rebuild is attempted, the launch continues on the existing image (rc 0), and the failure is recorded as <epoch> <exit> <image> <hash> <target> (prime rc/agent builds $_S234_P, failing $_S234_F, record: $_S234_SHAPE)" \
+    bash -c 'test "$1" = 0/1 && test "$2" = 0/1 && test "$4" = "17 sandy-claude-code hash -" && grep -q "Agent image rebuild failed (docker build exit 17)" "$3" && grep -q "Not retrying this build for 30 minutes" "$3"' \
+    _ "$_S234_P" "$_S234_F" "$_S234_D/out" "$_S234_SHAPE"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(1) the next launch within 30 minutes does not build the agent, continues (rc 0), and its warning names the failure, the retry time and sandy --rebuild (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/0 && grep -qF "Skipping the agent image rebuild: The sandy-claude-code rebuild failed 0 min ago (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3"' \
+    _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_age 1801
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(2) after 30 minutes the build is retried (mutation: drop the TTL comparison -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_run S234_FAILIMG=sandy-claude-code -- --build-only --rebuild
+check "§234(3) --rebuild retries at once despite a fresh record (mutation: --rebuild no longer clears the records -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_S234_H=""; _e=0; _x=""; _i=""; _t=""
+read -r _e _x _i _S234_H _t < "$_S234_REC" 2>/dev/null || true
+printf '%s %s %s other-hash %s\n' "$_e" "$_x" "$_i" "$_t" > "$_S234_REC"
+_s234_run S234_FAILIMG=sandy-claude-code
+_S234_H2=""
+read -r _e _x _i _S234_H2 _t < "$_S234_REC" 2>/dev/null || true
+unset _e _x _i _t
+check "§234(4) a fresh record for a different target (other build inputs) does not hold this build back, and the new failure replaces it (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && test -n "$3" && test "$3" = "$4"' _ "$_S234_RC" "$_S234_AG" "$_S234_H" "$_S234_H2"
+_s234_run S234_FAILIMG=sandy-claude-code S234_NOIMG=1
+check "§234(5) a REQUIRED build (no agent image to fall back to) is attempted despite a fresh record, and its failure fails the launch (mutation: consult the record without the image check -> no build, rc 0; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 1/1 && grep -q "no previous image exists" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_age 1801
+_s234_run
+check "§234(6) a successful rebuild deletes the record (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && test ! -e "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_REC"
+
+# (7) A leading-zero epoch would be octal to $(( )): an 8 or 9 in it aborted
+# the build step silently. Fresh or backdated, it is ignored with a warning
+# and the build runs.
+for _S234_LZ in 0 1801; do
+    _s234_fail
+    _rest=""; read -r _e _rest < "$_S234_REC" 2>/dev/null || true
+    printf '0%s %s\n' "$(($(date +%s) - _S234_LZ))" "$_rest" > "$_S234_REC"
+    _s234_run S234_FAILIMG=sandy-claude-code
+    check "§234(7) a record whose epoch has a leading zero (backdated ${_S234_LZ}s) is ignored with a warning and the build is retried (mutation: accept a leading zero; rc/agent builds $_S234_RC/$_S234_AG)" \
+        bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+done
+unset _e _rest _S234_LZ
+
+# (8) A link planted at the record path is replaced, never written through:
+# the record lands at the path itself, nothing appears in the link's target,
+# and the next launch is held back by it.
+mkdir -p "$_S234_D/elsewhere"
+rm -f "$_S234_REC"; ln -s "$_S234_D/elsewhere" "$_S234_REC"
+_s234_fail
+_S234_R8="$_S234_RC/$_S234_AG"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(8) a link to a directory at the record path is removed, not followed: the record is a plain file at the path, the directory stays empty, and the next launch is held back (mutation: mv through the link; failing rc/builds $_S234_R8, next $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = 0/1 && test "$2/$3" = 0/0 && test -f "$4" && test ! -L "$4" && test -z "$(ls -A "$5")"' \
+    _ "$_S234_R8" "$_S234_RC" "$_S234_AG" "$_S234_REC" "$_S234_D/elsewhere"
+
+# (9) A real directory at the record path cannot hold a record: the failure
+# says so (no false "not retrying"), the next launch retries, and --rebuild
+# leaves the directory alone with a warning instead of failing under set -e.
+rm -f "$_S234_REC"; mkdir "$_S234_REC"
+_s234_fail
+_S234_R9="$_S234_RC/$_S234_AG"
+check "§234(9) a directory at the record path: the failure is reported as not recorded, never as held back (rc/agent builds $_S234_R9)" \
+    bash -c 'test "$1" = 0/1 && grep -q "Could not record the failure: .* is not a file" "$2" && ! grep -q "Not retrying this build" "$2"' _ "$_S234_R9" "$_S234_D/out"
+_s234_run S234_FAILIMG=sandy-claude-code
+check "§234(10) ...and the next launch retries the build, saying why (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && grep -q "is not a plain file. Retrying" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_run -- --build-only --rebuild
+check "§234(11) --rebuild with a directory matching the records still succeeds, leaving it with a warning (mutation: rm -f the glob -> rc 1; rc $_S234_RC)" \
+    bash -c 'test "$1" = 0 && test -d "$2" && grep -q "Leaving .* alone: it is not a file" "$3"' _ "$_S234_RC" "$_S234_REC" "$_S234_D/out"
+rm -rf "$_S234_REC"
+
+# (12) Session end, on a real (-p) launch whose rebuild failed and was
+# recorded: the closing line names the 30-minute retry, never "the next
+# launch".
+rm -f "$_S234_D/sh/.build_hash"
+_s234_run S234_FAILIMG=sandy-claude-code ANTHROPIC_API_KEY=sk-fixture-s234 -- -p fixture
+check "§234(12) a recorded failure's session-end notice gives the 30-minute retry and not 'rebuilds on the next launch' (mutation: set the generic deferred flag anyway; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$2" = 1 && grep -qF "You ran on the existing image. The sandy-claude-code rebuild failed (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3" && ! grep -q "rebuilds on the next launch" "$3"' \
+    _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+
+# (14) An agent that reports no version makes its image unusable: that
+# failure is never recorded, so the next launch retries it.
+rm -f "$_S234_REC"
+: > "$_S234_D/ver_claude-code"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+_S234_B1="$_S234_RC/$_S234_AG"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+check "§234(14) a failed rebuild of an image whose agent reports no version is never recorded, and the next launch retries it (mutation: record it, or never set the broken flag; rc/agent builds $_S234_B1 then $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = 0/1 && test "$2/$3" = 0/1 && test ! -e "$4" && grep -q "reports no version, so the next launch retries the build" "$5"' \
+    _ "$_S234_B1" "$_S234_RC" "$_S234_AG" "$_S234_REC" "$_S234_D/out"
+rm -f "$_S234_D/ver_claude-code"
+
+# (15) After a failure its INPUTS triggered (target "-"), a claude release
+# appearing within the 30 minutes changes the key: the update check runs even
+# though the build is already forced.
+rm -f "$_S234_REC" "$_S234_D/latest_claude"
+_s234_fail
+_S234_T15="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+printf '2.0.0\n' > "$_S234_D/latest_claude"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+_S234_T15b="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+check "§234(15) an inputs-triggered failure (target $_S234_T15) does not hold back a claude release that appears within 30 minutes: it is built, and the record names it (mutation: skip the checks when the build is already forced; rc/agent builds $_S234_RC/$_S234_AG, target now $_S234_T15b)" \
+    bash -c 'test "$1" = - && test "$2/$3" = 0/1 && test "$4" = claude@2.0.0' _ "$_S234_T15" "$_S234_RC" "$_S234_AG" "$_S234_T15b"
+rm -f "$_S234_D/latest_claude"
+
+# (16) An epoch too long for shell integers is unreadable, not an error.
+read -r _e _rest < "$_S234_REC" 2>/dev/null || _rest=""
+printf '12345678901234567890 %s\n' "$_rest" > "$_S234_REC"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+check "§234(16) a 20-digit epoch is ignored with the unreadable-record warning, with no shell error, and the build is retried (mutation: no length bound; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3" && ! grep -q "integer expression" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+unset _e _rest
+
+# (17) A base image rebuilt in this launch is never held back by a fresh
+# record: the agent image would otherwise stay on the old base. The record's
+# key (image, build hash, target) still matches, so only the base rebuild can
+# let the build through.
+_s234_fail
+_S234_K17="$(cut -d' ' -f3- "$_S234_REC" 2>/dev/null || true)"
+_S234_K17s="$(awk '{ print $3, substr($4, 1, 8), $5 }' "$_S234_REC" 2>/dev/null || true)"
+rm -f "$_S234_D/sh/.base_build_hash"
+_s234_run
+_S234_B17="$(grep -cx sandy-base "$_S234_D/builds.log" || true)"
+check "§234(17) a fresh record does not hold back the agent rebuild when the base was rebuilt in the same launch: base and agent are built, and the record is gone (mutation: drop the BASE_REBUILT guard -> agent held back; rc/base/agent builds $_S234_RC/$_S234_B17/$_S234_AG, record key $_S234_K17s)" \
+    bash -c 'test -n "$5" && test "$1/$2/$3" = 0/1/1 && test ! -e "$4" && ! grep -q "Skipping the agent image rebuild" "$6"' \
+    _ "$_S234_RC" "$_S234_B17" "$_S234_AG" "$_S234_REC" "$_S234_K17" "$_S234_D/out"
+
+# (18) An agent build that the base rebuild forced, and that failed, is held
+# back and then retried. BUILD_HASH does not cover the base, so the build hash
+# left from before still matches: unless the failure drops it, every later
+# launch reports the image up to date and never rebuilds it on the new base.
+# Starts from (17): a current .build_hash and no record.
+_S234_H18="absent"; [ -f "$_S234_D/sh/.build_hash" ] && _S234_H18="present"
+rm -f "$_S234_D/sh/.base_build_hash"
+_s234_run S234_FAILIMG=sandy-claude-code
+_S234_F18="$_S234_RC/$(grep -cx sandy-base "$_S234_D/builds.log" || true)/$_S234_AG"
+_S234_K18="$(cut -d' ' -f3 "$_S234_REC" 2>/dev/null || true)"
+_s234_run
+_S234_N18="$_S234_RC/$_S234_AG"
+_S234_S18=no; grep -q "Skipping the agent image rebuild" "$_S234_D/out" && _S234_S18=yes
+_S234_U18=no; grep -q "Sandbox image up to date" "$_S234_D/out" && _S234_U18=yes
+_s234_age 1860
+_s234_run
+check "§234(18) a base-triggered agent build that fails is held back on the next launch and built once after 30 minutes (mutation: keep the build hash on failure -> 'up to date' forever; hash before $_S234_H18, failing rc/base/agent $_S234_F18, record image $_S234_K18, next rc/agent $_S234_N18 held $_S234_S18 up-to-date $_S234_U18, after 31 min $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = present && test "$2" = 0/1/1 && test "$3" = sandy-claude-code && test "$4" = 0/0 && test "$5/$6" = yes/no && test "$7/$8" = 0/1' \
+    _ "$_S234_H18" "$_S234_F18" "$_S234_K18" "$_S234_N18" "$_S234_S18" "$_S234_U18" "$_S234_RC" "$_S234_AG"
+
+# (13) A combo's target names every agent with a newer release, so a second
+# agent's release is not held back by a record made for the first.
+rm -rf "$_S234_D/sh"; mkdir -p "$_S234_D/sh"
+rm -f "$_S234_D/latest_claude" "$_S234_D/latest_codex"
+_S234_IMG=sandy-full
+_S234_REC="$_S234_D/sh/.build_failed_full"
+_S234_CB=(SANDY_AGENT=claude,codex SANDY_OFFLINE=0)
+_s234_run "${_S234_CB[@]}"
+_S234_C0="$_S234_RC/$_S234_AG"
+printf '2.0.0\n' > "$_S234_D/latest_claude"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C1="$_S234_RC/$_S234_AG"
+_S234_T1="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C2="$_S234_RC/$_S234_AG"
+printf '3.0.0\n' > "$_S234_D/latest_codex"
+_s234_run "${_S234_CB[@]}" S234_FAILIMG=sandy-full
+_S234_C3="$_S234_RC/$_S234_AG"
+_S234_T3="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+check "§234(13) claude,codex: a failed rebuild for claude 2.0.0 is held back on the next launch, but codex 3.0.0 appearing retries it, and the record names both (mutation: stop the checks at the first update -> held back; builds prime/fail/same/codex $_S234_C0 $_S234_C1 $_S234_C2 $_S234_C3, targets $_S234_T1 / $_S234_T3)" \
+    bash -c 'test "$1 $2 $3 $4" = "0/1 0/1 0/0 0/1" && test "$5" = "claude@2.0.0" && test "$6" = "claude@2.0.0,codex@3.0.0"' \
+    _ "$_S234_C0" "$_S234_C1" "$_S234_C2" "$_S234_C3" "$_S234_T1" "$_S234_T3"
+rm -rf "$_S234_D"
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b _S234_K17 _S234_K17s _S234_B17 _S234_H18 _S234_F18 _S234_K18 _S234_N18 _S234_S18 _S234_U18
+unset -f _s234_run _s234_age _s234_fail
 
 # BEGIN SUMMARY
 # ============================================================
