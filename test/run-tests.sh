@@ -27131,12 +27131,33 @@ unset _e _rest
 # let the build through.
 _s234_fail
 _S234_K17="$(cut -d' ' -f3- "$_S234_REC" 2>/dev/null || true)"
+_S234_K17s="$(awk '{ print $3, substr($4, 1, 8), $5 }' "$_S234_REC" 2>/dev/null || true)"
 rm -f "$_S234_D/sh/.base_build_hash"
 _s234_run
 _S234_B17="$(grep -cx sandy-base "$_S234_D/builds.log" || true)"
-check "§234(17) a fresh record does not hold back the agent rebuild when the base was rebuilt in the same launch: base and agent are built, and the record is gone (mutation: drop the BASE_REBUILT guard -> agent held back; rc/base/agent builds $_S234_RC/$_S234_B17/$_S234_AG, record key $_S234_K17)" \
+check "§234(17) a fresh record does not hold back the agent rebuild when the base was rebuilt in the same launch: base and agent are built, and the record is gone (mutation: drop the BASE_REBUILT guard -> agent held back; rc/base/agent builds $_S234_RC/$_S234_B17/$_S234_AG, record key $_S234_K17s)" \
     bash -c 'test -n "$5" && test "$1/$2/$3" = 0/1/1 && test ! -e "$4" && ! grep -q "Skipping the agent image rebuild" "$6"' \
     _ "$_S234_RC" "$_S234_B17" "$_S234_AG" "$_S234_REC" "$_S234_K17" "$_S234_D/out"
+
+# (18) An agent build that the base rebuild forced, and that failed, is held
+# back and then retried. BUILD_HASH does not cover the base, so the build hash
+# left from before still matches: unless the failure drops it, every later
+# launch reports the image up to date and never rebuilds it on the new base.
+# Starts from (17): a current .build_hash and no record.
+_S234_H18="absent"; [ -f "$_S234_D/sh/.build_hash" ] && _S234_H18="present"
+rm -f "$_S234_D/sh/.base_build_hash"
+_s234_run S234_FAILIMG=sandy-claude-code
+_S234_F18="$_S234_RC/$(grep -cx sandy-base "$_S234_D/builds.log" || true)/$_S234_AG"
+_S234_K18="$(cut -d' ' -f3 "$_S234_REC" 2>/dev/null || true)"
+_s234_run
+_S234_N18="$_S234_RC/$_S234_AG"
+_S234_S18=no; grep -q "Skipping the agent image rebuild" "$_S234_D/out" && _S234_S18=yes
+_S234_U18=no; grep -q "Sandbox image up to date" "$_S234_D/out" && _S234_U18=yes
+_s234_age 1860
+_s234_run
+check "§234(18) a base-triggered agent build that fails is held back on the next launch and built once after 30 minutes (mutation: keep the build hash on failure -> 'up to date' forever; hash before $_S234_H18, failing rc/base/agent $_S234_F18, record image $_S234_K18, next rc/agent $_S234_N18 held $_S234_S18 up-to-date $_S234_U18, after 31 min $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = present && test "$2" = 0/1/1 && test "$3" = sandy-claude-code && test "$4" = 0/0 && test "$5/$6" = yes/no && test "$7/$8" = 0/1' \
+    _ "$_S234_H18" "$_S234_F18" "$_S234_K18" "$_S234_N18" "$_S234_S18" "$_S234_U18" "$_S234_RC" "$_S234_AG"
 
 # (13) A combo's target names every agent with a newer release, so a second
 # agent's release is not held back by a record made for the first.
@@ -27161,7 +27182,7 @@ check "§234(13) claude,codex: a failed rebuild for claude 2.0.0 is held back on
     bash -c 'test "$1 $2 $3 $4" = "0/1 0/1 0/0 0/1" && test "$5" = "claude@2.0.0" && test "$6" = "claude@2.0.0,codex@3.0.0"' \
     _ "$_S234_C0" "$_S234_C1" "$_S234_C2" "$_S234_C3" "$_S234_T1" "$_S234_T3"
 rm -rf "$_S234_D"
-unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b _S234_K17 _S234_B17
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b _S234_K17 _S234_K17s _S234_B17 _S234_H18 _S234_F18 _S234_K18 _S234_N18 _S234_S18 _S234_U18
 unset -f _s234_run _s234_age _s234_fail
 
 # BEGIN SUMMARY

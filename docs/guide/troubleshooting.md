@@ -81,7 +81,9 @@ different agent, changed image inputs, or a newer agent release that sandy's
 update check can see are not held back, an image that does not exist yet
 is always built, and a launch that rebuilds the base image always rebuilds the
 agent image on top of it. A release the check cannot see (its registry unreachable, or
-`SANDY_OFFLINE=1`) waits out the 30 minutes too.
+`SANDY_OFFLINE=1`) waits out the 30 minutes too. If the failed rebuild was for a
+new release, a launch that cannot see that release rebuilds at once with what
+it does see, and a failure of that build is held back for 30 minutes in turn.
 
 **Fix.** Nothing, if you are happy on the existing image: the rebuild is tried
 again automatically once the 30 minutes are up, or sooner when a launch

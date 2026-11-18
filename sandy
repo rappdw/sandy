@@ -15933,8 +15933,11 @@ _check_mirror_update() {
 # from this launch's is ignored, so changed inputs, a different agent, or a
 # newer release that this launch's update check SEES are not held back. A
 # release whose check cannot reach its registry (or any launch under
-# SANDY_OFFLINE, which skips the checks) is not seen, so it does not change
-# the key: that build waits out the 30 minutes like the failed one. It is only consulted while the image exists: a REQUIRED build (no
+# SANDY_OFFLINE, which skips the checks) is not seen: such a launch's target
+# is "-", so after an inputs-triggered failure it waits out the 30 minutes,
+# and after a release-triggered one it retries at once. A failed build also
+# deletes the build hash file (below), so a launch after the 30 minutes
+# always retries. It is only consulted while the image exists: a REQUIRED build (no
 # image to fall back to) always runs. Nor is it consulted when the base image
 # was rebuilt in this launch (BASE_REBUILT): holding the agent build back then
 # would leave the agent image on the old base. A build for an image whose agent reports
@@ -16056,6 +16059,13 @@ if [ "$NEEDS_BUILD" = true ]; then
             _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
         elif [ -n "$_old_agent_id" ]; then
             warn "Agent image rebuild failed (docker build exit $_agent_build_rc) — continuing on the existing image."
+            # Drop the build hash: the kept image no longer matches it when the
+            # trigger was not in BUILD_HASH (a rebuilt base, or a release that
+            # a later launch does not look up, as under SANDY_OFFLINE), and a
+            # stale match would report the image up to date forever. Without it the next launch needs the build,
+            # and the record below decides whether that waits out the TTL.
+            # rm -f on a link removes the link; $SANDY_HOME is host-only.
+            rm -f "$HASH_FILE"
             # A recorded failure has its own session-end line (the retry is
             # 30 minutes out, not "the next launch"); an unrecorded one keeps
             # the generic deferred notice.
