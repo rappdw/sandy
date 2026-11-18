@@ -12684,7 +12684,7 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 # The scan: its helper functions (optimization pass B2 split the loop out of
 # _sandy_resolve_symlinks), then one call of it.
 : > "$_S130_DIR/scan.sh"
-for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_inside _sandy_symlink_resolve \
+for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_is_copied_rel _sandy_symlink_inside _sandy_symlink_resolve \
           _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_symlink_byname_rels _sandy_symlink_canon _sandy_symlink_target_judged _sandy_symlink_walk \
           _sandy_symlink_protected_sweep _sandy_symlink_scan; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
@@ -27010,7 +27010,7 @@ check "§238(latecp) .claude swapped for a link out of the workspace after the g
 # host link inside a judged target is the host's own, a target outside
 # $HOME counts only at a protected path, and $SANDY_HOME is never covered.
 _S238_D="$(cd "$(mktemp -d)" && pwd -P)"
-for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify \
+for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify _sandy_symlink_is_copied_rel \
           _sandy_symlink_walk _sandy_ws_physical _sandy_gitdir_host _sandy_symlink_path_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
           _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S238_D/fns.sh"
@@ -27145,6 +27145,207 @@ unset _S238_OK _S238_K _S238_C _S238_W _S238_A _S238_G _S238_D _S238_R1 _S238_R2
 unset -f _s238_fakegit _s238_home _s238_refused _s238_ab _s238_s1 _s238_s1h _s238_s3 _s238_m1 _s238_seed _s238_okstart _s238_chk
 unset _S237 _S237_OK
 unset -f _s237_git _s237_seed _s237_held _s237_g5 _s237_g5o _s237_kt _s237_pruned _s230_refused _s230_sup_after
+
+
+section "§239: a copied tree is never mounted or copied as a link, and no stub or debris rmdir goes through a workspace link (symlink holes 26 and 28)"
+# ============================================================
+# Issue 26: `.claude/commands -> <dir outside $HOME>` (and the other copied
+# trees) was copied with `cp -R SRC DST`, which copies a linked SRC as the
+# link, and Docker followed it: the target was mounted read-write over
+# .claude/commands with no prompt (the gate ignored unprotected targets
+# outside $HOME). Now a link at a copied tree is judged wherever it points,
+# and the copy takes the tree's contents into a real directory. Issue 28: the
+# launch debris cleanup rmdir'd an empty `.github/workflows` through a
+# `.github` link, and the exit cleanup rmdir'd a recorded `.claude/commands`
+# stub through a `.claude` link, removing a directory outside the workspace.
+# Each case asserts the outcome: rc, whether an agent docker run happened,
+# where the mount source resolves, and the outside tree byte-for-byte.
+_S239_KC=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_S239_KG=(SANDY_AGENT=gemini GEMINI_API_KEY=fixture-g)
+_s239_snap() { (cd "$1" && find . | LC_ALL=C sort; find . -type f -exec cat {} + 2>/dev/null) | { shasum -a 256 2>/dev/null || sha256sum; }; }
+# The -v source mounted at /home/sandy/ws/$2 in CASE $1's agent run.
+_s239_src() {
+    local a; a="$(_a6_agent_args "$1")"; [ -n "$a" ] || return 0
+    awk -v d=":/home/sandy/ws/$2" 'p=="-v" { i=index($0,d); if (i>0 && (substr($0,i)==d || substr($0,i)==d ":ro")) print substr($0,1,i-1) } {p=$0}' "$a" | tail -n 1
+}
+# No -v source of CASE $1's runs resolves into outside dir $2.
+_s239_noescape() {
+    local f m r
+    for f in "$_A6_DIR/$1"/runs/*.args; do
+        [ -f "$f" ] || continue
+        while IFS= read -r m; do
+            r="$(readlink -f "${m%%:*}" 2>/dev/null || true)"
+            case "$r" in "$2"|"$2"/*) echo "escape: $m"; return 1 ;; esac
+        done < <(awk 'p=="-v" {print} {p=$0}' "$f")
+    done
+    return 0
+}
+# (a) each copied tree linked out of $HOME: refused at the gate, nothing copied
+# or mounted, the outside tree untouched, no approved list written.
+for _S239_T in .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands; do
+    _S239_C="s239-a$(printf '%s' "$_S239_T" | tr -c 'a-z\n' '-')"; _S239_O="$_A6_DIR/$_S239_C-out"
+    mkdir -p "$_A6_DIR/$_S239_C/ws/${_S239_T%/*}" "$_S239_O"; printf 'S239-SECRET\n' > "$_S239_O/secret.md"
+    ln -s "$_S239_O" "$_A6_DIR/$_S239_C/ws/$_S239_T"
+    _S239_H="$(_s239_snap "$_S239_O")"
+    _S239_S="$(_a6_sandbox "$_S239_C")"
+    _S239_CP="workspace-${_S239_T#.claude/}"; case "$_S239_T" in .gemini/*) _S239_CP="workspace-gemini-${_S239_T#.gemini/}" ;; esac
+    case "$_S239_T" in .gemini/*) _S239_K=("${_S239_KG[@]}") ;; *) _S239_K=("${_S239_KC[@]}") ;; esac
+    _a6_launch "$_S239_C" "${_S239_K[@]}"
+    _S239_OK=0
+    { [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S239_C")" ] \
+      && grep -q "need interactive approval" "$_A6_DIR/$_S239_C/out" \
+      && grep -qF -- "$_S239_T -> $_S239_O" "$_A6_DIR/$_S239_C/out" \
+      && [ ! -e "$_S239_S/$_S239_CP" ] && [ ! -L "$_S239_S/$_S239_CP" ] \
+      && [ ! -e "$_S239_S/.sandy-approved-symlinks.list" ] \
+      && [ "$(_s239_snap "$_S239_O")" = "$_S239_H" ]; } || _S239_OK=$?
+    [ "$_S239_OK" = 0 ] || _a6_diag "§239(a $_S239_T)" "$_S239_C"
+    check "§239(a $_S239_T) $_S239_T -> a directory outside \$HOME, non-TTY: refused at the symlink gate and named, no agent run, no sandbox copy, no approval written, the outside tree unchanged (mutation: copied trees not judged outside \$HOME; rc ${_A6_RC:-none})" \
+        test "$_S239_OK" = 0
+    # (b) the same link approved: the launch runs, and what is mounted over the
+    # tree is a real directory in the sandbox holding a copy of the contents;
+    # no -v source resolves to the outside directory.
+    _s236_seed "$_S239_C" "$_S239_T -> $_S239_O"
+    _a6_launch "$_S239_C" "${_S239_K[@]}"
+    _S239_M="$(_s239_src "$_S239_C" "$_S239_T")"
+    _S239_OK=0
+    { [ "$_A6_RC" = 0 ] && [ -n "$(_a6_agent_args "$_S239_C")" ] \
+      && [ "$_S239_M" = "$_S239_S/$_S239_CP" ] && [ ! -L "$_S239_M" ] && [ -d "$_S239_M" ] \
+      && [ "$(readlink -f "$_S239_M")" = "$(cd "$_S239_S" && pwd -P)/$_S239_CP" ] \
+      && grep -qx S239-SECRET "$_S239_M/secret.md" \
+      && _s239_noescape "$_S239_C" "$_S239_O" \
+      && [ "$(cat "$_S239_S/.sandy-approved-symlinks.list")" = "$_S239_T -> $_S239_O" ] \
+      && [ "$(_s239_snap "$_S239_O")" = "$_S239_H" ]; } || _S239_OK=$?
+    [ "$_S239_OK" = 0 ] || { _a6_diag "§239(b $_S239_T)" "$_S239_C"; echo "    mount source: ${_S239_M:-none}"; }
+    check "§239(b $_S239_T) approved: the mount over $_S239_T is a real directory in the sandbox holding a copy, no -v source resolves to the target, the list and the target unchanged (mutation: cp -R SRC DST, copying the link; rc ${_A6_RC:-none})" \
+        test "$_S239_OK" = 0
+done
+# (c) .claude itself links out, with commands/ inside: .claude/commands is
+# judged (the prefix walk), so a non-TTY launch is refused.
+_S239_C=s239-pfx; _S239_O="$_A6_DIR/$_S239_C-out"
+mkdir -p "$_A6_DIR/$_S239_C/ws" "$_S239_O/commands"; printf 'S239-SECRET\n' > "$_S239_O/commands/secret.md"
+ln -s "$_S239_O" "$_A6_DIR/$_S239_C/ws/.claude"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S239_C")" ] \
+  && grep -qF -- ".claude/commands -> $_S239_O/commands" "$_A6_DIR/$_S239_C/out" \
+  && [ ! -e "$(_a6_sandbox "$_S239_C")/workspace-commands" ]; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(c)" "$_S239_C"
+check "§239(c) .claude -> outside \$HOME holding commands/: .claude/commands is named at the gate and refused non-TTY, nothing copied (mutation: copied trees not judged; rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# (d) issue 28 through .claude: the same with an EMPTY commands/, approved.
+# sandy records .claude/commands as a session stub (the host had none with
+# content); the exit cleanup must not rmdir it through the .claude link.
+_S239_C=s239-stub; _S239_O="$_A6_DIR/$_S239_C-out"
+mkdir -p "$_A6_DIR/$_S239_C/ws" "$_S239_O/commands"; ln -s "$_S239_O" "$_A6_DIR/$_S239_C/ws/.claude"
+_s236_seed "$_S239_C" ".claude/commands -> $_S239_O/commands"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_OK=0
+{ [ "$_A6_RC" = 0 ] && [ -n "$(_a6_agent_args "$_S239_C")" ] && [ -d "$_S239_O/commands" ] \
+  && [ -L "$_A6_DIR/$_S239_C/ws/.claude" ]; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(d)" "$_S239_C"
+check "§239(d) .claude -> outside with an empty commands/, approved: the launch runs and the exit cleanup leaves the outside commands/ in place (mutation: stub rmdir not walked from the workspace; rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# (e) issue 28: .github -> outside, holding an empty workflows/. Unapproved,
+# the gate refuses (nothing removed); approved, the launch mounts it :ro
+# from the target and the debris cleanup does not rmdir it through the link.
+_S239_C=s239-gh; _S239_O="$_A6_DIR/$_S239_C-out"
+mkdir -p "$_A6_DIR/$_S239_C/ws" "$_S239_O/workflows"; ln -s "$_S239_O" "$_A6_DIR/$_S239_C/ws/.github"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S239_C")" ] && [ -d "$_S239_O/workflows" ] \
+  && grep -qF -- ".github/workflows -> $_S239_O/workflows" "$_A6_DIR/$_S239_C/out"; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(e1)" "$_S239_C"
+check "§239(e1) .github -> outside \$HOME with an empty workflows/, non-TTY: refused and named, no agent run, workflows/ still there (rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+_s236_seed "$_S239_C" ".github/workflows -> $_S239_O/workflows"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_OK=0
+{ [ "$_A6_RC" = 0 ] && [ -n "$(_a6_agent_args "$_S239_C")" ] && [ -d "$_S239_O/workflows" ] \
+  && ! grep -q "Cleaned up" "$_A6_DIR/$_S239_C/out" \
+  && _a6_pair "$(_a6_agent_args "$_S239_C")" -v "$_A6_DIR/$_S239_C/ws/.github/workflows:/home/sandy/ws/.github/workflows:ro"; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(e2)" "$_S239_C"
+check "§239(e2) approved: .github/workflows is mounted :ro and the debris cleanup leaves the outside workflows/ in place (mutation: debris rmdir not walked from the workspace; rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# (f) a sandbox copy that is already a link (made by an earlier sandy) is
+# refused, named with the fix, and left as it is; nothing is mounted.
+_S239_C=s239-stale; _S239_O="$_A6_DIR/$_S239_C-out"; _S239_S="$(_a6_sandbox "$_S239_C")"
+mkdir -p "$_A6_DIR/$_S239_C/ws/.claude/commands" "$_S239_O" "$_S239_S"; printf 'S239-SECRET\n' > "$_S239_O/secret.md"
+ln -s "$_S239_O" "$_S239_S/workspace-commands"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S239_C")" ] \
+  && grep -qF "The sandbox copy of .claude/commands is a symbolic link" "$_A6_DIR/$_S239_C/out" \
+  && grep -qF "rm '$_S239_S/workspace-commands'" "$_A6_DIR/$_S239_C/out" \
+  && [ -L "$_S239_S/workspace-commands" ] && [ -f "$_S239_O/secret.md" ]; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(f)" "$_S239_C"
+check "§239(f) a sandbox copy that is a link is refused with the rm fix, left in place, and nothing is started (mutation: the copy-is-a-link check removed; rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# Controls: a normal workspace still launches and behaves as before.
+# (g1) a real .claude/commands with a file and an internal link inside: the
+# copy is a real directory, the file copied, the inner link kept a link.
+_S239_C=s239-real; mkdir -p "$_A6_DIR/$_S239_C/ws/.claude/commands" "$_A6_DIR/$_S239_C/ws/shared"
+printf 'c\n' > "$_A6_DIR/$_S239_C/ws/.claude/commands/c.md"; ln -s ../../shared "$_A6_DIR/$_S239_C/ws/.claude/commands/s"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_M="$(_s239_src "$_S239_C" .claude/commands)"
+_S239_OK=0
+{ [ "$_A6_RC" = 0 ] && [ "$_S239_M" = "$(_a6_sandbox "$_S239_C")/workspace-commands" ] && [ ! -L "$_S239_M" ] \
+  && [ -f "$_S239_M/c.md" ] && [ -L "$_S239_M/s" ] && [ "$(readlink "$_S239_M/s")" = ../../shared ] \
+  && [ "$(ls -ld "$_S239_M" | cut -c1-10)" = "$(ls -ld "$_A6_DIR/$_S239_C/ws/shared" | cut -c1-10)" ]; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(g1)" "$_S239_C"
+check "§239(g1) control: a real .claude/commands launches; the copy is a real directory with the mode a mkdir gives, its file copied and its inner link still a link (rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# (g2) .claude/commands -> ../shared, a link inside the workspace: no prompt,
+# and the copy holds shared's contents (before: a relative link resolved
+# beside the sandbox, in $SANDY_HOME/sandboxes).
+_S239_C=s239-int; mkdir -p "$_A6_DIR/$_S239_C/ws/.claude" "$_A6_DIR/$_S239_C/ws/shared"
+printf 'c\n' > "$_A6_DIR/$_S239_C/ws/shared/c.md"; ln -s ../shared "$_A6_DIR/$_S239_C/ws/.claude/commands"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_M="$(_s239_src "$_S239_C" .claude/commands)"
+_S239_OK=0
+{ [ "$_A6_RC" = 0 ] && ! grep -q "Symlinks that point" "$_A6_DIR/$_S239_C/out" \
+  && [ -n "$_S239_M" ] && [ ! -L "$_S239_M" ] && [ -f "$_S239_M/c.md" ]; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(g2)" "$_S239_C"
+check "§239(g2) control: .claude/commands -> ../shared (inside the workspace) launches with no prompt, and the copy is a real directory holding shared's contents (rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# (g3) a real .github/workflows is mounted :ro from the workspace; a real
+# empty one, and a real empty .claude/commands stub, are still cleaned up.
+_S239_C=s239-ghr; mkdir -p "$_A6_DIR/$_S239_C/ws/.github/workflows"; printf 'y\n' > "$_A6_DIR/$_S239_C/ws/.github/workflows/ci.yml"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+check "§239(g3) control: a real .github/workflows is mounted :ro from the workspace (rc ${_A6_RC:-none})" \
+    _a6_pair "$(_a6_agent_args "$_S239_C")" -v "$_A6_DIR/$_S239_C/ws/.github/workflows:/home/sandy/ws/.github/workflows:ro"
+_S239_C=s239-deb; mkdir -p "$_A6_DIR/$_S239_C/ws/.github/workflows" "$_A6_DIR/$_S239_C/ws/.claude/commands" "$_A6_DIR/$_S239_C/ws/keep"
+_a6_launch "$_S239_C" "${_S239_KC[@]}"
+_S239_OK=0
+{ [ "$_A6_RC" = 0 ] && [ ! -e "$_A6_DIR/$_S239_C/ws/.github" ] && [ ! -e "$_A6_DIR/$_S239_C/ws/.claude/commands" ] \
+  && [ -d "$_A6_DIR/$_S239_C/ws/keep" ]; } || _S239_OK=$?
+[ "$_S239_OK" = 0 ] || _a6_diag "§239(g4)" "$_S239_C"
+check "§239(g4) control: a real empty .github/workflows (debris) and an empty .claude/commands (a session stub) are still removed (rc ${_A6_RC:-none})" \
+    test "$_S239_OK" = 0
+# (h) the copy-time check on its own (defense in depth: the gate judges such a
+# link first, so only a link planted between the scan and the copy reaches it):
+# a copied tree linked outside $HOME and not judged is printed; an unprotected,
+# uncopied path linked to the same place is not.
+_S239_D="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S239_D/fns.sh"
+done
+unset _f
+mkdir -p "$_S239_D/h/ws/.claude" "$_S239_D/out"
+ln -s "$_S239_D/out" "$_S239_D/h/ws/.claude/commands"; ln -s "$_S239_D/out" "$_S239_D/h/ws/other"
+_s239_pu() {   # $1 = workspace-relative path -> what the check prints, then rc=
+    ( trap - ERR; set +e
+      . "$_S239_D/fns.sh"
+      HOME="$_S239_D/h"; SANDY_HOME="$_S239_D/h/.sandy"; WORK_DIR="$_S239_D/h/ws"; REAL_WORK_DIR="$WORK_DIR"
+      _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
+      _sandy_symlink_path_unjudged "$WORK_DIR/$1"; echo "rc=$?" ) 2>&1 || true
+}
+_S239_R1="$(_s239_pu .claude/commands)"; _S239_R2="$(_s239_pu other)"
+check "§239(h) the copy-time check prints an unjudged .claude/commands -> outside \$HOME, and passes an unprotected path linked to the same place (mutation: copied trees not counted there; got: $(printf '%s' "$_S239_R1" | tr '\n' ' ')/$(printf '%s' "$_S239_R2" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF ".claude/commands -> $3/out" && printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=1"' _ "$_S239_R1" "$_S239_R2" "$_S239_D"
+rm -rf "$_S239_D"
+unset _S239_KC _S239_KG _S239_T _S239_C _S239_O _S239_H _S239_S _S239_CP _S239_K _S239_OK _S239_M _S239_D _S239_R1 _S239_R2
+unset -f _s239_snap _s239_src _s239_noescape _s239_pu
 
 unset _S229_LOG _S236_ETC
 unset -f _s236_tree _s236_expect _s236_expect_mounts _s236_mounts _s236_unmet _s236_seed _s227_tree _s228_ws _s228_pass _s228_sup

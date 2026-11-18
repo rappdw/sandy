@@ -163,7 +163,7 @@ else:
             (context / 'fake-agent').write_text(
                 '#!/bin/sh\n'
                 'case "${1:-}" in plugin|mcp|config|update|doctor|--version|-v) exit 0 ;; esac\n'
-                'date +%s > "$PWD/.agent-started"\n'
+                'date +%s > "$PWD/.agent-started.$(cat /etc/hostname).$$"\n'
                 'exec sleep 600\n')
             (context / 'Dockerfile').write_text(
                 'ARG BASE_IMAGE=sandy-claude-code\nFROM ${BASE_IMAGE}\nUSER root\n'
@@ -172,13 +172,32 @@ else:
                 '&& ln -s /usr/local/bin/sandy-fake-agent /usr/local/bin/claude\n')
         feature = self.home / '.sandy' / 'features' / 'ew'
         (feature / 'payload').mkdir(parents=True, exist_ok=True)
-        (feature / 'payload' / 'entry').write_text('#!/bin/sh\n' + entry_body)
-        (feature / 'payload' / 'entry').chmod(0o755)
+        # A new file per fixture, and no host-side delete of the marker a
+        # container wrote: on macOS file sharing a host that rewrites or
+        # deletes a file a container used can make the next container read it
+        # at a stale length, or fail to create it again (ENOENT) -- the same
+        # rule sandy itself follows (#400).
+        self._ew_n = getattr(self, '_ew_n', 0) + 1
+        name = 'entry-%d' % self._ew_n
+        (feature / 'payload' / name).write_text('#!/bin/sh\n' + entry_body)
+        (feature / 'payload' / name).chmod(0o755)
         (feature / 'feature.json').write_text(json.dumps({
             'sandboxes': {'include': ['*']}, 'agents': {'include': ['*']},
-            'mounts': [{'name': 'payload', 'from': 'payload'}], 'entry': 'payload/entry'}))
-        (project / '.agent-started').unlink(missing_ok=True)
+            'mounts': [{'name': 'payload', 'from': 'payload'}], 'entry': 'payload/' + name}))
+        self._ew_markers = set(project.glob('.agent-started.*'))
         return project
+
+    def new_agent_marker(self, project, wait=0):
+        """The marker the stand-in agent wrote since the last fixture or
+        launch (one per container: the name carries its hostname and pid)."""
+        for _ in range(max(1, int(wait / 0.5))):
+            new = sorted(set(project.glob('.agent-started.*')) - self._ew_markers)
+            new = [m for m in new if m.read_text().strip()]
+            if new:
+                return new
+            if wait:
+                time.sleep(0.5)
+        return []
 
     def workspace_containers(self, project):
         return subprocess.run(['docker', 'ps', '-aq', '--filter', 'label=sandy.workspace_path=' + str(project)],
@@ -219,20 +238,22 @@ else:
         self.assertEqual(rc, 1, 'interactive launch with a failing entry: ' + text[-3000:])
         self.assertEqual(text.count(message), 1, text[-3000:])
         self.assertIn(message, text.rsplit('\x1b[?1049l', 1)[-1], 'the message must follow tmux leaving the screen')
-        started = project / '.agent-started'
+        markers = self.new_agent_marker(project, wait=10)
         exited = list((self.home / '.sandy/sandboxes').glob('entrywin-*/feature-state/ew/exited'))
-        self.assertTrue(started.exists(), 'the agent pane never started')
+        self.assertEqual(len(markers), 1, 'the agent pane never started (markers: %s)' % markers)
+        started = markers[0]
         self.assertEqual(len(exited), 1, exited)
         self.assertLessEqual(int(started.read_text()), int(exited[0].read_text()) + 2,
                              'the agent must start while the window is still open')
         print('PASS entry window: interactive failure tears down, exits 1, message after tmux', flush=True)
         # (2) --start with the same entry: exit 6, quickly, and nothing left.
-        (project / '.agent-started').unlink(missing_ok=True)
+        self._ew_markers = set(project.glob('.agent-started.*'))
         run = subprocess.run(['bash', str(ROOT / 'sandy'), '--start', '--workspace', str(project)],
                              env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
         done = time.time()
-        self.assertTrue((project / '.agent-started').exists(), 'the agent pane never started under --start')
-        elapsed = done - int((project / '.agent-started').read_text())
+        markers = self.new_agent_marker(project, wait=10)
+        self.assertEqual(len(markers), 1, 'the agent pane never started under --start (markers: %s)' % markers)
+        elapsed = done - int(markers[0].read_text())
         (self.logs / 'entry-window-start-fail.log').write_text(run.stdout + run.stderr)
         self.assertEqual(run.returncode, 6, run.stdout[-3000:] + run.stderr[-3000:])
         self.assertIn(message, run.stdout + run.stderr)
@@ -258,12 +279,8 @@ else:
             # workspace mount; wait for it rather than reading it once, so a
             # late or missing agent start fails with evidence, not a
             # FileNotFoundError (and before --stop destroys the container).
-            started = project / '.agent-started'
-            for _ in range(60):
-                if started.exists() and started.read_text().strip():
-                    break
-                time.sleep(0.5)
-            if not (started.exists() and started.read_text().strip()):
+            markers = self.new_agent_marker(project, wait=30)
+            if len(markers) != 1:
                 def probe(*cmd):
                     out = subprocess.run(['docker', 'exec', '-u', str(os.getuid()), container] + list(cmd),
                                          capture_output=True, text=True, timeout=30)
@@ -279,6 +296,7 @@ else:
                 (self.logs / 'entry-window-start-ok-evidence.log').write_text(json.dumps(evidence, indent=1))
                 self.fail('the agent never wrote .agent-started within 30s of --start returning ready: '
                           + json.dumps(evidence)[-3000:])
+            started = markers[0]
             self.assertGreaterEqual(int(verdict[1]) - int(started.read_text()), 4,
                                     'the window must end >=4s after the agent started (verdict %s, agent %s)'
                                     % (verdict, started.read_text().strip()))

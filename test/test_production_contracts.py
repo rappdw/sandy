@@ -540,7 +540,7 @@ class ProductionContracts(unittest.TestCase):
         self.assertIn(str(self.home / "outside"), run.stdout)
 
     # The scan helpers _sandy_resolve_symlinks calls (optimization pass B2).
-    SCAN = ("_sandy_symlink_recorded", "_sandy_symlink_classify", "_sandy_fnmatch_escape", "_sandy_dir_has_entry", "_sandy_symlink_skip_parse", "_sandy_symlink_copied",
+    SCAN = ("_sandy_symlink_recorded", "_sandy_symlink_classify", "_sandy_fnmatch_escape", "_sandy_dir_has_entry", "_sandy_symlink_skip_parse", "_sandy_symlink_copied", "_sandy_symlink_is_copied_rel",
             "_sandy_symlink_inside", "_sandy_symlink_resolve", "_sandy_gitdir_rel", "_sandy_gitdir_host", "_sandy_submodule_gitdirs", "_sandy_symlink_byname_rels",
             "_sandy_symlink_canon", "_sandy_symlink_target_judged", "_sandy_symlink_walk",
             "_sandy_symlink_protected_sweep", "_sandy_symlink_scan", "_sandy_ws_physical")
