@@ -63,5 +63,23 @@ agent shipped, and no later launch rebuilt it.
 
 **Fix.** `sandy --rebuild`. Since 2.8.0 a build whose agent cannot report its
 version fails, so a rebuild during a publish window keeps the existing image
-and retries at the next launch. An image already broken this way is rebuilt
-automatically at its next launch.
+and retries 30 minutes later (see below). An image already broken this way is
+rebuilt automatically at its next launch.
+
+## "Skipping the agent image rebuild"
+
+**Symptom.** A launch prints `Skipping the agent image rebuild: The
+sandy-claude-code rebuild failed 4 min ago (docker build exit 100); it is
+retried in 26 min, or now with sandy --rebuild.` and starts on the existing
+image.
+
+**Cause.** An earlier launch tried to rebuild the agent image (an agent update,
+or a sandy upgrade that changed the image), the build failed, and sandy kept
+the existing image. So that every launch on a bad network does not repeat the
+whole failed build, the same rebuild is not tried again for 30 minutes. A
+newer agent release or a different agent is not held back, and an image that
+does not exist yet is always built.
+
+**Fix.** Nothing, if you are happy on the existing image: the rebuild is tried
+again automatically once the 30 minutes are up. To retry at once (say, after
+fixing the network), run `sandy --rebuild`.

@@ -26788,6 +26788,191 @@ rm -rf "$_S224_D"
 unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
 
+section "§233: --update-sessions --rebuild rebuilds each shared image once, not once per session (B8 G5)"
+# ============================================================
+# A child's --rebuild only clears the build cache (_sandy_clear_build_cache):
+# the --build-only child exits after the agent phase, so it never builds a
+# skill pack or project image, and with the hashes gone the version probe is
+# skipped anyway. Passing it to every child made N sessions rebuild the shared
+# base image N times, each child clearing the hash the one before had just
+# written. The orchestrator now clears once. Three daemon sessions behind a
+# stub docker: A (claude), C (codex) and B (claude), refreshed in that order by
+# the REAL --update-sessions dispatcher and its REAL --build-only children.
+# The build log counts `docker build -t <image>` per image: --rebuild must
+# rebuild sandy-base once, sandy-claude-code once (A builds, B finds it fresh)
+# and sandy-codex once (a different agent still gets its own rebuild).
+_S233_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S233_D/bin" "$_S233_D/sh" "$_S233_D/wsA" "$_S233_D/wsB" "$_S233_D/wsC/.sandy"
+printf 'SANDY_AGENT=codex\n' > "$_S233_D/wsC/.sandy/config"
+cat > "$_S233_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        printf 'cidA|sessA|%s|sandy-claude-code\n' "$S233_D/wsA"
+        printf 'cidC|sessC|%s|sandy-codex\n' "$S233_D/wsC"
+        printf 'cidB|sessB|%s|sandy-claude-code\n' "$S233_D/wsB"
+        exit 0 ;;
+    build)
+        _p=""
+        for _a in "$@"; do [ "$_p" = -t ] && printf '%s\n' "$_a" >> "$S233_D/builds.log"; _p="$_a"; done
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ -n "$_f" ] && echo "sha256:current-$_n"
+        exit 0 ;;
+    inspect) exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+EOF
+cat > "$_S233_D/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in *deb.debian.org*|*registry.npmjs.org*) exit 0 ;; esac
+exit 1
+EOF
+chmod +x "$_S233_D/bin/docker" "$_S233_D/bin/curl"
+_sleep_stub "$_S233_D/bin" "$_S233_D/sleep.log" 0.05
+# _s233_run [sandy-args...]: one --update-sessions --dry-run; the build log
+# holds that run's builds only. Sets _S233_RC.
+_s233_run() {
+    : > "$_S233_D/builds.log"
+    _S233_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$SANDY_SCRIPT" --update-sessions --dry-run "$@" </dev/null >"$_S233_D/out" 2>&1
+    ) || _S233_RC=$?
+}
+_s233_count() { grep -cx "$1" "$_S233_D/builds.log" || true; }
+_s233_run
+_s233_run
+_S233_PRE="$_S233_RC/$(_s233_count sandy-base)/$(_s233_count sandy-claude-code)/$(_s233_count sandy-codex)"
+check "§233(pre) control: a primed fleet refresh without --rebuild refreshes all three sessions and builds nothing (rc/base/claude/codex: $_S233_PRE)" \
+    bash -c 'test "$1" = 0/0/0/0 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_PRE" "$_S233_D/out"
+_s233_run --rebuild
+_S233_R="$_S233_RC/$(_s233_count sandy-base)/$(_s233_count sandy-claude-code)/$(_s233_count sandy-codex)"
+check "§233(1) --update-sessions --rebuild over three sessions builds sandy-base exactly once, sandy-claude-code once (two sessions share it) and sandy-codex once (mutation: pass --rebuild to each child again -> 3/2/1; rc/base/claude/codex: $_S233_R)" \
+    bash -c 'test "$1" = 0/1/1/1 && test "$(grep -c "^\[sandy\] Refreshing images for sess" "$2")" = 3' _ "$_S233_R" "$_S233_D/out"
+check "§233(2) ...and says the cache was cleared once, by the orchestrator" \
+    bash -c 'test "$(grep -c "Build cache cleared" "$1")" = 1' _ "$_S233_D/out"
+rm -rf "$_S233_D"
+unset _S233_D _S233_RC _S233_PRE _S233_R
+unset -f _s233_run _s233_count
+
+section "§234: a failed optional agent rebuild is not retried for 30 minutes; --rebuild, a new target or a missing image retries (B8 G7)"
+# ============================================================
+# The REAL launcher's --build-only (the agent phase runs before it exits)
+# behind a stub docker whose agent build fails when S234_FAIL=1 and whose
+# agent image is absent when S234_NOIMG=1. The 30 minutes are crossed by
+# rewriting the epoch the record carries, never by faking the clock or mtime.
+_S234_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S234_D/bin" "$_S234_D/sh" "$_S234_D/ws"
+cat > "$_S234_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    build)
+        _p=""; _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S234_D/builds.log"
+        [ "$_t" = sandy-claude-code ] && [ "${S234_FAIL:-0}" = 1 ] && exit 17
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ "$_n" = sandy-claude-code ] && [ "${S234_NOIMG:-0}" = 1 ] && exit 1
+        [ -n "$_f" ] && echo "sha256:id-$_n"
+        exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+EOF
+cat > "$_S234_D/bin/curl" <<'EOF'
+#!/bin/sh
+case "$*" in *deb.debian.org*|*registry.npmjs.org*) exit 0 ;; esac
+exit 1
+EOF
+chmod +x "$_S234_D/bin/docker" "$_S234_D/bin/curl"
+_S234_REC="$_S234_D/sh/.build_failed"
+# _s234_run [VAR=value ...] [-- sandy-args ...]: one --build-only launch as
+# claude, offline (no version probe); sets _S234_RC and _S234_AG (agent builds).
+_s234_run() {
+    local envs args
+    envs=(); args=(--build-only)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args+=("$@"); fi
+    : > "$_S234_D/builds.log"
+    _S234_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S234_D/ws" && env PATH="$_S234_D/bin:$PATH" HOME="$_S234_D" SANDY_HOME="$_S234_D/sh" S234_D="$_S234_D" \
+            SANDY_AGENT=claude SANDY_EGRESS=off SANDY_OFFLINE=1 ${envs[@]+"${envs[@]}"} \
+            bash "$SANDY_SCRIPT" "${args[@]}" </dev/null >"$_S234_D/out" 2>&1
+    ) || _S234_RC=$?
+    _S234_AG="$(grep -cx sandy-claude-code "$_S234_D/builds.log" || true)"
+}
+# _s234_age SECONDS: move the record's epoch that far into the past (a
+# missing record stays missing, and the check that needed it fails).
+_s234_age() {
+    local e rest
+    read -r e rest < "$_S234_REC" 2>/dev/null || return 0
+    printf '%s %s\n' "$((e - $1))" "$rest" > "$_S234_REC"
+}
+_s234_run
+_S234_P="$_S234_RC/$_S234_AG"
+rm -f "$_S234_D/sh/.build_hash"   # the agent's inputs "changed": it needs a rebuild
+_s234_run S234_FAIL=1
+_S234_F="$_S234_RC/$_S234_AG"
+# The record's shape: <epoch> <exit> <image> <hash> <target>, nothing more.
+_S234_SHAPE="unread"
+if read -r _f1 _f2 _f3 _f4 _f5 _f6 < "$_S234_REC"; then
+    case "$_f1" in ''|*[!0-9]*) _S234_SHAPE="epoch $_f1" ;; *) _S234_SHAPE="$_f2 $_f3 ${_f4:+hash} $_f5${_f6:+ extra}" ;; esac
+fi
+unset _f1 _f2 _f3 _f4 _f5 _f6
+check "§234(pre) control: a primed home builds the agent; with its hash gone a failing rebuild is attempted, the launch continues on the existing image (rc 0), and the failure is recorded as <epoch> <exit> <image> <hash> <target> (prime rc/agent builds $_S234_P, failing $_S234_F, record: $_S234_SHAPE)" \
+    bash -c 'test "$1" = 0/1 && test "$2" = 0/1 && test "$4" = "17 sandy-claude-code hash -" && grep -q "Agent image rebuild failed (docker build exit 17)" "$3" && grep -q "Not retrying this build for 30 minutes" "$3"' \
+    _ "$_S234_P" "$_S234_F" "$_S234_D/out" "$_S234_SHAPE"
+_s234_run S234_FAIL=1
+check "§234(1) the next launch within 30 minutes does not build the agent, continues (rc 0), and its warning names the failure, the retry time and sandy --rebuild (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/0 && grep -qF "Skipping the agent image rebuild: The sandy-claude-code rebuild failed 0 min ago (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3"' \
+    _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_age 1801
+_s234_run S234_FAIL=1
+check "§234(2) after 30 minutes the build is retried (mutation: drop the TTL comparison -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_run S234_FAIL=1 -- --rebuild
+check "§234(3) --rebuild retries at once despite a fresh record (mutation: --rebuild no longer clears the records -> no build; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && ! grep -q "Skipping the agent image rebuild" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_S234_H=""; _e=0; _x=""; _i=""; _t=""
+read -r _e _x _i _S234_H _t < "$_S234_REC" 2>/dev/null || true
+printf '%s %s %s other-hash %s\n' "$_e" "$_x" "$_i" "$_t" > "$_S234_REC"
+_s234_run S234_FAIL=1
+_S234_H2=""
+read -r _e _x _i _S234_H2 _t < "$_S234_REC" 2>/dev/null || true
+unset _e _x _i _t
+check "§234(4) a fresh record for a different target (other build inputs) does not hold this build back, and the new failure replaces it (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && test -n "$3" && test "$3" = "$4"' _ "$_S234_RC" "$_S234_AG" "$_S234_H" "$_S234_H2"
+_s234_run S234_FAIL=1 S234_NOIMG=1
+check "§234(5) a REQUIRED build (no agent image to fall back to) is attempted despite a fresh record, and its failure fails the launch (mutation: consult the record without the image check -> no build, rc 0; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 1/1 && grep -q "no previous image exists" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+_s234_age 1801
+_s234_run
+check "§234(6) a successful rebuild deletes the record (rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && test ! -e "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_REC"
+rm -rf "$_S234_D"
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE
+unset -f _s234_run _s234_age
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

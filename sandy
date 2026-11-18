@@ -13233,6 +13233,22 @@ if [ "$SANDY_STOP" = "true" ]; then
     fi
 fi
 
+# --- The build cache --rebuild clears (B8 G5, G7) ---
+# Every content-hash file a launch consults to decide "up to date", plus every
+# failed-rebuild record (_sandy_build_fail_*, at the agent phase below) that
+# would hold a retry back. One list for both callers: the launch path's
+# --rebuild, and the --update-sessions orchestrator, which clears it ONCE and
+# runs its per-session children WITHOUT --rebuild. Passing --rebuild to each
+# child made N sessions rebuild base, proxy and agent N times: every child
+# cleared the hashes the previous child had just written. Defined here, above
+# both callers, because the orchestrator dispatches before the launch path's
+# linear execution reaches the build phase. The project image's hash lives in
+# its sandbox and is not on this list: --rebuild never forced it.
+_sandy_clear_build_cache() {
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_grok" "$SANDY_HOME/.build_hash_mirror" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME"/.build_failed*
+}
+
 # --- Fleet updates (--update-sessions; milestone 1.2.0, #41) ---
 # Helper functions used only by the dispatcher immediately below. They do NOT
 # need to be defined earlier (unlike _sandy_image_stale, which lives up near
@@ -13368,6 +13384,17 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     # than a stale guess. Distinct workspaces sharing an image converge via
     # the on-disk hash files: the first child to reach a given image builds
     # it, the rest see "up to date" and no-op.
+    #
+    # --rebuild is applied HERE, once, never per child (B8 G5): a child's
+    # --rebuild only clears the build cache, so N children with it rebuilt the
+    # shared base, proxy and agent images N times. Cleared once, the first
+    # child to reach each image rebuilds it and writes its hash; later children
+    # with the same image see it fresh, and a child with a different agent
+    # still rebuilds its own image (its hash file was cleared too).
+    if [ "$SANDY_REBUILD" = "true" ]; then
+        _sandy_clear_build_cache
+        info "Build cache cleared. Each image is rebuilt once, by the first session that uses it."
+    fi
     _upd_build_failed=()
     for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
         _upd_ws="${_upd_wspaths[$_upd_i]}"
@@ -13379,7 +13406,6 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         fi
         info "Refreshing images for $_upd_sess ($_upd_ws)..."
         _upd_build_args=(--build-only)
-        [ "$SANDY_REBUILD" = "true" ] && _upd_build_args+=(--rebuild)
         _upd_build_log="$(mktemp)"
         _upd_done="$_upd_build_log.done"   # unique, absent until the child finishes
         # Run the child build in the background and emit a progress heartbeat. The
@@ -15591,7 +15617,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_grok" "$SANDY_HOME/.build_hash_mirror" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
+    _sandy_clear_build_cache
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -15786,6 +15812,7 @@ _sandy_agent_version_empty() {
     [ "$1" -eq 0 ] && [ -z "$2" ] || return 1
     docker run --rm --entrypoint test "$IMAGE_NAME" -s "$3" >/dev/null 2>&1 && return 1
     warn "$4 in $IMAGE_NAME reports no version (its install failed); rebuilding."
+    _SANDY_AGENT_BUILD_TARGET="broken"
     return 0
 }
 _check_claude_update() {
@@ -15795,6 +15822,7 @@ _check_claude_update() {
     latest="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Claude Code update available: $inst → $latest"
+        _SANDY_AGENT_BUILD_TARGET="claude@$latest"
         return 0
     fi
     return 1
@@ -15808,6 +15836,7 @@ _check_gemini_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Gemini CLI update available: $inst → $latest"
+        _SANDY_AGENT_BUILD_TARGET="gemini@$latest"
         return 0
     fi
     return 1
@@ -15826,6 +15855,7 @@ _check_codex_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Codex CLI update available: $inst → $latest"
+        _SANDY_AGENT_BUILD_TARGET="codex@$latest"
         return 0
     fi
     return 1
@@ -15839,6 +15869,7 @@ _check_opencode_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "OpenCode update available: $inst → $latest"
+        _SANDY_AGENT_BUILD_TARGET="opencode@$latest"
         return 0
     fi
     return 1
@@ -15855,10 +15886,73 @@ _check_mirror_update() {
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Mirror update available: $inst → $latest"
+        _SANDY_AGENT_BUILD_TARGET="mirror@$latest"
         return 0
     fi
     return 1
 }
+# --- Failed optional rebuild backoff (B8 G7) ---------------------------------
+# When an agent rebuild fails and an existing image is kept (#218 Layer 2,
+# below), the launch continues -- and, before this, every later launch on the
+# same degraded network repeated the whole failed --no-cache build before
+# continuing on the same old image. So the failure is recorded, and for
+# _SANDY_BUILD_FAIL_TTL seconds a launch that would attempt THE SAME build
+# again skips it, with a warning naming the failure and when it retries.
+#
+# The record, one per agent image (the same suffix as its hash file):
+#   $SANDY_HOME/.build_failed[_<agent>|_full]
+#   one line: <epoch> <docker build exit> <image> <build hash> <target>
+# <target> is what the update check found (<agent>@<version>) or "-" when the
+# build was triggered by its inputs. A record whose image, build hash or
+# target differ from this launch's is ignored, so a newer agent release, a
+# changed Dockerfile or a different agent is never held back by an older
+# failure. It is only consulted while the image exists: a REQUIRED build (no
+# image to fall back to) always runs. "broken" (an image whose agent reports
+# no version) is never recorded: that image is unusable, so each launch
+# retries. A successful build deletes the record; --rebuild deletes every
+# record (_sandy_clear_build_cache). The epoch is read from the file, not its
+# mtime, so a test (or a skewed clock) moves it portably; a record from the
+# future is ignored rather than trusted.
+_SANDY_BUILD_FAIL_TTL=1800
+_SANDY_AGENT_BUILD_TARGET=""
+_SANDY_BUILD_BACKOFF_NOTE=""
+_sandy_build_fail_file() { printf '%s/.build_failed%s' "$SANDY_HOME" "${BUILD_HASH_FILE_NAME#.build_hash}"; }
+_sandy_build_fail_key() { printf '%s %s %s' "$IMAGE_NAME" "$BUILD_HASH" "${_SANDY_AGENT_BUILD_TARGET:--}"; }
+# Returns 0 when a matching record is younger than the TTL, setting
+# _SANDY_BUILD_FAIL_AGO / _SANDY_BUILD_FAIL_LEFT (seconds) and _SANDY_BUILD_FAIL_RC.
+_sandy_build_fail_recent() {
+    local _f _e _rc _rest _now
+    _f="$(_sandy_build_fail_file)"
+    [ -f "$_f" ] || return 1
+    IFS=' ' read -r _e _rc _rest < "$_f" || return 1
+    case "$_e" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_rc" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_rest" = "$(_sandy_build_fail_key)" ] || return 1
+    _now="$(date +%s)" || return 1
+    [ "$_now" -ge "$_e" ] && [ $((_now - _e)) -lt "$_SANDY_BUILD_FAIL_TTL" ] || return 1
+    _SANDY_BUILD_FAIL_AGO=$((_now - _e))
+    _SANDY_BUILD_FAIL_LEFT=$((_e + _SANDY_BUILD_FAIL_TTL - _now))
+    _SANDY_BUILD_FAIL_RC="$_rc"
+}
+# $1 = the failed build's exit status. Written through mktemp + mv: rename
+# replaces whatever is at the path, link or not, and never writes through one.
+_sandy_build_fail_record() {
+    local _f _tmp
+    if [ "$_SANDY_AGENT_BUILD_TARGET" = broken ]; then
+        warn "  The existing image's agent reports no version, so the next launch retries the build."
+        return 0
+    fi
+    _f="$(_sandy_build_fail_file)"
+    if _tmp="$(mktemp "$SANDY_HOME/.build_failed.XXXXXX" 2>/dev/null)" \
+        && printf '%s %s %s\n' "$(date +%s)" "$1" "$(_sandy_build_fail_key)" > "$_tmp" \
+        && mv -f "$_tmp" "$_f"; then
+        warn "  Not retrying this build for $((_SANDY_BUILD_FAIL_TTL / 60)) minutes; sandy --rebuild retries it now."
+    else
+        [ -n "${_tmp:-}" ] && rm -f "$_tmp"
+        warn "  Could not record the failure in $_f, so the next launch retries the build."
+    fi
+}
+
 # SANDY_OFFLINE (#219) skips only this lookup. A build already required above
 # (missing image, changed inputs, rebuilt base) is not a check and still runs.
 if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
@@ -15870,7 +15964,11 @@ if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
-    if _sandy_build_allowed "$IMAGE_NAME" "agent image"; then
+    if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 && _sandy_build_fail_recent; then
+        _SANDY_BUILD_BACKOFF_NOTE="The $IMAGE_NAME rebuild failed $((_SANDY_BUILD_FAIL_AGO / 60)) min ago (docker build exit $_SANDY_BUILD_FAIL_RC); it is retried in $(( (_SANDY_BUILD_FAIL_LEFT + 59) / 60 )) min, or now with sandy --rebuild."
+        warn "Skipping the agent image rebuild: $_SANDY_BUILD_BACKOFF_NOTE"
+        warn "  Continuing on the existing image."
+    elif _sandy_build_allowed "$IMAGE_NAME" "agent image"; then
         info "Building sandbox image (may take a few minutes)..."
         _old_agent_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)"
         # Layer 2 (#218): the probe above runs on the HOST while `docker build`
@@ -15884,10 +15982,11 @@ if [ "$NEEDS_BUILD" = true ]; then
         docker build -q --no-cache --label sandy.managed=1 -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME" || _agent_build_rc=$?
         if [ "$_agent_build_rc" -eq 0 ]; then
             echo "$BUILD_HASH" > "$HASH_FILE"
+            rm -f "$(_sandy_build_fail_file)"
             _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
         elif [ -n "$_old_agent_id" ]; then
             warn "Agent image rebuild failed (docker build exit $_agent_build_rc) — continuing on the existing image."
-            warn "  The hash file is unchanged, so the rebuild is retried on the next launch."
+            _sandy_build_fail_record "$_agent_build_rc"
             _SANDY_BUILD_DEFERRED=true
         else
             error "Agent image build failed (docker build exit $_agent_build_rc) and no previous image exists."
@@ -18783,6 +18882,11 @@ cleanup() {
     if [ "${_SANDY_BUILD_DEFERRED:-false}" = "true" ]; then
         printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
+    fi
+    # B8 G7: a rebuild held back by the failed-rebuild backoff is the same
+    # erosion with a different cause and retry time, so it gets its own line.
+    if [ -n "${_SANDY_BUILD_BACKOFF_NOTE:-}" ]; then
+        printf "${YELLOW}[sandy]${NC} You ran on the existing image. %s\n" "$_SANDY_BUILD_BACKOFF_NOTE" >&2
     fi
     # #299: the same notice, for the one image whose staleness is a policy
     # question rather than a patch-level one -- the egress proxy. Set by
