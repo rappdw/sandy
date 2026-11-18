@@ -21743,7 +21743,12 @@ _sandy_copy_overlay() {   # $1 = source directory (followed)  $2 = destination, 
     # mktemp makes it 0700; give it the mode a plain mkdir would.
     _m="$(umask)"
     chmod "$(printf '%o' $(( 0777 & ~0$_m )))" "$_tmp"
-    mv "$_tmp" "$2"
+    if ! mv "$_tmp" "$2"; then
+        rm -rf "$_tmp"
+        error "Could not put the copy of ${1#$WORK_DIR/} in place in the sandbox ($2)."
+        _sandy_daemon_fatal
+        exit 1
+    fi
 }
 # A sandbox copy that is a link (an earlier sandy copied a linked source as a
 # link) is refused, not mounted: mounting it mounts wherever it points,
