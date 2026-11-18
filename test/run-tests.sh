@@ -26808,7 +26808,7 @@ cat > "$_S233_D/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
     ps)
-        printf 'cidA|sessA|%s|sandy-claude-code\n' "$S233_D/wsA"
+        printf 'cidA|%s|%s|sandy-claude-code\n' "${S233_SESSA:-sessA}" "$S233_D/wsA"
         printf 'cidC|sessC|%s|sandy-codex\n' "$S233_D/wsC"
         printf 'cidB|sessB|%s|sandy-claude-code\n' "$S233_D/wsB"
         exit 0 ;;
@@ -26817,7 +26817,10 @@ case "$1" in
         _t=""
         for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
         printf '%s\n' "$_t" >> "$S233_D/builds.log"
-        [ -n "${S233_FAILIMG:-}" ] && [ "$_t" = "$S233_FAILIMG" ] && exit 17
+        if [ -n "${S233_FAILIMG:-}" ] && [ "$_t" = "$S233_FAILIMG" ]; then
+            [ -f "$S233_D/buildmsg" ] && cat "$S233_D/buildmsg" >&2
+            exit 17
+        fi
         exit 0 ;;
     image)
         [ "$2" = inspect ] || exit 0
@@ -26875,8 +26878,23 @@ unset S233_FAILIMG
 _S233_R="$_S233_RC/$(_s233_count sandy-claude-code)"
 check "§233(3) a failed optional rebuild is built once across the fleet, and the plan output names the record for A and the skip for B (mutation: drop the orchestrator's note; rc/claude builds $_S233_R)" \
     bash -c 'test "$1" = 0/1 && grep -q "sessA: Not retrying this build for 30 minutes" "$2" && grep -q "sessB: Skipping the agent image rebuild: The sandy-claude-code rebuild failed" "$2"' _ "$_S233_R" "$_S233_D/out"
+# (4) The note is sandy's own line, never the build's output, and nothing in
+# it is interpreted: the failing build prints a look-alike line (and one that
+# even starts with "[sandy]") carrying an escape sequence, and session A's
+# label carries a literal \033 that `echo -e` would turn into a real one.
+rm -f "$_S233_D/sh/.build_failed"
+printf 'npm ERR! Not retrying this build PWNED1\n[sandy]   Not retrying this build \\033]0;PWNED2\\007 now\n' > "$_S233_D/buildmsg"
+export S233_FAILIMG=sandy-claude-code
+export S233_SESSA='sessA\033[7m'
+_s233_run
+unset S233_FAILIMG S233_SESSA
+_S233_NOTE="$(grep -F 'Not retrying this build' "$_S233_D/out" || true)"
+_S233_ESC="$(printf '%s' "$_S233_NOTE" | LC_ALL=C tr -cd '\033' | wc -c | tr -d ' ')"
+check "§233(4) the orchestrator's note is the child's own sandy line, the last one, printed verbatim with no escape interpreted (mutation: unanchored first match, or echo -e; note: $(printf '%s' "$_S233_NOTE" | cat -v | tr '\n' '|'))" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep -c .)" = 1 && test "$2" = 0 && case "$1" in *"sessA\033[7m: Not retrying this build for 30 minutes; sandy --rebuild retries it now.") ;; *) exit 1 ;; esac && case "$1" in *PWNED*) exit 1 ;; esac' \
+    _ "$_S233_NOTE" "$_S233_ESC"
 rm -rf "$_S233_D"
-unset _S233_D _S233_RC _S233_PRE _S233_R
+unset _S233_D _S233_RC _S233_PRE _S233_R _S233_NOTE _S233_ESC
 unset -f _s233_run _s233_count
 
 section "§234: a failed optional agent rebuild is not retried for 30 minutes; --rebuild, a new target or a missing image retries (B8 G7)"
@@ -26912,6 +26930,10 @@ case "$1" in
             *"--entrypoint cat "*)
                 _a="$(printf '%s' "$_last" | cut -d/ -f3)"
                 cat "$S234_D/ver_$_a" 2>/dev/null || echo 1.0.0
+                exit 0 ;;
+            *"--entrypoint test "*)
+                _a="$(printf '%s' "$_last" | cut -d/ -f3)"
+                [ -f "$S234_D/ver_$_a" ] && [ ! -s "$S234_D/ver_$_a" ] && exit 1
                 exit 0 ;;
         esac
         exit 0 ;;
@@ -27070,6 +27092,39 @@ check "§234(12) a recorded failure's session-end notice gives the 30-minute ret
     bash -c 'test "$2" = 1 && grep -qF "You ran on the existing image. The sandy-claude-code rebuild failed (docker build exit 17); it is retried in 30 min, or now with sandy --rebuild." "$3" && ! grep -q "rebuilds on the next launch" "$3"' \
     _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
 
+# (14) An agent that reports no version makes its image unusable: that
+# failure is never recorded, so the next launch retries it.
+rm -f "$_S234_REC"
+: > "$_S234_D/ver_claude-code"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+_S234_B1="$_S234_RC/$_S234_AG"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+check "§234(14) a failed rebuild of an image whose agent reports no version is never recorded, and the next launch retries it (mutation: record it, or never set the broken flag; rc/agent builds $_S234_B1 then $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1" = 0/1 && test "$2/$3" = 0/1 && test ! -e "$4" && grep -q "reports no version, so the next launch retries the build" "$5"' \
+    _ "$_S234_B1" "$_S234_RC" "$_S234_AG" "$_S234_REC" "$_S234_D/out"
+rm -f "$_S234_D/ver_claude-code"
+
+# (15) After a failure its INPUTS triggered (target "-"), a claude release
+# appearing within the 30 minutes changes the key: the update check runs even
+# though the build is already forced.
+rm -f "$_S234_REC" "$_S234_D/latest_claude"
+_s234_fail
+_S234_T15="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+printf '2.0.0\n' > "$_S234_D/latest_claude"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+_S234_T15b="$(cut -d' ' -f5 "$_S234_REC" 2>/dev/null || true)"
+check "§234(15) an inputs-triggered failure (target $_S234_T15) does not hold back a claude release that appears within 30 minutes: it is built, and the record names it (mutation: skip the checks when the build is already forced; rc/agent builds $_S234_RC/$_S234_AG, target now $_S234_T15b)" \
+    bash -c 'test "$1" = - && test "$2/$3" = 0/1 && test "$4" = claude@2.0.0' _ "$_S234_T15" "$_S234_RC" "$_S234_AG" "$_S234_T15b"
+rm -f "$_S234_D/latest_claude"
+
+# (16) An epoch too long for shell integers is unreadable, not an error.
+read -r _e _rest < "$_S234_REC" 2>/dev/null || _rest=""
+printf '12345678901234567890 %s\n' "$_rest" > "$_S234_REC"
+_s234_run SANDY_OFFLINE=0 S234_FAILIMG=sandy-claude-code
+check "§234(16) a 20-digit epoch is ignored with the unreadable-record warning, with no shell error, and the build is retried (mutation: no length bound; rc/agent builds $_S234_RC/$_S234_AG)" \
+    bash -c 'test "$1/$2" = 0/1 && grep -q "Ignoring the unreadable failed-rebuild record" "$3" && ! grep -q "integer expression" "$3"' _ "$_S234_RC" "$_S234_AG" "$_S234_D/out"
+unset _e _rest
+
 # (13) A combo's target names every agent with a newer release, so a second
 # agent's release is not held back by a record made for the first.
 rm -rf "$_S234_D/sh"; mkdir -p "$_S234_D/sh"
@@ -27093,7 +27148,7 @@ check "§234(13) claude,codex: a failed rebuild for claude 2.0.0 is held back on
     bash -c 'test "$1 $2 $3 $4" = "0/1 0/1 0/0 0/1" && test "$5" = "claude@2.0.0" && test "$6" = "claude@2.0.0,codex@3.0.0"' \
     _ "$_S234_C0" "$_S234_C1" "$_S234_C2" "$_S234_C3" "$_S234_T1" "$_S234_T3"
 rm -rf "$_S234_D"
-unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3
+unset _S234_D _S234_REC _S234_RC _S234_AG _S234_P _S234_F _S234_H _S234_H2 _S234_SHAPE _S234_IMG _S234_R8 _S234_R9 _S234_CB _S234_C0 _S234_C1 _S234_C2 _S234_C3 _S234_T1 _S234_T3 _S234_B1 _S234_T15 _S234_T15b
 unset -f _s234_run _s234_age _s234_fail
 
 # BEGIN SUMMARY

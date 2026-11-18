@@ -13453,8 +13453,14 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         wait "$_upd_build_pid" 2>/dev/null || true
         # B8 G7: a child that skipped (or recorded) a failed agent rebuild
         # succeeds, so its warning would otherwise stay in the captured log.
-        _upd_note="$(grep -m1 -E 'Skipping the agent image rebuild|Not retrying this build' "$_upd_build_log" 2>/dev/null | sed -E 's/^.*\[sandy\][^ ]* +//' || true)"
-        [ -n "$_upd_note" ] && warn "  $_upd_sess: $_upd_note"
+        # Only sandy's own line counts: anchored at "[sandy]", and the LAST one,
+        # since the child writes it after any docker build output. The text is
+        # printed with %s, control characters stripped: neither it nor the
+        # session label is ever interpreted.
+        _upd_note="$(grep -E '^\[sandy\] +(Skipping the agent image rebuild|Not retrying this build)' "$_upd_build_log" 2>/dev/null | tail -n 1 | sed -E 's/^\[sandy\] +//' || true)"
+        if [ -n "$_upd_note" ]; then
+            printf "${YELLOW}[sandy]${NC} %s\n" "$(printf '  %s: %s' "$_upd_sess" "$_upd_note" | LC_ALL=C tr -d '\000-\037\177')"
+        fi
         if [ "$(cat "$_upd_done" 2>/dev/null || echo 1)" != "0" ]; then
             error "  Build failed for $_upd_sess — tail of output:"
             tail -n 20 "$_upd_build_log" | sed 's/^/[sandy]   /' >&2
@@ -15922,10 +15928,13 @@ _check_mirror_update() {
 #   one line: <epoch> <docker build exit> <image> <build hash> <target>
 # <target> is what the update checks found, every agent with a newer release
 # in check order (claude,gemini,codex,opencode,mirror), comma-joined
-# (claude@2.1.0,codex@0.9.0), or "-" when the build was triggered by its inputs. A record whose image, build hash or
-# target differ from this launch's is ignored, so a newer agent release, a
-# changed Dockerfile or a different agent is never held back by an older
-# failure. It is only consulted while the image exists: a REQUIRED build (no
+# (claude@2.1.0,codex@0.9.0), or "-" when no check found one (the build was
+# triggered by its inputs). A record whose image, build hash or target differ
+# from this launch's is ignored, so changed inputs, a different agent, or a
+# newer release that this launch's update check SEES are not held back. A
+# release whose check cannot reach its registry (or any launch under
+# SANDY_OFFLINE, which skips the checks) is not seen, so it does not change
+# the key: that build waits out the 30 minutes like the failed one. It is only consulted while the image exists: a REQUIRED build (no
 # image to fall back to) always runs. A build for an image whose agent reports
 # no version (_SANDY_AGENT_BUILD_BROKEN) is never recorded: that image is
 # unusable, so each launch retries. A record sandy cannot parse (a damaged
@@ -15954,8 +15963,10 @@ _sandy_build_fail_recent() {
     IFS=' ' read -r _e _rc _rest < "$_f" || true
     # Digits only, and no leading zero: $(( )) would read 0123 as octal and
     # abort the whole build step on an 8 or a 9.
-    case "$_e" in ''|0*|*[!0-9]*) _e="" ;; esac
-    case "$_rc" in ''|*[!0-9]*) _rc="" ;; esac
+    # At most 12 digits (an epoch is 10 today) and a 3-digit exit status, so
+    # neither [ -ge ] nor $(( )) can overflow.
+    case "$_e" in ''|0*|*[!0-9]*|?????????????*) _e="" ;; esac
+    case "$_rc" in ''|*[!0-9]*|????*) _rc="" ;; esac
     if [ -z "$_e" ] || [ -z "$_rc" ] || [ -z "$_rest" ]; then
         warn "Ignoring the unreadable failed-rebuild record $_f. Retrying the agent image rebuild."
         return 1
@@ -15999,12 +16010,20 @@ _sandy_build_fail_record() {
 
 # SANDY_OFFLINE (#219) skips only this lookup. A build already required above
 # (missing image, changed inputs, rebuilt base) is not a check and still runs.
-if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
-    # B8 G7: every agent of a combo is checked, even after one already has an
-    # update, so the failed-rebuild record's target names every release this
-    # build would install; a record naming only the first would hold back a
-    # rebuild for a second agent's newer release. Only probes are added: the
-    # build happens exactly when it did before.
+#
+# B8 G7: the checks also run when the build is already forced, as long as an
+# image exists to probe, and every agent of a combo is checked even after one
+# has an update. Neither changes whether a build happens (they only ever set
+# NEEDS_BUILD=true); they fill _SANDY_AGENT_BUILD_TARGET with every release
+# this build would install, so the failed-rebuild record's key changes when a
+# release appears -- including after a failure that its INPUTS triggered.
+_sandy_run_update_checks=false
+if [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+    if [ "$NEEDS_BUILD" = false ] || docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        _sandy_run_update_checks=true
+    fi
+fi
+if [ "$_sandy_run_update_checks" = true ]; then
     _sandy_agent_has claude   && _check_claude_update   && NEEDS_BUILD=true
     _sandy_agent_has gemini   && _check_gemini_update   && NEEDS_BUILD=true
     _sandy_agent_has codex    && _check_codex_update    && NEEDS_BUILD=true
