@@ -27,6 +27,8 @@ The main runner prints numbered group headings, individual Python test names and
 
 The container fixture overrides only the agent executable through the supported project Dockerfile. It does not reconstruct Docker flags, package wrappers, or entrypoint setup. Production builds may still need the network; fixture package installs use local wheels/modules/packages. Network policy remains in live integration (§13/§13b), with the container fixture explicitly using egress mode 0. Real Docker Desktop, interactive TUI behavior, external provider compatibility, and downloaded Python distributions still require the host/manual runs below. A green host run does not establish these properties.
 
+The integration runner (`run-integration-tests.sh`) also isolates `$SANDY_HOME`, seeding only the build cache. It discovers credential environment variables and the original `$SANDY_HOME/.secrets` before isolation, and preserves `$HOME` for OAuth discovery. Host features, config, approvals, and sandboxes are not imported. The OpenCode smoke project selects a model for an available API key (an explicit `OPENCODE_MODEL` wins); its Google configuration references `GEMINI_API_KEY` without copying the secret into the project. Answer checks strip terminal controls but still require a successful exit and the requested answer; provider errors and timeouts alone cannot count as success.
+
 Replacement map: old runtime §§1–8, 10–11, 13–16, 19, 31–32, 34–35 move to the container group where applicable; the copied Python-download simulation is replaced by a production startup contract. The optional Gemini image smoke checks in §30 are already covered by live integration §6. Copied host algorithms in §§9, 20, 27, 37, 42, 44, 54, 95–96 move to the contracts group. Existing structural, mutation, explicit migration, and distinct security cases remain. §58's Go invocation moves to the proxy group. §161's real tmux check runs inside the container fixture; §162's context exclusion also runs through the real project image build.
 
 ## Manual release checks
@@ -352,6 +354,13 @@ Why the rest needs no action:
   you lack a pair, note §4.1/§4.2 skipped, same as any other credential gap.
   §21 itself needs no credentials (the agent doesn't need to authenticate for
   its pane to exist and print its marker) so it always runs on a Docker host.
+
+**Single-agent pane tagging** (the `@sandy_pane_agent` pane option, #378) is
+not part of the matrix above. It is proven against a live tmux server by
+`bash test/host-check-pane-tag.sh`, which is host-only and wired into no suite
+(`run-tests.sh §171` covers the mapping with fixtures). It uses a private tmux
+socket and refuses to run inside a sandy sandbox. Run it when the daemon or
+foreground single-agent tmux commands change.
 
 Sign-off (tick when the manual rows have been walked this RC):
 

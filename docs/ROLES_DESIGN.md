@@ -1,11 +1,16 @@
 # Design: Role-Based Multi-Session Orchestration (`SANDY_ROLE`)
 
-**Status: PARKED — design settled, implementation not started.**
-Target: prototype on a separate branch post-rc; ship as a **1.1** additive
-feature (new passive keys, no retiering, no breaking changes — fits the 1.x
-semver discipline). Designed 2026-07-06/07 in conversation; this doc preserves
-the decisions and their rationale so the implementer (probably us, in a few
-weeks) doesn't re-derive them.
+**Status: SUPERSEDED (2026-11-17). Not planned; `SANDY_ROLE` will not be added.**
+Plan → implement → verify now runs inside one sandy session: the orchestrating
+agent spawns separate implementer and verifier subagents, each with its own
+context and its own git worktree. That gives the independence this design wanted
+without concurrent same-workspace sandy sessions, a per-role sandbox identity, or
+a host-side turn-passing script. It does not give mixed-vendor roles (§1); if
+that becomes worth having, start from this document.
+
+The original status (July 2026) was: parked, design settled, implementation not
+started, targeted at 1.1 as an additive passive key. The rest of this document is
+unchanged and kept for its rationale.
 
 ---
 
