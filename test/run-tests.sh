@@ -13,7 +13,6 @@ fi
 # cannot set it. See _resolve_passive_privileged_approval() in sandy.
 export SANDY_AUTO_APPROVE_PRIVILEGED=1
 
-IMAGE_NAME="sandy-claude-code"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
@@ -191,13 +190,12 @@ _run_provenance() {
 }
 
 # Every host fixture lives under the runner-owned temporary directory.
-TEST_PROJECT="$(mktemp -d)"
 SANDBOX_DIR="$(mktemp -d)"
 mkdir -p "$SANDBOX_DIR/claude"
 _SCHEMA_CACHE="$(mktemp)"
 cleanup() {
     _emit_summary
-    rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
+    rm -rf "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
     [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -2877,11 +2875,6 @@ $(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }"
 
 # Ref resolution: release -> version tag; -dev -> main; override wins.
-_px_ref() {
-    local ver="$1" override="$2"
-    SANDY_VERSION="$ver" SANDY_PROXY_REF="$override" bash -c "$_PX_FNS
-_sandy_proxy_ref"
-}
 # GITHUB_HEAD_REF is unset in these so the version/branch logic is what's
 # asserted (it would otherwise be set when the suite itself runs in PR CI).
 check "proxy ref: release version pins to vX.Y.Z tag" \
@@ -3585,11 +3578,6 @@ case "$1" in
 esac
 DOCKERSHIM
 chmod +x "$_PS_BIN/docker"
-_ps_run() { # $1=mode(""|light) → emits JSON on stdout, spawn log to $DOCKER_CALL_LOG
-    DOCKER_CALL_LOG="$(mktemp)"; export DOCKER_CALL_LOG
-    PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" bash "$_SBX_SCRIPT" --print-state ${1:+$1} 2>/dev/null
-}
-
 # #19: workspace_path present + correct in full mode; empty for legacy sandbox.
 _ps_full="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
 check "print-state emits workspace_path from WORKSPACE.json (#19)" \
@@ -5533,7 +5521,6 @@ check "--help documents SANDY_EFFORT" \
 check "--print-schema lists SANDY_EFFORT as a passive enum key" \
     bash -c 'cat "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_EFFORT\"]; assert e and e[0][\"type\"]==\"enum\", e"' -- "$_SCHEMA_CACHE"
 # marker effort field: string when set, null when unset (behavioral, no docker)
-_eff_mk() { local SANDY_EFFORT="$1" j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf '{"effort":%s}\n' "$j"; }
 check "marker effort field: set→JSON string, unset→null" \
     bash -c '
       set="$(SANDY_EFFORT=high; j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf "%s" "$j")"
@@ -11863,21 +11850,6 @@ _S124_AFTER="$(find "$_S124_PSH/sandboxes" | sort | sha256 2>/dev/null || find "
 check "§124(6) --print-state REPAIRS NOTHING — the tree is byte-identical after reporting on a broken pair (the consumer relies on a hand-made pair staying distinguishable)" \
     bash -c '[ "$1" = "$2" ]' -- "$_S124_BEFORE" "$_S124_AFTER"
 
-# Slice the ONE sandbox object out first, then read the field from it. The
-# previous form anchored on the neighbours -- `"name":"$1"[^}]*"handoff":{` --
-# which worked only because nothing nested happened to sit between those two
-# fields. It is the same tripwire that broke §123, §124(8), and (while this
-# section was green) acceptance-handoff-dirs.sh Phase F, which reported
-# relay.state=started FAILING against an emitter that was emitting exactly that.
-# index/substr only: no regex, so no BRE-vs-ERE question and BWK-awk safe.
-_s124_obj() {   # _s124_obj <sandbox-name> -> the JSON object for that sandbox
-    # ONE LINE on purpose: a multi-line single-quoted program argument is the
-    # shape lint-bash32.sh cannot track (it desynchronized the APOSQ span and
-    # reported three unrelated comments 20 lines below as findings), and it is
-    # the same shape CLAUDE.md records as untellable from host shell.
-    printf '%s' "$_S124_PS" | tr -d ' \n' | awk -v key="\"name\":\"$1\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
-}
-_s124_field() { _s124_obj "$1" | sed -n 's/.*"handoff":{"state":"\([a-z]*\)".*/\1/p' | head -1; }
 # (7)-(11) REMOVED with the handoff{} field they read (#355). They asserted
 # that --print-state reported the classifier's verdict; there is no longer a
 # field for it, because the tree it described is gone. The classifier itself
@@ -12433,8 +12405,6 @@ _s128_exec() {   # _s128_exec <var> <value> -> raw output of the built command
     ) 2>/dev/null
     return 0
 }
-# ran-and-did-not-execute, as one predicate
-_s128_inert() { printf '%s\n' "$1" | grep -q '^CLAUDE-ARGV:' && ! printf '%s\n' "$1" | grep -q '^S128_PWNED'; }
 _S128_SEMI="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux; echo S128_PWNED')"
 _S128_AND="$(trap - ERR;   _s128_exec SANDY_TEAMMATE_MODE 'tmux && echo S128_PWNED')"
 _S128_PIPE="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux | echo S128_PWNED')"
@@ -13043,7 +13013,6 @@ _S132_MISS="$(trap - ERR; _s132_stage 'id_typo' 0)"
 _S132_SUSP="$(trap - ERR; _s132_stage 'id_wanted' 1)"
 _S132_PATH="$(trap - ERR; _s132_stage '../../.bashrc' 0)"
 
-_s132_has() { printf '%s\n' "$2" | grep -qx "F=$1"; }
 check "§132(1a) DEFAULT (no allowlist): no private key is staged at all (got: $(printf '%s' "$_S132_DEF" | tr '\n' ' '))" \
     bash -c '! printf "%s\n" "$1" | grep -qxE "F=(id_wanted|corp_secret|id_nopub|aws\.pem)"' -- "$_S132_DEF"
 check "§132(1b) ...including gitCredentials.csv — credential-shaped with NO 'BEGIN PRIVATE KEY' line, so a content-sniff blocklist waves it through. This one assertion is the case for default-deny" \
@@ -25309,6 +25278,9 @@ section "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, a
 # contracts group (suite_runner.py CONTRACT_FILES), so on macOS CI too.
 # The host group alone (`--only host`, or this script under SANDY_TEST_CHILD=1)
 # does NOT run it: use `--only contracts`, `--host-only` or no flags.
+# Its guards are mutation-audited by test/mutate-codex-activity.py (run by
+# hand, not by any suite): each mutation breaks one guard in a temporary copy
+# of sandy and must make a named test in test_codex_activity.py fail.
 
 
 echo ""
