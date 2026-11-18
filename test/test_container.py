@@ -254,7 +254,34 @@ else:
                                       'cat /home/sandy/.sandy-entry-window; stat -c %Y /home/sandy/.sandy-entry-window'],
                                      capture_output=True, text=True, timeout=30).stdout.split()
             self.assertEqual(verdict[0], 'passed', verdict)
-            self.assertGreaterEqual(int(verdict[1]) - int((project / '.agent-started').read_text()), 4, verdict)
+            # The marker is written by the stand-in agent through the
+            # workspace mount; wait for it rather than reading it once, so a
+            # late or missing agent start fails with evidence, not a
+            # FileNotFoundError (and before --stop destroys the container).
+            started = project / '.agent-started'
+            for _ in range(60):
+                if started.exists() and started.read_text().strip():
+                    break
+                time.sleep(0.5)
+            if not (started.exists() and started.read_text().strip()):
+                def probe(*cmd):
+                    out = subprocess.run(['docker', 'exec', '-u', str(os.getuid()), container] + list(cmd),
+                                         capture_output=True, text=True, timeout=30)
+                    return (out.stdout + out.stderr)[-2000:]
+                evidence = {
+                    'verdict': verdict,
+                    'pane': probe('tmux', 'capture-pane', '-p', '-t', 'sandy'),
+                    'panes': probe('tmux', 'list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{pane_current_command} dead=#{pane_dead}'),
+                    'ps': probe('ps', '-eo', 'pid,ppid,etimes,args'),
+                    'workspace': probe('sh', '-c', 'pwd; ls -la "$SANDY_WORKSPACE" 2>/dev/null || ls -la ~'),
+                    'host_project': sorted(p.name for p in project.iterdir()),
+                }
+                (self.logs / 'entry-window-start-ok-evidence.log').write_text(json.dumps(evidence, indent=1))
+                self.fail('the agent never wrote .agent-started within 30s of --start returning ready: '
+                          + json.dumps(evidence)[-3000:])
+            self.assertGreaterEqual(int(verdict[1]) - int(started.read_text()), 4,
+                                    'the window must end >=4s after the agent started (verdict %s, agent %s)'
+                                    % (verdict, started.read_text().strip()))
             print('PASS entry window: a long-running entry -> ready only after the 5s window, agent already up', flush=True)
         finally:
             subprocess.run(['bash', str(ROOT / 'sandy'), '--stop', '--workspace', str(project)],
