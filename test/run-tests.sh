@@ -1317,12 +1317,18 @@ else
     fail "invalid agent error lists opencode"
 fi
 
-# 'all' alias expands to four agents.
-if grep -qE 'all\)[[:space:]]+SANDY_AGENT="claude,gemini,codex,opencode"' "$SANDY_SCRIPT"; then
+# 'all' alias expands to four agents: run the real resolver with the shared
+# helper (2.9.0, the ordered gate expands through the same function).
+_ALL_RES="$(env -i PATH="$PATH" SANDY_AGENT=all SANDY_AGENT_OVERRIDE= bash -c '
+    eval "$(sed -n "/^_sandy_expand_agent_alias()/,/^}\$/p" "$1")"
+    eval "$(sed -n "/^# --- Resolve agent ---\$/,/^# Parse comma-separated agent list/p" "$1")"
+    printf "%s" "$SANDY_AGENT"' _ "$SANDY_SCRIPT" 2>&1 || true)"
+if [ "$_ALL_RES" = "claude,gemini,codex,opencode" ]; then
     pass "'all' alias expands to claude,gemini,codex,opencode"
 else
-    fail "'all' alias expands to claude,gemini,codex,opencode"
+    fail "'all' alias expands to claude,gemini,codex,opencode (got: $_ALL_RES)"
 fi
+unset _ALL_RES
 
 # Dockerfile.opencode generator: extract and run, verify content.
 _DOCKERFILE_OPENCODE_FN="$(sed -n '/^generate_dockerfile_opencode()/,/^}$/p' "$SANDY_SCRIPT")"
@@ -1633,6 +1639,8 @@ sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$SANDY_SCRIPT_PATH" > "$_LOADER_SRC"
 printf '\n' >> "$_LOADER_SRC"
 sed -n '/^_key_in_list()/,/^}$/p' "$SANDY_SCRIPT_PATH" >> "$_LOADER_SRC"
 printf '\n' >> "$_LOADER_SRC"
+sed -n '/^_sandy_expand_agent_alias()/,/^}$/p' "$SANDY_SCRIPT_PATH" >> "$_LOADER_SRC"
+printf '\n' >> "$_LOADER_SRC"
 sed -n '/^_load_sandy_config() {/,/^}$/p' "$SANDY_SCRIPT_PATH" >> "$_LOADER_SRC"
 
 # Extract + source _load_sandy_config, call with tier=passive, and verify
@@ -1725,7 +1733,9 @@ check "env precedence: env SANDY_AGENT beats host + workspace config" \
     bash -c 'echo "$1" | grep -q "^SANDY_AGENT=codex$"' -- "$_ENV_PREC_RESULT"
 
 # Conversely: when env doesn't set SANDY_AGENT, workspace passive must
-# still beat host privileged (the per-project override still works).
+# still beat host privileged (the per-project override still works) -- for a
+# value no wider than the host's (2.9.0: a workspace that ADDS an agent is
+# queued for approval instead, checked just below).
 _ENV_PREC_RESULT2="$(
     # shellcheck disable=SC1090
     source "$_LOADER_SRC"
@@ -1739,15 +1749,24 @@ _ENV_PREC_RESULT2="$(
     done
     _PRIV_FILE="$(mktemp)"
     _PASS_FILE="$(mktemp)"
-    echo "SANDY_AGENT=claude" > "$_PRIV_FILE"
+    echo "SANDY_AGENT=claude,gemini" > "$_PRIV_FILE"
     echo "SANDY_AGENT=gemini" > "$_PASS_FILE"
+    _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=()
+    _load_sandy_config "$_PRIV_FILE" privileged
+    _load_sandy_config "$_PASS_FILE" passive
+    echo "SANDY_AGENT=$SANDY_AGENT"
+    # A second process: a host claude and a workspace gemini (a replacement).
+    unset SANDY_AGENT _SANDY_PASSIVE_BASE_TAKEN
+    echo "SANDY_AGENT=claude" > "$_PRIV_FILE"
     _load_sandy_config "$_PRIV_FILE" privileged
     _load_sandy_config "$_PASS_FILE" passive
     rm -f "$_PRIV_FILE" "$_PASS_FILE"
-    echo "SANDY_AGENT=$SANDY_AGENT"
+    echo "WIDEN=$SANDY_AGENT|${_PASSIVE_PRIVILEGED_PENDING[*]-}"
 )"
-check "env precedence: workspace passive still overrides host when env unset" \
+check "env precedence: workspace passive still overrides host when env unset (a narrowing: host claude,gemini, workspace gemini)" \
     bash -c 'echo "$1" | grep -q "^SANDY_AGENT=gemini$"' -- "$_ENV_PREC_RESULT2"
+check "env precedence: a workspace value that REPLACES the host's agent is queued for approval, not exported (2.9.0; got: $(printf '%s' "$_ENV_PREC_RESULT2" | grep '^WIDEN='))" \
+    bash -c 'echo "$1" | grep -qx "WIDEN=claude|SANDY_AGENT=gemini"' -- "$_ENV_PREC_RESULT2"
 
 rm -f "$TIER_TEST_FILE"
 
@@ -3696,9 +3715,9 @@ section "§65: value-aware egress tiering — a committed .sandy/config can't we
 # alias.
 
 # (a) The pure classifier: weakening → 0 (privileged/gated), else → 1.
-_pvp() {
-    bash -c "$(sed -n '/^_sandy_passive_value_privileged()/,/^}$/p' "$_SBX_SCRIPT")
-    if _sandy_passive_value_privileged \"\$1\" \"\$2\"; then echo gated; else echo free; fi" _ "$1" "$2"
+_pvp() { # $1 key  $2 value  [$3 baseline the privileged sources resolved]
+    env -u SANDY_AGENT_OVERRIDE bash -c "$(sed -n '/^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p' "$_SBX_SCRIPT")
+    if _sandy_passive_value_privileged \"\$1\" \"\$2\" \"\$3\"; then echo gated; else echo free; fi" _ "$1" "$2" "${3:-}"
 }
 check "classifier gates NO_ISOLATION=1 (proxy off)"        test "$(_pvp SANDY_EGRESS_NO_ISOLATION 1)" = gated
 check "classifier frees NO_ISOLATION=0 (neutral)"          test "$(_pvp SANDY_EGRESS_NO_ISOLATION 0)" = free
@@ -3708,6 +3727,14 @@ check "classifier gates legacy EGRESS_PROXY=0"             test "$(_pvp SANDY_EG
 check "classifier frees legacy EGRESS_PROXY=2 (strict)"    test "$(_pvp SANDY_EGRESS_PROXY 2)" = free
 check "classifier gates ALLOW_WORKFLOW_EDIT=1"             test "$(_pvp SANDY_ALLOW_WORKFLOW_EDIT 1)" = gated
 check "classifier frees an ordinary passive key"           test "$(_pvp SANDY_MODEL anything)" = free
+# Ordered rows (2.9.0): judged against the privileged-resolved baseline ($3).
+check "classifier gates CODEX_AUTH=oauth over no baseline (default auto)"   test "$(_pvp SANDY_CODEX_AUTH oauth)" = gated
+check "classifier frees CODEX_AUTH=oauth when the host resolved oauth"      test "$(_pvp SANDY_CODEX_AUTH oauth oauth)" = free
+check "classifier frees GEMINI_AUTH=api_key over any baseline"              test "$(_pvp SANDY_GEMINI_AUTH api_key adc)" = free
+check "classifier gates CLAUDE_AUTH=auto over a host api_key"               test "$(_pvp SANDY_CLAUDE_AUTH auto api_key)" = gated
+check "classifier gates SANDY_AGENT=codex over no baseline (default claude)" test "$(_pvp SANDY_AGENT codex)" = gated
+check "classifier frees SANDY_AGENT=codex,claude under a host all (subset, reordered)" test "$(_pvp SANDY_AGENT codex,claude all)" = free
+check "classifier gates SANDY_AGENT=all over a host claude,codex"           test "$(_pvp SANDY_AGENT all claude,codex)" = gated
 
 # (b) End-to-end through the real loader via --validate-config on a workspace file.
 _EG_WS="$(mktemp -d)"; mkdir -p "$_EG_WS/.sandy"
@@ -10852,10 +10879,12 @@ check "§117(8) SANDY_CLAUDE_AUTH=oauth suppresses the key even with NO OAuth fi
 # Tier: api_key REDUCES what is in the container (a revocable project key instead
 # of the account refresh token) so it stays passive-safe; `oauth` forces the
 # account credential in even when a key is available, so it is approval-gated.
-check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source" \
-    bash -c 'printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*oauth"' -- "$SANDY_SCRIPT"
-check "§117(10) SANDY_CLAUDE_AUTH=api_key is NOT approval-gated (it is the tightening direction)" \
-    bash -c '! printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*api_key"' -- "$SANDY_SCRIPT"
+_S117_PVP="$(awk '/^_sandy_passive_value_privileged\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source when the host did not choose oauth (2.9.0: ordered)" \
+    bash -c "$_S117_PVP"$'\n''_sandy_passive_value_privileged SANDY_CLAUDE_AUTH oauth "" && _sandy_passive_value_privileged SANDY_CLAUDE_AUTH oauth api_key'
+check "§117(10) SANDY_CLAUDE_AUTH=api_key is NOT approval-gated, whatever the host chose (it is the tightening direction)" \
+    bash -c "$_S117_PVP"$'\n''! _sandy_passive_value_privileged SANDY_CLAUDE_AUTH api_key "" && ! _sandy_passive_value_privileged SANDY_CLAUDE_AUTH api_key oauth'
+unset _S117_PVP
 
 # The credential-side half: api_key mode must WITHHOLD the OAuth file, or the
 # account refresh token is in the container alongside the key and the mode is a
@@ -27558,7 +27587,7 @@ section "§220: every registered config key is honoured from a config file, and 
 # runs the real _load_sandy_config over fixture files, against the key list
 # that is NOT regenerated: the _sandy_key_metadata rows.
 _S220_DEFS="$(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$SANDY_SCRIPT")
-$(sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_load_sandy_config()/,/^}$/p; /^_sandy_key_metadata()/,/^}$/p' "$SANDY_SCRIPT")"
+$(sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p; /^_load_sandy_config()/,/^}$/p; /^_sandy_key_metadata()/,/^}$/p' "$SANDY_SCRIPT")"
 _S220_D="$(cd "$(mktemp -d)" && pwd -P)"
 # $1 = file  $2 = tier  -> "KEY=<value or -unset->" per metadata key, then
 # "PENDING=<queued keys>". env -i: no variable of this shell is mistaken for a
@@ -28389,7 +28418,10 @@ _s233_run() {
                 SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
             esac
         done
-        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" \
+        # Session C's codex comes from its workspace config, a value wider than
+        # the host's default claude, so since the ordered passive gate (§240) it
+        # needs the approval a real session got when it was first started.
+        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" SANDY_AUTO_APPROVE_PRIVILEGED=1 \
             SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$SANDY_SCRIPT" --update-sessions --dry-run "$@" </dev/null >"$_S233_D/out" 2>&1
     ) || _S233_RC=$?
 }
@@ -29252,6 +29284,205 @@ unset -f _s235_case _s235_kill_tree _s235_sup _s235_w5_verdict _s235_w5_probe _s
 rm -rf "$_S235_D"
 unset _S235_D _S235_TMPL _S235_PANE _S235_TAILRUN _S235_W5 _S235_FORGED _S235_T0 _S235_EL _S235_NC
 
+# ============================================================
+section "§240: ordered passive gate — a workspace auth mode or agent list wider than the host's is approval-gated (2.9.0)"
+# ============================================================
+# Before 2.9.0 a workspace value outranked the host for every passive key, and
+# only fixed values were gated. So a committed SANDY_CODEX_AUTH=oauth replaced
+# a host api_key and seeded the host OAuth refresh token into the sandbox, a
+# workspace SANDY_CLAUDE_AUTH=auto undid a host api_key, and SANDY_AGENT=all
+# pulled every agent's host credentials in, all with no prompt. The gate now
+# compares these six keys with the value the privileged sources resolved,
+# snapshotted by the real loader at its first passive call. Runs the real
+# _load_sandy_config (and the real --validate-config) over fixture files.
+_S240_DEFS="$(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p; /^_load_sandy_config()/,/^}$/p' "$SANDY_SCRIPT")"
+_S240_D="$(cd "$(mktemp -d)" && pwd -P)"
+# $1 host file body  $2 workspace .sandy/config body  [$3 .sandy/.secrets body]
+# Any further args are VAR=VALUE set in the launching environment.
+# -> "KEY=<value or -unset->" for the six ordered keys, then "PENDING=<queued>".
+_s240_load() {
+    local h="$1" w="$2" x="${3:-}"; shift 2; [ $# -gt 0 ] && shift
+    printf '%s\n' "$h" > "$_S240_D/host"; printf '%s\n' "$w" > "$_S240_D/ws"; printf '%s\n' "$x" > "$_S240_D/sec"
+    env -i PATH="$PATH" "$@" bash -c '
+        set -euo pipefail
+        eval "$1"
+        _SANDY_ENV_SET_KEYS=(); _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=()
+        _SANDY_EXTRA_ENV_HOST_LISTS=(); _SANDY_EXTRA_ENV_WS_LISTS=()
+        for k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
+            if [ -n "${!k:-}" ]; then _SANDY_ENV_SET_KEYS+=("$k"); fi
+        done
+        _load_sandy_config "$2/host" privileged
+        _load_sandy_config "$2/ws" passive
+        _load_sandy_config "$2/sec" passive
+        for k in SANDY_AGENT SANDY_CLAUDE_AUTH SANDY_GEMINI_AUTH SANDY_CODEX_AUTH SANDY_OPENCODE_AUTH SANDY_GROK_AUTH; do
+            eval "v=\${$k--unset-}"; printf "%s=%s\n" "$k" "$v"
+        done
+        printf "PENDING=%s\n" "${_PASSIVE_PRIVILEGED_PENDING[*]-}"' _ "$_S240_DEFS" "$_S240_D" 2>&1 || printf 'RC=%s\n' "$?"
+}
+_S240_A="$(_s240_load '' 'SANDY_AGENT=claude')"
+check "§240(pre) control: the loader, gate and helper were extracted, and a workspace SANDY_AGENT=claude with no host value is honoured outright (got: $(printf '%s' "$_S240_A" | tr '\n' ';'))" \
+    bash -c 'grep -qx "SANDY_AGENT=claude" <<<"$1" && grep -qx "PENDING=" <<<"$1" && case "$2" in *_sandy_expand_agent_alias*_load_sandy_config*) exit 0 ;; esac; exit 1' _ "$_S240_A" "$_S240_DEFS"
+_S240_A="$(_s240_load '' 'SANDY_AGENT=codex')"
+check "§240(1) no host value: a workspace SANDY_AGENT=codex REPLACES the default claude, so it is queued for approval and not exported (mutation: drop the SANDY_AGENT arm and it is honoured)" \
+    bash -c 'grep -qx "SANDY_AGENT=-unset-" <<<"$1" && grep -qx "PENDING=SANDY_AGENT=codex" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_AGENT=claude' 'SANDY_AGENT=all')"
+check "§240(2) a workspace SANDY_AGENT=all over a host claude is queued (it adds gemini, codex, opencode)" \
+    bash -c 'grep -qx "SANDY_AGENT=claude" <<<"$1" && grep -qx "PENDING=SANDY_AGENT=all" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_AGENT=all' 'SANDY_AGENT=codex,claude')"
+check "§240(3) narrowing and reordering are free: host all, workspace codex,claude is honoured as written" \
+    bash -c 'grep -qx "SANDY_AGENT=codex,claude" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_AGENT=claude,codex' 'SANDY_AGENT=codex,gemini')"
+check "§240(4) one new agent among known ones is still a widening: host claude,codex, workspace codex,gemini is queued" \
+    bash -c 'grep -qx "PENDING=SANDY_AGENT=codex,gemini" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load '' 'SANDY_AGENT=gemini' '' SANDY_AGENT=codex)"
+check "§240(5) env wins as before: with SANDY_AGENT=codex in the environment the workspace value is never read, so nothing is queued" \
+    bash -c 'grep -qx "SANDY_AGENT=codex" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load '' 'SANDY_AGENT=gemini' '' SANDY_AGENT_OVERRIDE=codex)"
+check "§240(6) with --agent given (SANDY_AGENT_OVERRIDE) the SANDY_AGENT check is skipped: the flag replaces the value, so there is nothing to approve" \
+    bash -c 'grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')"
+check "§240(7) a workspace SANDY_CODEX_AUTH=oauth over a host api_key is queued and the host api_key stands (the hole: it seeded the host OAuth token)" \
+    bash -c 'grep -qx "SANDY_CODEX_AUTH=api_key" <<<"$1" && grep -qx "PENDING=SANDY_CODEX_AUTH=oauth" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CLAUDE_AUTH=api_key' 'SANDY_CLAUDE_AUTH=auto
+SANDY_GEMINI_AUTH=adc
+SANDY_OPENCODE_AUTH=oauth
+SANDY_GROK_AUTH=oauth')"
+check "§240(8) every ordered auth key: a workspace auto over a host claude api_key, and adc/oauth over the default auto, are all queued" \
+    bash -c 'p="$(sed -n "s/^PENDING=//p" <<<"$1")"; for kv in SANDY_CLAUDE_AUTH=auto SANDY_GEMINI_AUTH=adc SANDY_OPENCODE_AUTH=oauth SANDY_GROK_AUTH=oauth; do case " $p " in *" $kv "*) ;; *) exit 1 ;; esac; done' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CLAUDE_AUTH=oauth
+SANDY_GEMINI_AUTH=adc' 'SANDY_CLAUDE_AUTH=oauth
+SANDY_GEMINI_AUTH=api_key')"
+check "§240(9) the same value as the host, or api_key, is free: no prompt for a workspace oauth when the host already resolved oauth (the no-op prompt 2.x showed)" \
+    bash -c 'grep -qx "SANDY_CLAUDE_AUTH=oauth" <<<"$1" && grep -qx "SANDY_GEMINI_AUTH=api_key" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CODEX_AUTH=oauth' 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')"
+check "§240(10) the baseline is the HOST value, taken before any workspace export: .sandy/config api_key then .sandy/.secrets oauth, over a host oauth, is free (mutation: a baseline re-read per passive file sees api_key and queues oauth)" \
+    bash -c 'grep -qx "SANDY_CODEX_AUTH=oauth" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+# --validate-config judges the same baseline from env and the host files.
+mkdir -p "$_S240_D/sh" "$_S240_D/wsdir/.sandy"
+_s240_vc() { # $1 host config body  $2 workspace config body [$3 script] -> the keys requiring approval
+    printf '%s\n' "$1" > "$_S240_D/sh/config"; printf '%s\n' "$2" > "$_S240_D/wsdir/.sandy/config"
+    env -u SANDY_AGENT -u SANDY_CODEX_AUTH -u SANDY_CLAUDE_AUTH -u SANDY_GEMINI_AUTH -u SANDY_OPENCODE_AUTH -u SANDY_GROK_AUTH \
+        SANDY_HOME="$_S240_D/sh" bash "${3:-$SANDY_SCRIPT}" --validate-config "$_S240_D/wsdir/.sandy/config" 2>/dev/null \
+        | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["privileged_keys_requiring_approval"]))' 2>/dev/null || echo ERR
+}
+check "§240(11) --validate-config agrees: workspace SANDY_CODEX_AUTH=oauth is free under a host oauth and pending under a host api_key; SANDY_AGENT=codex is pending under no host value" \
+    bash -c 'test "$1" = "" && test "$2" = SANDY_CODEX_AUTH && test "$3" = SANDY_AGENT' _ \
+    "$(_s240_vc 'SANDY_CODEX_AUTH=oauth' 'SANDY_CODEX_AUTH=oauth')" \
+    "$(_s240_vc 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')" \
+    "$(_s240_vc '' 'SANDY_AGENT=codex')"
+# Mutation, in a temp copy: the two ordered arms become unmatchable labels. The
+# real script must report both keys; the mutant must report neither.
+sed -e 's/^        SANDY_CLAUDE_AUTH|SANDY_GEMINI_AUTH|SANDY_CODEX_AUTH|SANDY_OPENCODE_AUTH|SANDY_GROK_AUTH)$/        S240_MUTATED_AUTH)/' \
+    -e 's/^        SANDY_AGENT)$/        S240_MUTATED_AGENT)/' "$SANDY_SCRIPT" > "$_S240_D/sandy.mut"
+check "§240(12) mutation: with the ordered arms removed the same workspace file goes free, so (1)-(11) can fail (real: $(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth'); mutant: $(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth' "$_S240_D/sandy.mut"))" \
+    bash -c 'test "$(grep -c "S240_MUTATED_" "$3")" = 2 && test "$1" = "SANDY_AGENT,SANDY_CODEX_AUTH" && test "$2" = ""' _ \
+    "$(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth')" "$(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth' "$_S240_D/sandy.mut")" "$_S240_D/sandy.mut"
+# --- (13) the --start approval pre-pass gets --agent, as the supervisor does --
+# The pre-pass hashes the gated set on the client tty; the supervisor re-hashes
+# it under /dev/null and needs the SAME set, or it drops every gated key. With
+# --agent the gate skips SANDY_AGENT, so a pre-pass without --agent approved a
+# set the supervisor never sees (Opus review, PR-1). Part (a) runs the REAL
+# pre-pass line with a recorder standing in for sandy; part (b) runs the real
+# script: the pre-pass on a pty (answered y), then the supervisor's view.
+_S240_PP="$(grep -m1 'SANDY_APPROVE_ONLY=1 "\$SANDY_SELF"' "$SANDY_SCRIPT" | sed 's#</dev/tty >/dev/tty##')"
+printf '#!/usr/bin/env bash\nprintf "ARGV:%%s\\n" "$*" > "$S240_REC"\n' > "$_S240_D/rec"; chmod +x "$_S240_D/rec"
+_s240_pp() { # $1 = SANDY_AGENT_OVERRIDE -> the argv the pre-pass gave sandy
+    rm -f "$_S240_D/rec.out"
+    env S240_REC="$_S240_D/rec.out" SANDY_SELF="$_S240_D/rec" WORK_DIR="$_S240_D" SANDY_AGENT_OVERRIDE="$1" \
+        _sandy_approve_result="$_S240_D/res" bash -c 'eval "$1"' _ "$_S240_PP" >/dev/null 2>&1 || true
+    cat "$_S240_D/rec.out" 2>/dev/null || echo NOT-RUN
+}
+check "§240(13a) the REAL --start pre-pass line hands --agent to the pass (got: $(_s240_pp claude); without --agent: $(_s240_pp ''))" \
+    bash -c 'test "$1" = "ARGV:--agent claude" && test "$2" = "ARGV:"' _ "$(_s240_pp claude)" "$(_s240_pp '')"
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§240(13b) python3 not available to drive a pty"
+else
+    cat > "$_S240_D/ptyans.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]; argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try: os.execvp(argv[0], argv)
+    finally: os._exit(127)
+buf = b''; sent = False; deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try: d = os.read(fd, 4096)
+        except OSError: break
+        if not d: break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode()); sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+PY
+    # $1 fixture  $2 "pty" or "dev-null"  $3.. sandy args
+    _s240_ao() {
+        local T="$_S240_D/$1" how="$2"; shift 2
+        mkdir -p "$T/bin" "$T/home" "$T/ws/.sandy"
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/docker"; chmod +x "$T/bin/docker"
+        printf 'SANDY_AGENT=codex\nSANDY_CODEX_AUTH=oauth\n' > "$T/ws/.sandy/config"
+        if [ "$how" = pty ]; then
+            ( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED -u SANDY_AGENT -u SANDY_CODEX_AUTH PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" \
+                SANDY_APPROVE_ONLY=1 python3 "$_S240_D/ptyans.py" y bash "$SANDY_SCRIPT" "$@" 2>&1 ) || true
+        else
+            ( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED -u SANDY_AGENT -u SANDY_CODEX_AUTH PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" \
+                SANDY_APPROVE_ONLY=1 bash "$SANDY_SCRIPT" "$@" </dev/null 2>&1 ) || true
+        fi
+    }
+    _S240_P1="$(_s240_ao fixed pty --agent claude)"
+    _S240_S1="$(_s240_ao fixed dev-null --agent claude)"
+    _S240_P0="$(_s240_ao bug pty)"
+    _S240_S0="$(_s240_ao bug dev-null --agent claude)"
+    check "§240(13b) with --agent on both sides the pty pre-pass approves and the supervisor's /dev/null pass honours it, no keys dropped; the control (pre-pass WITHOUT --agent, the reviewed bug) makes that same supervisor pass drop them" \
+        bash -c 'grep -q "Approved\." <<<"$1" && grep -q "SANDY_CODEX_AUTH" <<<"$1" && ! grep -q "SANDY_AGENT\$" <<<"$1" && ! grep -q "dropping these keys" <<<"$2" \
+                 && grep -q "Approved\." <<<"$3" && grep -q "dropping these keys" <<<"$4"' _ "$_S240_P1" "$_S240_S1" "$_S240_P0" "$_S240_S0"
+fi
+
+# --- (14) api_key with no key falls back to the HOST's mode, never wider ------
+# A workspace SANDY_CLAUDE_AUTH=api_key passes the gate free; with no
+# ANTHROPIC_API_KEY it used to become auto, which mounts the OAuth file or
+# forwards a long-lived token past a host that chose profile (Opus review,
+# PR-1). Chains the REAL blocks: the no-key fallback, the mode resolver up to
+# the credential-posture block, and the key-forwarding branch §117 runs.
+_S240_FB="$(awk '/--- api_key with no key: fall back to what the HOST chose/,/fi  # end api_key no-key fallback/' "$SANDY_SCRIPT")"
+_S240_RS="$(awk '/--- SANDY_CLAUDE_AUTH: make the choice EXPLICIT/{f=1} /--- #130: credential posture/{exit} f' "$SANDY_SCRIPT")"
+_S240_FW="if _sandy_agent_has claude; then
+$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$SANDY_SCRIPT")"
+mkdir -p "$_S240_D/anth/credentials"; printf '{"access_token":"x"}\n' > "$_S240_D/anth/credentials/default.json"
+_s240_chain() { # $1 = host-resolved baseline -> "mode=<_claude_auth> oauthfile=<kept|none> fwd=<names>"
+    env -i PATH="$PATH" HOME="$_S240_D" ANTHROPIC_CONFIG_DIR="$_S240_D/anth" SANDY_CLAUDE_AUTH=api_key \
+        _SANDY_PASSIVE_BASE_SANDY_CLAUDE_AUTH="$1" CLAUDE_CODE_OAUTH_TOKEN=tok-240 \
+        F1="$_S240_FB" F2="$_S240_RS" F3="$_S240_FW" bash -c '
+        set -u
+        _sandy_agent_has() { [ "$1" = claude ]; }
+        _sandy_add_secret_env() { printf "%s " "$1" >> "$HOME/fwd"; }
+        info() { :; }; warn() { :; }
+        RUN_FLAGS=(); CRED_TMPDIR=""; PROFILE_TMPDIR=""; CRED_JSON="{\"claudeAiOauth\":{}}"; : > "$HOME/fwd"
+        eval "$F1"; eval "$F2"
+        [ -n "$CRED_JSON" ] && CRED_TMPDIR=/oauth-file-mounted
+        eval "$F3"
+        printf "mode=%s oauthfile=%s fwd=%s\n" "$_claude_auth" "$([ -n "$CRED_JSON" ] && echo kept || echo none)" "$(cat "$HOME/fwd")"' 2>&1 || echo "RC=$?"
+}
+_S240_C1="$(_s240_chain profile)"
+_S240_C0="$(_s240_chain '')"
+check "§240(14) host profile, workspace api_key, no ANTHROPIC_API_KEY: the session runs on the profile, with NO OAuth file and NO token forwarded (got: $_S240_C1); control, no host choice: the old fallback to auto stands (got: $_S240_C0)" \
+    bash -c 'case "$3" in *"--- api_key with no key"*"end api_key no-key fallback"*) ;; *) exit 1 ;; esac
+             grep -q "^mode=profile oauthfile=none " <<<"$1" && ! grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$1" \
+             && grep -q "^mode=auto oauthfile=kept " <<<"$2" && grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$2"' _ "$_S240_C1" "$_S240_C0" "$_S240_FB"
+rm -rf "$_S240_D"
+unset _S240_DEFS _S240_D _S240_A _S240_PP _S240_P1 _S240_S1 _S240_P0 _S240_S0 _S240_FB _S240_RS _S240_FW _S240_C1 _S240_C0
+unset -f _s240_load _s240_vc _s240_pp _s240_ao _s240_chain
+
+# ============================================================
 section "§243: an agent image is rebuilt when sandy-base moves under it, by any agent's launch, and only then (the agent hash chains the base id)"
 # ============================================================
 # The agent images (and the sandy-full combo) are FROM sandy-base, but their
