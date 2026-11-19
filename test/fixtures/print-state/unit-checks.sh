@@ -216,7 +216,17 @@ file|ws|approval|marker)
         { printf '{\n  "schema": 1,\n'; yes '  "agents": ["many"],' | head -n 3000; printf '  "agent_wrappers": {"w": 1}\n'; } > "$D/m10.json"
         mkdir -p "$D/m10"; mv "$D/m10.json" "$D/m10/sandy-session.json"
         mkdir -p "$D/m11/sandy-session.json"
-        set -- m01 m02 m03 m04 m05 m06 m07 m08 m09 m10 m11
+        # An invalid lead byte straight before a NUL: in a UTF-8 locale
+        # bash 5.2 read takes the NUL into the character, so a slurp in the
+        # caller locale would miss it (B7 re-verify).
+        _mkm m13 '{\n  "x": "\303\000  "schema": 1,\n  "sandy_version": "v",\n  "launched_at": "t",\n}\n'
+        # Repeated keys through both fallbacks (a NUL; a marker over the
+        # bound): the last value still wins.
+        _dups='  "sandy_version": "1",\n  "sandy_version": "2",\n  "launched_at": "a",\n  "launched_at": "b",\n  "image": 1\n  "image": 2\n  "claude_sessions": 1\n  "claude_sessions": 2\n  "agent_args_composed": 1\n  "agent_args_composed": 2\n  "cross_session_inbound_source": 1\n  "cross_session_inbound_source": 2\n  "agents": [1]\n  "agents": [2]\n  "agent_wrappers": 1\n  "agent_wrappers": 2\n'
+        _mkm m14 "{\\000\\n  \"schema\": 1,\\n$_dups"
+        mkdir -p "$D/m15"
+        { printf '{\n  "schema": 1,\n'; printf "$_dups"; yes '  "pad": "padding padding padding",' | head -n 2000; printf "$_dups" | sed 's/[12]/9&/'; } > "$D/m15/sandy-session.json"
+        set -- m01 m02 m03 m04 m05 m06 m07 m08 m09 m10 m11 m13 m14 m15
         for f in "$@"; do N=$((N + 1)); _cmp_marker "$f"; done
         # The same with a stand-in for BSD sed in a UTF-8 locale: a script
         # with the unanchored .*"agents" expression stops at the first line

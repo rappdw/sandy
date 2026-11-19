@@ -30389,9 +30389,34 @@ assert d["created_version"] == want_ver, len(d["created_version"])
 assert d["agents"] == ["claude"] and d["agent_wrappers"] == {"w": 1}, (d["agents"], d["agent_wrappers"])
 assert d["marker"]["state"] == "present", d["marker"]
 '
+
+# (5) The marker repro from the B7 re-verify, end to end: an invalid lead
+# byte straight before a NUL. In a UTF-8 locale bash 5.2 read took the NUL
+# into the character, so the slurp missed it and the schema line (which the
+# old grep -q gate finds after the NUL) went unseen: "unreadable" where the
+# old readers say "present". The reference is this host's own grep and sed.
+mkdir -p "$_S242_D/nul/home/sandboxes/nul-00000000" "$_S242_D/nul/bin"
+cp "$_S242_D/g/bin/docker" "$_S242_D/nul/bin/docker"
+_S242_N="$_S242_D/nul/home/sandboxes/nul-00000000/sandy-session.json"
+printf '{\n  "x": "\303\000  "schema": 1,\n  "sandy_version": "v",\n  "launched_at": "t",\n}\n' > "$_S242_N"
+_S242_WS=absent; grep -q '^  "schema": ' "$_S242_N" 2>/dev/null && _S242_WS=present
+_S242_WV="$(sed -n 's/^  "sandy_version": "\([^"]*\)",$/\1/p' "$_S242_N" 2>/dev/null | tail -n 1 || true)"
+[ "$_S242_WS" = present ] || _S242_WS=unreadable
+for _S242_M in light full; do
+    for _S242_L in C $_S242_UTF8; do
+        _s242_state "$_S242_D/nul" "$_S242_M" "$_S242_L" "$_S242_D/nul.$_S242_M.$_S242_L"
+        check "§242(5) $_S242_M mode, LC_ALL=$_S242_L: a marker with an invalid lead byte before a NUL reads as the old readers read it (state $_S242_WS, sandy_version \"$_S242_WV\"; mutation: the slurp in the caller locale)" \
+            bash -c '[ ! -s "$1.err" ] && python3 -c "
+import json, sys
+m = json.load(open(sys.argv[1]))[\"sandboxes\"][0][\"marker\"]
+want_v = sys.argv[3] if sys.argv[2] == \"present\" and sys.argv[3] else None
+assert m[\"state\"] == sys.argv[2] and m[\"sandy_version\"] == want_v, m
+" "$1" "$2" "$3" || { cat "$1.err"; exit 1; }' _ "$_S242_D/nul.$_S242_M.$_S242_L" "$_S242_WS" "$_S242_WV"
+    done
+done
 unset -f _s242_state _s242_spawns
 rm -rf "$_S242_D"
-unset _S242_FX _S242_UTF8 _S242_G _S242_L _S242_D _S242_DEAD _S242_M _S242_C _S242_P _S242_C1 _S242_C5 _S242_PER _S242_B _S242_T0 _S242_EL
+unset _S242_FX _S242_UTF8 _S242_G _S242_L _S242_D _S242_DEAD _S242_M _S242_C _S242_P _S242_C1 _S242_C5 _S242_PER _S242_B _S242_T0 _S242_EL _S242_N _S242_WS _S242_WV
 
 # BEGIN SUMMARY
 # ============================================================

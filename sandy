@@ -2494,7 +2494,10 @@ _SANDY_SLURP_MAX=16384
 _sandy_slurp_v() {
     local _rc=0
     _SANDY_SL=""
-    IFS= read -r -d '' -n "$_SANDY_SLURP_MAX" _SANDY_SL 2>/dev/null < "$1" || _rc=$?
+    # LC_ALL=C for this one read (the caller keeps its locale): in a UTF-8
+    # locale bash 5.2 takes a NUL after an invalid lead byte as part of the
+    # character, so the NUL would go unseen. Bytes, then, and -n in bytes.
+    LC_ALL=C IFS= read -r -d '' -n "$_SANDY_SLURP_MAX" _SANDY_SL 2>/dev/null < "$1" || _rc=$?
     # 1 = end of file before a NUL and before the bound: the whole file.
     [ "$_rc" = 1 ]
 }
