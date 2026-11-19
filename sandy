@@ -2064,13 +2064,31 @@ _sandy_overlay_detect_agent() {
     esac
 }
 # One line that changes when anything in tree $1 is added, removed, renamed,
-# re-linked or rewritten: every name, every regular file's checksum, every
-# link's listing. Follows $1 itself, never links inside it. POSIX find/cksum,
-# so BSD-clean.
+# re-linked or rewritten: the SHA-256 of a sorted listing of every name, every
+# regular file's SHA-256 (one hashing process per batch, via find -exec +) and
+# every link's target (hex, so a target cannot inject a line). Follows $1
+# itself, never links inside it. A CRC (cksum) is forgeable by the agent this
+# watches: a same-length payload fixed up to the same CRC went unreported.
+# Prints "unhashable" -- which the session-end check always reports as a
+# change -- when it cannot measure the tree honestly: no SHA-256 tool, an
+# unreadable tree, or a name with a newline in it (the line listing would be
+# ambiguous).
+# A link's target as lowercase hex (empty when unreadable): one token that a
+# target holding a tab, newline or escape cannot break out of.
+_sandy_link_hex() { readlink "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true; }
 _sandy_tree_fingerprint() {
-    ( cd "$1" 2>/dev/null || exit 0
-      { find . -print; find . -type f -exec cksum {} +; find . -type l -exec ls -ld {} +; } 2>/dev/null \
-          | LC_ALL=C sort | cksum ) 2>/dev/null | awk '{print $1 "-" $2}' || true
+    local _h _out _nl='
+'
+    if command -v shasum >/dev/null 2>&1; then _h="shasum -a 256"
+    elif command -v sha256sum >/dev/null 2>&1; then _h="sha256sum"
+    else echo unhashable; return 0; fi
+    _out="$(cd "$1" 2>/dev/null || exit 1
+        [ -z "$(find . -name "*${_nl}*" -print 2>/dev/null)" ] || exit 1
+        { find . -print
+          find . -type f -exec $_h {} +
+          find . -type l -exec sh -c 'for l; do printf "%s -> " "$l"; readlink "$l" | od -An -tx1 | tr -d " \n"; echo; done' _ {} +
+        } | LC_ALL=C sort | $_h | awk '{print $1}')" || _out=""
+    if [ -n "$_out" ]; then echo "$_out"; else echo unhashable; fi
 }
 
 # core.hooksPath redirect protection (Pillar "Week of Sandbox Escapes" #4
@@ -2113,6 +2131,14 @@ _sandy_configured_hooks_rel() {
     esac
     [ -n "$rel" ] && [ "$rel" != ".git/hooks" ] || return 0
     case "$rel" in .|..|../*|*/..|*/../*|/*) return 0 ;; esac   # root / escape / absolute
+    # The result is written one per line into the launch snapshot, whose
+    # readers match whole lines and treat a leading # as a record type. A
+    # value with a newline or tab, or starting with #, could forge an entry.
+    case "$rel" in
+        *$'\n'*|*$'\t'*|"#"*)
+            printf "${YELLOW:-}[sandy]${NC:-} core.hooksPath %q contains a newline or tab, or starts with #: not watched at session end\n" "$hp" >&2
+            return 0 ;;
+    esac
     while IFS= read -r pd; do [ "$rel" = "$pd" ] && return 0; done < <(_sandy_protected_dirs)
     printf '%s\n' "$rel"
     return 0
@@ -19945,7 +19971,8 @@ cleanup() {
             _fp0="$(awk -F '\t' -v p="$_pd" '$1 == "#content" && $2 == p { print $3; exit }' \
                 "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
             if [ -n "$_fp0" ]; then
-                if [ -d "$WORK_DIR/$_pd" ] && [ "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" != "$_fp0" ]; then
+                if [ -d "$WORK_DIR/$_pd" ] && { [ "$_fp0" = unhashable ] \
+                        || [ "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" != "$_fp0" ]; }; then
                     _changed_protected+=("$_pd")
                 fi
                 continue
@@ -20002,25 +20029,32 @@ cleanup() {
                 _p="${_e#changed:}"
                 if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
                     _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
-                    if grep -qFx "$(printf '#link\t%s' "$_lnk")" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
-                        printf "${YELLOW}[sandy]${NC}   %s/%s (through %s -> %q, a link that existed at launch: review it there)\n" \
+                    # Target at launch, hex-encoded (#link<TAB>link<TAB>hex); "x" alone = recorded
+                    # with an unreadable target, nothing = not there at launch.
+                    _lhex0="$(awk -F '\t' -v p="$_lnk" '$1 == "#link" && $2 == p { print "x" $3; exit }' \
+                        "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
+                    _lhex="x$(_sandy_link_hex "$WORK_DIR/$_lnk")"
+                    if [ -n "$_lhex0" ] && [ "$_lhex0" = "$_lhex" ]; then
+                        printf "${YELLOW}[sandy]${NC}   %s/%q (through %q -> %q, a link that existed at launch: review it there)\n" \
                             "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
                     else
                         case "$_seen_links" in
                             *" $_lnk "*) ;;
                             *)  _seen_links="$_seen_links$_lnk "
-                                printf "${YELLOW}[sandy]${NC}   %s/%s -> %q  (a symbolic link)\n" "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                if [ -n "$_lhex0" ]; then _lnote="a link that existed at launch, RETARGETED during this session"
+                                else _lnote="a symbolic link"; fi
+                                printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (%s)\n" "$WORK_DIR" "$_lnk" "$_tgt" "$_lnote" >&2
                                 _rm_links="$_rm_links $(printf '%q' "$_lnk")" ;;
                         esac
                     fi
                 elif [ "$_e" != "$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%s/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
+                    printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
                         "$WORK_DIR" "$_p" >&2
                 elif [ -d "$WORK_DIR/$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%s/\n" "$WORK_DIR" "$_p" >&2
+                    printf "${YELLOW}[sandy]${NC}   %s/%q/\n" "$WORK_DIR" "$_p" >&2
                     _rm_args="$_rm_args $(printf '%q' "$_p")/"
                 else
-                    printf "${YELLOW}[sandy]${NC}   %s/%s\n" "$WORK_DIR" "$_p" >&2
+                    printf "${YELLOW}[sandy]${NC}   %s/%q\n" "$WORK_DIR" "$_p" >&2
                     _rm_args="$_rm_args $(printf '%q' "$_p")"
                 fi
             done
@@ -21964,7 +21998,8 @@ done < <(_sandy_protected_files)
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     if _lnk_snap="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_pd")"; then
-        printf '#link\t%s\n' "$_lnk_snap" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+        printf '#link\t%s\t%s\n' "$_lnk_snap" "$(_sandy_link_hex "$WORK_DIR/$_lnk_snap")" \
+            >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
 done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs; _sandy_protected_files; printf '%s\n' "$_cfg_hooks_snap")
 unset _lnk_snap
