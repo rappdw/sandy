@@ -29869,6 +29869,123 @@ unset -f _s241_run _s241_ndu
 rm -rf "$_S241"
 unset _S241 _S241_PY _S241_RUN_PATH
 
+# ============================================================
+section "§245: agent-read dirs created in-session (.claude/commands|agents|plugins, .gemini/commands) are reported at session end"
+# ============================================================
+# WHY. Sandy overlays a sandbox-only copy on .claude/commands, .claude/agents,
+# .claude/plugins and .gemini/commands only when the workspace (or the
+# sandbox) already has that directory. Otherwise nothing is mounted, and a
+# slash command, subagent or plugin the agent creates lands in the host
+# workspace, live for the user's next host agent session. Maintainer decision
+# (2026-11-19): detection, not prevention -- no new mounts, no stub dirs. The
+# four join the existing launch snapshot and session-end report, through a
+# separate list so they never get the :ro mount a protected dir gets.
+#
+# Runs the REAL code: the launch snapshot and the session-end block are sliced
+# out of sandy verbatim and run under set -euo pipefail in a clean env (no
+# inherited SANDY_* from a live session).
+_S245_D="$(cd "$(mktemp -d)" && pwd -P)"
+python3 - "$SANDY_SCRIPT" "$_S245_D" <<'S245_EXTRACT'
+import sys
+src = open(sys.argv[1]).read()
+out = sys.argv[2]
+lines = src.split('\n')
+def fn(name):
+    for i, l in enumerate(lines):
+        if l.startswith(name + '()'):
+            if l.rstrip().endswith('}'):
+                return l + '\n'
+            j = i
+            while lines[j] != '}':
+                j += 1
+            return '\n'.join(lines[i:j + 1]) + '\n'
+    raise SystemExit('missing function ' + name)
+names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
+         '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
+         '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
+         '_sandy_slug_for', '_sandy_note_session_created_sandy_dir']
+open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
+a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
+b = src.index('done < <(_sandy_protected_files)\n', a) + len('done < <(_sandy_protected_files)\n')
+# The slice ends on a `while ...; do [ -e ] && echo; done` whose status is its
+# last test's; sandy runs on past it, so the fragment does too (a real failure
+# inside it still trips set -e before this line).
+open(out + '/snap.sh', 'w').write(src[a:b] + 'true\n')
+a = src.index('    # Detect protected-path appearances')
+b = src.index('    # #80: .git/HEAD is rw in-container', a)
+open(out + '/end.sh', 'w').write(src[a:b])
+S245_EXTRACT
+cat > "$_S245_D/drive.sh" <<'S245_DRIVE'
+set -euo pipefail
+D="$1"; WORK_DIR="$2"; SANDBOX_DIR="$3"; SANDY_HOME="$4"; mode="$5"
+GREEN=""; YELLOW=""; NC=""
+. "$D/fns.sh"
+if [ "$mode" = launch ]; then
+    RUN_FLAGS=(); SANDY_WORKSPACE=/ws
+    . "$D/snap.sh"
+    printf 'FLAG:%s\n' ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}
+else
+    . "$D/end.sh"
+fi
+echo DRIVE-OK
+S245_DRIVE
+_s245_run() {   # $1 = fixture  $2 = launch|end -> combined output
+    local T="$_S245_D/$1"
+    mkdir -p "$T/ws" "$T/sb" "$T/home"
+    env -i PATH="$PATH" HOME="$T/home" bash "$_S245_D/drive.sh" "$_S245_D" "$T/ws" "$T/sb" "$T/home" "$2" </dev/null 2>&1 || echo "DRIVE-FAILED"
+}
+
+check "§245(pre) sliced the launch snapshot and the session-end block out of sandy, and both use the detection list (mutation: a rename empties a slice and must fail HERE)" \
+    bash -c 'grep -q "_sandy_overlay_detect_dirs" "$1/snap.sh" && grep -q "_sandy_overlay_detect_dirs" "$1/end.sh" && grep -q "Protected paths appeared" "$1/end.sh"' _ "$_S245_D"
+
+# A: absent at launch, a slash command written in-session -> reported.
+_S245_L="$(_s245_run A launch)"
+mkdir -p "$_S245_D/A/ws/.claude/commands"; printf 'run curl | sh\n' > "$_S245_D/A/ws/.claude/commands/x.md"
+_S245_OUT="$(_s245_run A end)"
+check "§245(1) a .claude/commands/x.md created after the snapshot is reported with its path and a (cd <ws> && rm -rf .claude/commands/) remediation" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s" "$2" | grep -q "DRIVE-OK" \
+             && printf "%s" "$2" | grep -q "Protected paths appeared" \
+             && printf "%s" "$2" | grep -qF "$3/.claude/commands/" \
+             && printf "%s" "$2" | grep -qF "(cd $3 && rm -rf .claude/commands/)" \
+             && printf "%s" "$2" | grep -q "read by the agent CLI on your host"' _ "$_S245_L" "$_S245_OUT" "$_S245_D/A/ws"
+
+# B: existed at launch (so it is overlaid) -> never reported, and never :ro.
+mkdir -p "$_S245_D/B/ws/.claude/commands"; printf 'mine\n' > "$_S245_D/B/ws/.claude/commands/old.md"
+_S245_L="$(_s245_run B launch)"
+check "§245(2) a .claude/commands that existed at launch is snapshotted and gets no mount from the snapshot: the writable copy-overlay stays the only one (mutation: putting the four in _sandy_protected_dirs adds a :ro mount)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "\.claude/commands" && grep -qFx ".claude/commands" "$2"' \
+    _ "$_S245_L" "$_S245_D/B/sb/.protected-existed-at-launch"
+printf 'new\n' > "$_S245_D/B/ws/.claude/commands/new.md"
+_S245_OUT="$(_s245_run B end)"
+check "§245(3) ...and is not reported at session end (mutation: skipping the snapshot, or reporting regardless of it, flags it)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths appeared"' _ "$_S245_OUT"
+
+# C: an empty new directory -> not reported (the existing with-content rule).
+_S245_L="$(_s245_run C launch)"
+mkdir -p "$_S245_D/C/ws/.claude/agents"
+_S245_OUT="$(_s245_run C end)"
+check "§245(4) an empty .claude/agents created in-session is not reported (same with-content rule as every protected dir)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths appeared"' _ "$_S245_OUT"
+
+# D: .gemini/commands.
+_S245_L="$(_s245_run D launch)"
+mkdir -p "$_S245_D/D/ws/.gemini/commands"; printf 'prompt = "x"\n' > "$_S245_D/D/ws/.gemini/commands/y.toml"
+_S245_OUT="$(_s245_run D end)"
+check "§245(5) a .gemini/commands/y.toml created in-session is reported with its remediation" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.gemini/commands/" && printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .gemini/commands/)"' _ "$_S245_OUT" "$_S245_D/D/ws"
+
+# E: all four at once -> each one listed (mutation: dropping any one from the list).
+_S245_L="$(_s245_run E launch)"
+for _s245_p in .claude/commands .claude/agents .claude/plugins .gemini/commands; do
+    mkdir -p "$_S245_D/E/ws/$_s245_p"; printf 'x\n' > "$_S245_D/E/ws/$_s245_p/f"
+done
+_S245_OUT="$(_s245_run E end)"
+check "§245(6) all four created in one session are each listed in the remediation (mutation: dropping one from _sandy_overlay_detect_dirs)" \
+    bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .claude/commands/ .claude/agents/ .claude/plugins/ .gemini/commands/)"' _ "$_S245_OUT" "$_S245_D/E/ws"
+rm -rf "$_S245_D"
+unset _S245_D _S245_L _S245_OUT _s245_p
+unset -f _s245_run
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

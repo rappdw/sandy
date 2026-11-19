@@ -2034,6 +2034,25 @@ EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
 
+# Detection-only directories. The agent CLI on the HOST reads these from the
+# workspace (slash commands, subagents, plugins), so an agent-created file here
+# is live for the user's next host session. Sandy overlays a sandbox-only copy
+# on each one ONLY when the workspace (or the sandbox) already has it (the
+# copy-overlay block before `docker run`); otherwise nothing is mounted and a
+# creation lands in the workspace. They are deliberately NOT in
+# _sandy_protected_dirs: that list gets a :ro mount when the dir exists, which
+# would make an existing .claude/commands read-only and break its writable
+# overlay. Mounting is unchanged; the launch snapshot and the session-end
+# report in cleanup() iterate this list alongside the protected dirs.
+_sandy_overlay_detect_dirs() {
+    cat <<'EOF'
+.claude/commands
+.claude/agents
+.claude/plugins
+.gemini/commands
+EOF
+}
+
 # core.hooksPath redirect protection (Pillar "Week of Sandbox Escapes" #4
 # variant). A repo (or the user's global git config) can point hooks at a
 # directory OTHER than .git/hooks — e.g. `core.hooksPath = .githooks`, a common
@@ -19909,7 +19928,7 @@ cleanup() {
                 fi
                 _new_protected+=("$_pd")
             fi
-        done < <(_sandy_protected_dirs)
+        done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs)
         # Same for protected FILES absent at launch (e.g. .npmrc, .envrc,
         # .pre-commit-config.yaml) — existence-gated, so a newly-created one
         # persists to the host workspace and otherwise goes unreported.
@@ -19950,9 +19969,11 @@ cleanup() {
                 fi
             done
             printf "${YELLOW}[sandy]${NC}\n" >&2
-            printf "${YELLOW}[sandy]${NC} These paths are normally read-only inside sandy because they auto-execute\n" >&2
-            printf "${YELLOW}[sandy]${NC} code under common operations (git hooks fire on \`git pull\`/checkout, CI\n" >&2
-            printf "${YELLOW}[sandy]${NC} workflows on \`git push\`, IDE/shell/tool configs on project open or next use).\n" >&2
+            printf "${YELLOW}[sandy]${NC} Sandy keeps these paths away from your host workspace when they exist at launch,\n" >&2
+            printf "${YELLOW}[sandy]${NC} because they auto-execute code or steer an agent under common operations (git\n" >&2
+            printf "${YELLOW}[sandy]${NC} hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`, IDE/shell/tool\n" >&2
+            printf "${YELLOW}[sandy]${NC} configs on project open or next use, and .claude/ or .gemini/ commands, agents\n" >&2
+            printf "${YELLOW}[sandy]${NC} and plugins are read by the agent CLI on your host at its next start).\n" >&2
             printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
             _rm_args=""
             for _p in "${_new_protected[@]}"; do
@@ -21838,6 +21859,14 @@ while IFS= read -r _pd; do
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
 done < <(_sandy_protected_dirs)
+# Detection-only dirs (_sandy_overlay_detect_dirs): snapshot, never mount here.
+# One that exists at launch gets the sandbox copy-overlay below (for the agent
+# that reads it), so in-session writes land in the sandbox and are not
+# reported; an absent one is reported at session end if it gains content.
+while IFS= read -r _pd; do
+    [ -z "$_pd" ] && continue
+    [ -d "$WORK_DIR/$_pd" ] && echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+done < <(_sandy_overlay_detect_dirs)
 # core.hooksPath redirect: protect a non-default effective hooks directory that
 # lives inside the workspace (see _sandy_extra_hooks_dir). Existence-gated :ro
 # mount only — the dynamic hooksPath is not in the static _sandy_protected_dirs
