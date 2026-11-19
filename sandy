@@ -2034,6 +2034,112 @@ EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
 
+# Detection-only directories. The agent CLI on the HOST reads these from the
+# workspace (slash commands, subagents, plugins), so an agent-created file here
+# is live for the user's next host session. Sandy overlays a sandbox-only copy
+# on each one ONLY when the workspace (or the sandbox) already has it (the
+# copy-overlay block before `docker run`); otherwise nothing is mounted and a
+# creation lands in the workspace. They are deliberately NOT in
+# _sandy_protected_dirs: that list gets a :ro mount when the dir exists, which
+# would make an existing .claude/commands read-only and break its writable
+# overlay. Mounting is unchanged; the launch snapshot and the session-end
+# report in cleanup() iterate this list alongside the protected dirs.
+_sandy_overlay_detect_dirs() {
+    cat <<'EOF'
+.claude/commands
+.claude/agents
+.claude/plugins
+.gemini/commands
+EOF
+}
+# The agent whose overlay covers a _sandy_overlay_detect_dirs entry: the
+# .claude/* copies are mounted only when claude runs, .gemini/commands only
+# when gemini does. In any other session an existing entry is the plain rw
+# workspace path, so the snapshot fingerprints it instead of trusting an
+# overlay that was never mounted.
+_sandy_overlay_detect_agent() {
+    case "$1" in
+        .claude/*) echo claude ;;
+        .gemini/*) echo gemini ;;
+    esac
+}
+# One line that changes when anything in tree $1 is added, removed, renamed,
+# re-linked, re-moded or rewritten: the SHA-256 of a sorted listing of every
+# entry's `ls -ldn` line minus its date (mode, links, owner, size, name; the
+# date drops HH:MM for the year at six months, which is no change), every regular
+# file's SHA-256 (one hashing process per batch, via find -exec +) and every
+# link's target (hex, so a target cannot inject a line). Follows $1
+# itself, never links inside it. A CRC (cksum) is forgeable by the agent this
+# watches: a same-length payload fixed up to the same CRC went unreported.
+# Prints "unhashable" -- which the session-end check always reports as a
+# change -- when it cannot measure the tree honestly: no SHA-256 tool, a tree,
+# subdirectory or file it cannot read (any of the finds or hashes failing), or
+# a name with a newline in it (the line listing would be ambiguous).
+# A link's target as lowercase hex (empty when unreadable): one token that a
+# target holding a tab, newline or escape cannot break out of.
+_sandy_link_hex() { readlink "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true; }
+# Which object a watched path is, as hex (empty when absent): the canonical
+# path it resolves to (`pwd -P`) and the inode (`ls -diL`, POSIX) of each
+# directory ABOVE it inside the workspace. The launch snapshot records it for
+# every watched path that exists (#id lines). What a session can do to an
+# existing entry shows here: re-point a link on the way (`.claude -> other`:
+# a new canonical path) or rename a parent aside and recreate it (`mv .claude
+# .claude-x`, which carries any overlay or :ro mount below it away: a new
+# parent inode). The entry's own inode is deliberately left out: an existing
+# entry is itself a :ro or overlay mount point the container cannot move or
+# replace, so a change there comes from the host -- an editor, `mise use` or
+# Claude Code saving atomically (write a temp file, rename it over), or a git
+# checkout -- and reporting it would offer to delete the user's own file.
+_sandy_path_identity() {
+    local _c _a _rest _i _out
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    if [ -d "$1" ]; then
+        _c="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+    else
+        _c="$(cd "${1%/*}" 2>/dev/null && pwd -P)/${1##*/}" || return 0
+    fi
+    _out="$_c"
+    _rest="${1#"$WORK_DIR"/}"; _a="$WORK_DIR"
+    while :; do
+        case "$_rest" in */*) ;; *) break ;; esac
+        _a="$_a/${_rest%%/*}"; _rest="${_rest#*/}"
+        _i="$(ls -diL "$_a" 2>/dev/null | awk '{print $1}')" || _i=""
+        _out="$_out $_i"
+    done
+    printf '%s' "$_out" | od -An -tx1 | tr -d ' \n' || true
+}
+# True when an entry the snapshot $2 lists as existing at launch was REPLACED
+# in-session (_sandy_path_identity: a re-pointed link on the way, or a parent
+# renamed aside and recreated), and something is there now.
+_sandy_replaced_since_launch() {
+    _sandy_same_object "$1" "$2" && return 1
+    [ -e "$WORK_DIR/$1" ] || [ -L "$WORK_DIR/$1" ]
+}
+# True when workspace-relative $1 is the same object the snapshot $2 recorded
+# for it. No #id record means not the same: an entry recorded as existing
+# always gets one, so a missing record is a broken snapshot, and failing
+# toward a report is the safe side.
+_sandy_same_object() {
+    local _r
+    _r="$(awk -F '\t' -v p="$1" '$1 == "#id" && $2 == p { print "x" $3; exit }' "$2" 2>/dev/null || true)"
+    [ -n "$_r" ] && [ "$_r" != "x" ] && [ "$_r" = "x$(_sandy_path_identity "$WORK_DIR/$1")" ]
+}
+_sandy_tree_fingerprint() {
+    local _h _out _l _nl='
+'
+    if command -v shasum >/dev/null 2>&1; then _h="shasum -a 256"
+    elif command -v sha256sum >/dev/null 2>&1; then _h="sha256sum"
+    else echo unhashable; return 0; fi
+    _out="$(cd "$1" 2>/dev/null || exit 1
+        [ -z "$(find . -name "*${_nl}*" -print 2>/dev/null)" ] || exit 1
+        _l="$(LC_ALL=C find . -exec ls -ldn {} + | awk '{ $6 = ""; $7 = ""; $8 = ""; print }' \
+              && find . -type f -exec $_h {} + \
+              && find . -type l -exec sh -c 'for l; do printf "%s -> " "$l"; readlink "$l" | od -An -tx1 | tr -d " \n"; echo; done' _ {} +)" \
+            || exit 1
+        printf '%s\n' "$_l" | LC_ALL=C sort | $_h | awk '{print $1}')" || _out=""
+    if [ -n "$_out" ]; then echo "$_out"; else echo unhashable; fi
+}
+
 # core.hooksPath redirect protection (Pillar "Week of Sandbox Escapes" #4
 # variant). A repo (or the user's global git config) can point hooks at a
 # directory OTHER than .git/hooks — e.g. `core.hooksPath = .githooks`, a common
@@ -2074,6 +2180,14 @@ _sandy_configured_hooks_rel() {
     esac
     [ -n "$rel" ] && [ "$rel" != ".git/hooks" ] || return 0
     case "$rel" in .|..|../*|*/..|*/../*|/*) return 0 ;; esac   # root / escape / absolute
+    # The result is written one per line into the launch snapshot, whose
+    # readers match whole lines and treat a leading # as a record type. A
+    # value with a newline or tab, or starting with #, could forge an entry.
+    case "$rel" in
+        *$'\n'*|*$'\t'*|"#"*)
+            printf "${YELLOW:-}[sandy]${NC:-} core.hooksPath %q contains a newline or tab, or starts with #: not watched at session end\n" "$hp" >&2
+            return 0 ;;
+    esac
     while IFS= read -r pd; do [ "$rel" = "$pd" ] && return 0; done < <(_sandy_protected_dirs)
     printf '%s\n' "$rel"
     return 0
@@ -19897,10 +20011,29 @@ cleanup() {
             && [ -f "$SANDBOX_DIR/.protected-existed-at-launch" ] \
             && [ -n "${WORK_DIR:-}" ]; then
         _new_protected=()
+        _changed_protected=()
+        _replaced_protected=()
         while IFS= read -r _pd; do
             [ -z "$_pd" ] && continue
             # Only flag dirs that DIDN'T exist at launch but DO now (with content).
-            grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null && continue
+            # One that existed at launch is reported only if the session REPLACED
+            # it (a separate list: it was the user's, so no removal is offered).
+            if grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+                if _sandy_replaced_since_launch "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                    _replaced_protected+=("$_pd")
+                fi
+                continue
+            fi
+            # ...or that existed with no overlay (a #content fingerprint) and changed.
+            _fp0="$(awk -F '\t' -v p="$_pd" '$1 == "#content" && $2 == p { print $3; exit }' \
+                "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
+            if [ -n "$_fp0" ]; then
+                if [ -d "$WORK_DIR/$_pd" ] && { [ "$_fp0" = unhashable ] \
+                        || [ "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" != "$_fp0" ]; }; then
+                    _changed_protected+=("$_pd")
+                fi
+                continue
+            fi
             if [ -d "$WORK_DIR/$_pd" ] && [ -n "$(ls -A "$WORK_DIR/$_pd" 2>/dev/null)" ]; then
                 if _sandy_dir_is_inert_git "$_pd"; then
                     [ "${SANDY_VERBOSE:-0}" = "1" ] && \
@@ -19909,13 +20042,18 @@ cleanup() {
                 fi
                 _new_protected+=("$_pd")
             fi
-        done < <(_sandy_protected_dirs)
+        done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs)
         # Same for protected FILES absent at launch (e.g. .npmrc, .envrc,
         # .pre-commit-config.yaml) — existence-gated, so a newly-created one
         # persists to the host workspace and otherwise goes unreported.
         while IFS= read -r _pf; do
             [ -z "$_pf" ] && continue
-            grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null && continue
+            if grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+                if _sandy_replaced_since_launch "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                    _replaced_protected+=("$_pf")
+                fi
+                continue
+            fi
             if [ -f "$WORK_DIR/$_pf" ]; then
                 _new_protected+=("$_pf")
             fi
@@ -19926,8 +20064,11 @@ cleanup() {
         # flag it if it now exists with content. git hooks fire on the user's next
         # host git operation, so this belongs in the same warning.
         _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
-        if [ -n "$_cfg_hooks" ] \
-                && ! grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null \
+        if [ -n "$_cfg_hooks" ] && grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            if _sandy_replaced_since_launch "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                _replaced_protected+=("$_cfg_hooks")
+            fi
+        elif [ -n "$_cfg_hooks" ] \
                 && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
             _new_protected+=("$_cfg_hooks")
         fi
@@ -19940,29 +20081,85 @@ cleanup() {
         if _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" session-end; then
             _sandy_df_flagged=true
         fi
-        if [ ${#_new_protected[@]} -gt 0 ]; then
+        if [ ${#_new_protected[@]} -gt 0 ] || [ ${#_changed_protected[@]} -gt 0 ]; then
             printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
-            for _p in "${_new_protected[@]}"; do
-                if [ -d "$WORK_DIR/$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%s/\n" "$WORK_DIR" "$_p" >&2
+            # A reported path may be, or sit under, a link (the session can plant
+            # `.claude/commands -> ../..`). Every test above follows it, and so
+            # would `rm -rf X/`: it deletes the target's contents. So a link is
+            # shown with its target and removed with a plain `rm` (the link
+            # only); one that existed at launch (#link) gets no command at all.
+            _rm_args=""; _rm_links=""; _seen_links=" "
+            for _e in ${_new_protected[@]+"${_new_protected[@]}"} \
+                      ${_changed_protected[@]+"${_changed_protected[@]/#/changed:}"}; do
+                _p="${_e#changed:}"
+                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
+                    # Target at launch, hex-encoded (#link<TAB>link<TAB>hex); "x" alone = recorded
+                    # with an unreadable target, nothing = not there at launch.
+                    _lhex0="$(awk -F '\t' -v p="$_lnk" '$1 == "#link" && $2 == p { print "x" $3; exit }' \
+                        "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
+                    _lhex="x$(_sandy_link_hex "$WORK_DIR/$_lnk")"
+                    if [ -n "$_lhex0" ] && [ "$_lhex0" = "$_lhex" ]; then
+                        printf "${YELLOW}[sandy]${NC}   %s/%q (through %q -> %q, a link that existed at launch: review it there)\n" \
+                            "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
+                    else
+                        case "$_seen_links" in
+                            *" $_lnk "*) ;;
+                            *)  _seen_links="$_seen_links$_lnk "
+                                if [ -n "$_lhex0" ]; then
+                                    # The user's link, re-pointed: review it, no removal offered.
+                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a link that existed at launch, RETARGETED during this session: review it)\n" \
+                                        "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                else
+                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a symbolic link)\n" "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                    _rm_links="$_rm_links $(printf '%q' "$_lnk")"
+                                fi ;;
+                        esac
+                    fi
+                elif [ "$_e" != "$_p" ]; then
+                    printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
+                        "$WORK_DIR" "$_p" >&2
+                elif [ -d "$WORK_DIR/$_p" ]; then
+                    printf "${YELLOW}[sandy]${NC}   %s/%q/\n" "$WORK_DIR" "$_p" >&2
+                    _rm_args="$_rm_args $(printf '%q' "$_p")/"
                 else
-                    printf "${YELLOW}[sandy]${NC}   %s/%s\n" "$WORK_DIR" "$_p" >&2
+                    printf "${YELLOW}[sandy]${NC}   %s/%q\n" "$WORK_DIR" "$_p" >&2
+                    _rm_args="$_rm_args $(printf '%q' "$_p")"
                 fi
             done
             printf "${YELLOW}[sandy]${NC}\n" >&2
-            printf "${YELLOW}[sandy]${NC} These paths are normally read-only inside sandy because they auto-execute\n" >&2
-            printf "${YELLOW}[sandy]${NC} code under common operations (git hooks fire on \`git pull\`/checkout, CI\n" >&2
-            printf "${YELLOW}[sandy]${NC} workflows on \`git push\`, IDE/shell/tool configs on project open or next use).\n" >&2
-            printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
-            _rm_args=""
-            for _p in "${_new_protected[@]}"; do
-                if [ -d "$WORK_DIR/$_p" ]; then
-                    _rm_args="$_rm_args $_p/"
+            printf "${YELLOW}[sandy]${NC} Sandy keeps these paths away from your host workspace when they exist at launch,\n" >&2
+            printf "${YELLOW}[sandy]${NC} because they auto-execute code or steer an agent under common operations (git\n" >&2
+            printf "${YELLOW}[sandy]${NC} hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`, IDE/shell/tool\n" >&2
+            printf "${YELLOW}[sandy]${NC} configs on project open or next use, and .claude/ or .gemini/ commands, agents\n" >&2
+            printf "${YELLOW}[sandy]${NC} and plugins are read by the agent CLI on your host at its next start).\n" >&2
+            if [ -n "$_rm_args" ] || [ -n "$_rm_links" ]; then
+                printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
+                if [ -n "$_rm_args" ]; then
+                    printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n" "$WORK_DIR" "$_rm_args" >&2
+                fi
+                if [ -n "$_rm_links" ]; then
+                    printf "${YELLOW}[sandy]${NC}   (cd %q && rm%s)   # the link only, never what it points to\n" "$WORK_DIR" "$_rm_links" >&2
+                fi
+            else
+                printf "${YELLOW}[sandy]${NC} Review the content before any of those operations.\n" >&2
+            fi
+            printf "\n" >&2
+        fi
+        if [ ${#_replaced_protected[@]} -gt 0 ]; then
+            printf "\n${YELLOW}[sandy]${NC} Protected paths REPLACED during this session (they existed at launch):\n" >&2
+            for _p in "${_replaced_protected[@]}"; do
+                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
+                    printf "${YELLOW}[sandy]${NC}   %s/%q (through %q, now -> %q)\n" "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
                 else
-                    _rm_args="$_rm_args $_p"
+                    printf "${YELLOW}[sandy]${NC}   %s/%q (a different object now sits at this path)\n" "$WORK_DIR" "$_p" >&2
                 fi
             done
-            printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n\n" "$WORK_DIR" "$_rm_args" >&2
+            printf "${YELLOW}[sandy]${NC} A link on the way was re-pointed, or a parent directory was renamed aside and the\n" >&2
+            printf "${YELLOW}[sandy]${NC} path recreated, so what is there now is not what sandy protected or overlaid. It was\n" >&2
+            printf "${YELLOW}[sandy]${NC} yours before the session, so sandy offers no removal: review it, and any renamed-aside\n" >&2
+            printf "${YELLOW}[sandy]${NC} sibling, before your next git, IDE or agent operation in this workspace.\n\n" >&2
         fi
         if [ "$_sandy_df_flagged" = true ]; then
             printf "${YELLOW}[sandy]${NC} .sandy/ was CREATED during this session. Sandy runs a .sandy/Dockerfile's RUN\n" >&2
@@ -21838,6 +22035,23 @@ while IFS= read -r _pd; do
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
 done < <(_sandy_protected_dirs)
+# Detection-only dirs (_sandy_overlay_detect_dirs): snapshot, never mount here.
+# One that exists at launch AND whose agent runs gets the sandbox copy-overlay
+# below, so in-session writes land in the sandbox and are not reported; one
+# that exists with no overlay this launch is fingerprinted (#content line);
+# an absent one is reported at session end if it gains content.
+while IFS= read -r _pd; do
+    [ -z "$_pd" ] && continue
+    [ -d "$WORK_DIR/$_pd" ] || continue
+    if _sandy_agent_has "$(_sandy_overlay_detect_agent "$_pd")"; then
+        echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+    else
+        # Exists but no overlay this launch: writes go straight to the host,
+        # so record what is there and report a change at session end.
+        printf '#content\t%s\t%s\n' "$_pd" "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" \
+            >> "$SANDBOX_DIR/.protected-existed-at-launch"
+    fi
+done < <(_sandy_overlay_detect_dirs)
 # core.hooksPath redirect: protect a non-default effective hooks directory that
 # lives inside the workspace (see _sandy_extra_hooks_dir). Existence-gated :ro
 # mount only — the dynamic hooksPath is not in the static _sandy_protected_dirs
@@ -21861,6 +22075,23 @@ while IFS= read -r _pf; do
     [ -z "$_pf" ] && continue
     [ -e "$WORK_DIR/$_pf" ] && echo "$_pf" >> "$SANDBOX_DIR/.protected-existed-at-launch"
 done < <(_sandy_protected_files)
+# Links already on the way to a watched path at launch (#link lines; the
+# dangerous-symlink gate judged any that leave the workspace), and which object
+# each existing watched path is (#id lines, _sandy_path_identity). The session-end
+# report treats a link it finds as planted unless it is recorded here, and
+# never prints a removal command that would act through a link.
+while IFS= read -r _pd; do
+    [ -z "$_pd" ] && continue
+    if _lnk_snap="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_pd")"; then
+        printf '#link\t%s\t%s\n' "$_lnk_snap" "$(_sandy_link_hex "$WORK_DIR/$_lnk_snap")" \
+            >> "$SANDBOX_DIR/.protected-existed-at-launch"
+    fi
+    _id_snap="$(_sandy_path_identity "$WORK_DIR/$_pd")"
+    if [ -n "$_id_snap" ]; then
+        printf '#id\t%s\t%s\n' "$_pd" "$_id_snap" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+    fi
+done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs; _sandy_protected_files; printf '%s\n' "$_cfg_hooks_snap")
+unset _lnk_snap _id_snap
 
 # #80: .git/HEAD is rw in-container (git switch/checkout work). Snapshot the
 # launch branch so the session-end sweep can flag if HEAD was left elsewhere —
