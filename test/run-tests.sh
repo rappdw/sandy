@@ -29653,6 +29653,58 @@ unset _S243_OLD _S243_U1
 unset _S243_D _S243_RC _S243_B _S243_RB _S243_IMGS _S243_E _S243_P _S243_P2 _S243_R _S243_ON _S243_N _S243_W _S243_F _S243_H _S243_HW
 unset -f _s243_run _s243_on _s243_rebase
 
+# ============================================================
+section "§244: -v alone prints the version; -v with any other argument is verbose and does not (decision D4a)"
+# ============================================================
+# Before 2.9.0 the version fast-path matched "${1:-}" == "-v" whatever
+# followed, so `sandy -v <anything>` printed the version and exited where
+# --help documents -v as verbose. Decision D4a (2026-11-19): -v is the version
+# only as the SOLE argument; --version keeps printing it whatever follows.
+# Probe for "-v with another argument": the launch path must be reached, and
+# it is made safe by a docker stub that fails every call, so the launcher
+# stops at its Docker preflight (exit 1) before building or running anything.
+# The stub logs every call: a non-empty log proves the probe reached the
+# launcher (not a vacuous early exit), and no "run" line proves nothing ran.
+# Mutation: restore the old first-argument `-v` test and (2) fails.
+_S244_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S244_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S244_D/home" "$_S244_D/bin" "$_S244_D/ws"
+cat > "$_S244_D/bin/docker" <<'STUB'
+#!/bin/sh
+echo "docker $*" >> "${S244_LOG:?}"
+exit 1
+STUB
+cp "$_S244_D/bin/docker" "$_S244_D/bin/tmux"
+chmod +x "$_S244_D/bin/docker" "$_S244_D/bin/tmux"
+# Clean environment: harnesses written inside sandy inherit the live
+# session's SANDY_* variables, which must not reach the probe.
+_s244_run() {
+    local _tag="$1" _rc=0
+    shift
+    : > "$_S244_D/$_tag.log"
+    (cd "$_S244_D/ws" && env -i HOME="$_S244_D/home" SANDY_HOME="$_S244_D/home/.sandy" \
+        PATH="$_S244_D/bin:/usr/bin:/bin" TERM=dumb S244_LOG="$_S244_D/$_tag.log" \
+        bash "$_S244_SANDY" "$@" < /dev/null > "$_S244_D/$_tag.out" 2> "$_S244_D/$_tag.err") || _rc=$?
+    echo "$_rc" > "$_S244_D/$_tag.rc"
+}
+_S244_FULL="$(env -i HOME="$_S244_D/home" SANDY_HOME="$_S244_D/home/.sandy" PATH="$_S244_D/bin:/usr/bin:/bin" \
+    bash "$_S244_SANDY" --print-version 2>/dev/null < /dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["full_version"])' 2>/dev/null || true)"
+check "§244(pre) --print-version gave a full_version to compare against (so the checks below cannot pass vacuously)" \
+    test -n "$_S244_FULL"
+_s244_run alone -v
+check "§244(1) sandy -v alone prints exactly 'sandy <full_version>' and exits 0" \
+    bash -c '[ "$(cat "$1/alone.rc")" = 0 ] && [ "$(cat "$1/alone.out")" = "sandy $2" ] || { cat "$1/alone.rc" "$1/alone.out" "$1/alone.err"; exit 1; }' _ "$_S244_D" "$_S244_FULL"
+_s244_run withws -v --workspace "$_S244_D/ws"
+check "§244(2) sandy -v --workspace P does not print the version: it reaches the launcher (docker probed), stops at the Docker preflight, and runs nothing (mutation: the old first-argument -v test)" \
+    bash -c '! grep -qxF "sandy $2" "$1/withws.out" && [ "$(cat "$1/withws.rc")" != 0 ] && [ -s "$1/withws.log" ] && ! grep -q "^docker run" "$1/withws.log" || { cat "$1/withws.rc" "$1/withws.out" "$1/withws.err" "$1/withws.log"; exit 1; }' _ "$_S244_D" "$_S244_FULL"
+_s244_run longform --version --workspace "$_S244_D/ws"
+check "§244(3) --version still prints the version whatever follows it, and touches no docker" \
+    bash -c '[ "$(cat "$1/longform.rc")" = 0 ] && [ "$(cat "$1/longform.out")" = "sandy $2" ] && [ ! -s "$1/longform.log" ] || { cat "$1/longform.rc" "$1/longform.out" "$1/longform.err"; exit 1; }' _ "$_S244_D" "$_S244_FULL"
+unset -f _s244_run
+rm -rf "$_S244_D"
+unset _S244_SANDY _S244_D _S244_FULL
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
