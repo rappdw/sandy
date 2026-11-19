@@ -29056,7 +29056,9 @@ unset -f _s235_client
 unset -f _s235_case _s235_kill_tree _s235_sup _s235_w5_verdict _s235_w5_probe
 rm -rf "$_S235_D"
 unset _S235_D _S235_TMPL _S235_PANE _S235_TAILRUN _S235_W5 _S235_FORGED _S235_T0 _S235_EL _S235_NC
-section "§226: ordered passive gate — a workspace auth mode or agent list wider than the host's is approval-gated (2.9.0)"
+
+# ============================================================
+section "§240: ordered passive gate — a workspace auth mode or agent list wider than the host's is approval-gated (2.9.0)"
 # ============================================================
 # Before 2.9.0 a workspace value outranked the host for every passive key, and
 # only fixed values were gated. So a committed SANDY_CODEX_AUTH=oauth replaced
@@ -29066,15 +29068,15 @@ section "§226: ordered passive gate — a workspace auth mode or agent list wid
 # compares these six keys with the value the privileged sources resolved,
 # snapshotted by the real loader at its first passive call. Runs the real
 # _load_sandy_config (and the real --validate-config) over fixture files.
-_S226_DEFS="$(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$SANDY_SCRIPT")
+_S240_DEFS="$(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$SANDY_SCRIPT")
 $(sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p; /^_load_sandy_config()/,/^}$/p' "$SANDY_SCRIPT")"
-_S226_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S240_D="$(cd "$(mktemp -d)" && pwd -P)"
 # $1 host file body  $2 workspace .sandy/config body  [$3 .sandy/.secrets body]
 # Any further args are VAR=VALUE set in the launching environment.
 # -> "KEY=<value or -unset->" for the six ordered keys, then "PENDING=<queued>".
-_s226_load() {
+_s240_load() {
     local h="$1" w="$2" x="${3:-}"; shift 2; [ $# -gt 0 ] && shift
-    printf '%s\n' "$h" > "$_S226_D/host"; printf '%s\n' "$w" > "$_S226_D/ws"; printf '%s\n' "$x" > "$_S226_D/sec"
+    printf '%s\n' "$h" > "$_S240_D/host"; printf '%s\n' "$w" > "$_S240_D/ws"; printf '%s\n' "$x" > "$_S240_D/sec"
     env -i PATH="$PATH" "$@" bash -c '
         set -euo pipefail
         eval "$1"
@@ -29089,70 +29091,70 @@ _s226_load() {
         for k in SANDY_AGENT SANDY_CLAUDE_AUTH SANDY_GEMINI_AUTH SANDY_CODEX_AUTH SANDY_OPENCODE_AUTH SANDY_GROK_AUTH; do
             eval "v=\${$k--unset-}"; printf "%s=%s\n" "$k" "$v"
         done
-        printf "PENDING=%s\n" "${_PASSIVE_PRIVILEGED_PENDING[*]-}"' _ "$_S226_DEFS" "$_S226_D" 2>&1 || printf 'RC=%s\n' "$?"
+        printf "PENDING=%s\n" "${_PASSIVE_PRIVILEGED_PENDING[*]-}"' _ "$_S240_DEFS" "$_S240_D" 2>&1 || printf 'RC=%s\n' "$?"
 }
-_S226_A="$(_s226_load '' 'SANDY_AGENT=claude')"
-check "§226(pre) control: the loader, gate and helper were extracted, and a workspace SANDY_AGENT=claude with no host value is honoured outright (got: $(printf '%s' "$_S226_A" | tr '\n' ';'))" \
-    bash -c 'grep -qx "SANDY_AGENT=claude" <<<"$1" && grep -qx "PENDING=" <<<"$1" && case "$2" in *_sandy_expand_agent_alias*_load_sandy_config*) exit 0 ;; esac; exit 1' _ "$_S226_A" "$_S226_DEFS"
-_S226_A="$(_s226_load '' 'SANDY_AGENT=codex')"
-check "§226(1) no host value: a workspace SANDY_AGENT=codex REPLACES the default claude, so it is queued for approval and not exported (mutation: drop the SANDY_AGENT arm and it is honoured)" \
-    bash -c 'grep -qx "SANDY_AGENT=-unset-" <<<"$1" && grep -qx "PENDING=SANDY_AGENT=codex" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_AGENT=claude' 'SANDY_AGENT=all')"
-check "§226(2) a workspace SANDY_AGENT=all over a host claude is queued (it adds gemini, codex, opencode)" \
-    bash -c 'grep -qx "SANDY_AGENT=claude" <<<"$1" && grep -qx "PENDING=SANDY_AGENT=all" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_AGENT=all' 'SANDY_AGENT=codex,claude')"
-check "§226(3) narrowing and reordering are free: host all, workspace codex,claude is honoured as written" \
-    bash -c 'grep -qx "SANDY_AGENT=codex,claude" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_AGENT=claude,codex' 'SANDY_AGENT=codex,gemini')"
-check "§226(4) one new agent among known ones is still a widening: host claude,codex, workspace codex,gemini is queued" \
-    bash -c 'grep -qx "PENDING=SANDY_AGENT=codex,gemini" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load '' 'SANDY_AGENT=gemini' '' SANDY_AGENT=codex)"
-check "§226(5) env wins as before: with SANDY_AGENT=codex in the environment the workspace value is never read, so nothing is queued" \
-    bash -c 'grep -qx "SANDY_AGENT=codex" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load '' 'SANDY_AGENT=gemini' '' SANDY_AGENT_OVERRIDE=codex)"
-check "§226(6) with --agent given (SANDY_AGENT_OVERRIDE) the SANDY_AGENT check is skipped: the flag replaces the value, so there is nothing to approve" \
-    bash -c 'grep -qx "PENDING=" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')"
-check "§226(7) a workspace SANDY_CODEX_AUTH=oauth over a host api_key is queued and the host api_key stands (the hole: it seeded the host OAuth token)" \
-    bash -c 'grep -qx "SANDY_CODEX_AUTH=api_key" <<<"$1" && grep -qx "PENDING=SANDY_CODEX_AUTH=oauth" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_CLAUDE_AUTH=api_key' 'SANDY_CLAUDE_AUTH=auto
+_S240_A="$(_s240_load '' 'SANDY_AGENT=claude')"
+check "§240(pre) control: the loader, gate and helper were extracted, and a workspace SANDY_AGENT=claude with no host value is honoured outright (got: $(printf '%s' "$_S240_A" | tr '\n' ';'))" \
+    bash -c 'grep -qx "SANDY_AGENT=claude" <<<"$1" && grep -qx "PENDING=" <<<"$1" && case "$2" in *_sandy_expand_agent_alias*_load_sandy_config*) exit 0 ;; esac; exit 1' _ "$_S240_A" "$_S240_DEFS"
+_S240_A="$(_s240_load '' 'SANDY_AGENT=codex')"
+check "§240(1) no host value: a workspace SANDY_AGENT=codex REPLACES the default claude, so it is queued for approval and not exported (mutation: drop the SANDY_AGENT arm and it is honoured)" \
+    bash -c 'grep -qx "SANDY_AGENT=-unset-" <<<"$1" && grep -qx "PENDING=SANDY_AGENT=codex" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_AGENT=claude' 'SANDY_AGENT=all')"
+check "§240(2) a workspace SANDY_AGENT=all over a host claude is queued (it adds gemini, codex, opencode)" \
+    bash -c 'grep -qx "SANDY_AGENT=claude" <<<"$1" && grep -qx "PENDING=SANDY_AGENT=all" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_AGENT=all' 'SANDY_AGENT=codex,claude')"
+check "§240(3) narrowing and reordering are free: host all, workspace codex,claude is honoured as written" \
+    bash -c 'grep -qx "SANDY_AGENT=codex,claude" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_AGENT=claude,codex' 'SANDY_AGENT=codex,gemini')"
+check "§240(4) one new agent among known ones is still a widening: host claude,codex, workspace codex,gemini is queued" \
+    bash -c 'grep -qx "PENDING=SANDY_AGENT=codex,gemini" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load '' 'SANDY_AGENT=gemini' '' SANDY_AGENT=codex)"
+check "§240(5) env wins as before: with SANDY_AGENT=codex in the environment the workspace value is never read, so nothing is queued" \
+    bash -c 'grep -qx "SANDY_AGENT=codex" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load '' 'SANDY_AGENT=gemini' '' SANDY_AGENT_OVERRIDE=codex)"
+check "§240(6) with --agent given (SANDY_AGENT_OVERRIDE) the SANDY_AGENT check is skipped: the flag replaces the value, so there is nothing to approve" \
+    bash -c 'grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')"
+check "§240(7) a workspace SANDY_CODEX_AUTH=oauth over a host api_key is queued and the host api_key stands (the hole: it seeded the host OAuth token)" \
+    bash -c 'grep -qx "SANDY_CODEX_AUTH=api_key" <<<"$1" && grep -qx "PENDING=SANDY_CODEX_AUTH=oauth" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CLAUDE_AUTH=api_key' 'SANDY_CLAUDE_AUTH=auto
 SANDY_GEMINI_AUTH=adc
 SANDY_OPENCODE_AUTH=oauth
 SANDY_GROK_AUTH=oauth')"
-check "§226(8) every ordered auth key: a workspace auto over a host claude api_key, and adc/oauth over the default auto, are all queued" \
-    bash -c 'p="$(sed -n "s/^PENDING=//p" <<<"$1")"; for kv in SANDY_CLAUDE_AUTH=auto SANDY_GEMINI_AUTH=adc SANDY_OPENCODE_AUTH=oauth SANDY_GROK_AUTH=oauth; do case " $p " in *" $kv "*) ;; *) exit 1 ;; esac; done' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_CLAUDE_AUTH=oauth
+check "§240(8) every ordered auth key: a workspace auto over a host claude api_key, and adc/oauth over the default auto, are all queued" \
+    bash -c 'p="$(sed -n "s/^PENDING=//p" <<<"$1")"; for kv in SANDY_CLAUDE_AUTH=auto SANDY_GEMINI_AUTH=adc SANDY_OPENCODE_AUTH=oauth SANDY_GROK_AUTH=oauth; do case " $p " in *" $kv "*) ;; *) exit 1 ;; esac; done' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CLAUDE_AUTH=oauth
 SANDY_GEMINI_AUTH=adc' 'SANDY_CLAUDE_AUTH=oauth
 SANDY_GEMINI_AUTH=api_key')"
-check "§226(9) the same value as the host, or api_key, is free: no prompt for a workspace oauth when the host already resolved oauth (the no-op prompt 2.x showed)" \
-    bash -c 'grep -qx "SANDY_CLAUDE_AUTH=oauth" <<<"$1" && grep -qx "SANDY_GEMINI_AUTH=api_key" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S226_A"
-_S226_A="$(_s226_load 'SANDY_CODEX_AUTH=oauth' 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')"
-check "§226(10) the baseline is the HOST value, taken before any workspace export: .sandy/config api_key then .sandy/.secrets oauth, over a host oauth, is free (mutation: a baseline re-read per passive file sees api_key and queues oauth)" \
-    bash -c 'grep -qx "SANDY_CODEX_AUTH=oauth" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S226_A"
+check "§240(9) the same value as the host, or api_key, is free: no prompt for a workspace oauth when the host already resolved oauth (the no-op prompt 2.x showed)" \
+    bash -c 'grep -qx "SANDY_CLAUDE_AUTH=oauth" <<<"$1" && grep -qx "SANDY_GEMINI_AUTH=api_key" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
+_S240_A="$(_s240_load 'SANDY_CODEX_AUTH=oauth' 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')"
+check "§240(10) the baseline is the HOST value, taken before any workspace export: .sandy/config api_key then .sandy/.secrets oauth, over a host oauth, is free (mutation: a baseline re-read per passive file sees api_key and queues oauth)" \
+    bash -c 'grep -qx "SANDY_CODEX_AUTH=oauth" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S240_A"
 # --validate-config judges the same baseline from env and the host files.
-mkdir -p "$_S226_D/sh" "$_S226_D/wsdir/.sandy"
-_s226_vc() { # $1 host config body  $2 workspace config body [$3 script] -> the keys requiring approval
-    printf '%s\n' "$1" > "$_S226_D/sh/config"; printf '%s\n' "$2" > "$_S226_D/wsdir/.sandy/config"
+mkdir -p "$_S240_D/sh" "$_S240_D/wsdir/.sandy"
+_s240_vc() { # $1 host config body  $2 workspace config body [$3 script] -> the keys requiring approval
+    printf '%s\n' "$1" > "$_S240_D/sh/config"; printf '%s\n' "$2" > "$_S240_D/wsdir/.sandy/config"
     env -u SANDY_AGENT -u SANDY_CODEX_AUTH -u SANDY_CLAUDE_AUTH -u SANDY_GEMINI_AUTH -u SANDY_OPENCODE_AUTH -u SANDY_GROK_AUTH \
-        SANDY_HOME="$_S226_D/sh" bash "${3:-$SANDY_SCRIPT}" --validate-config "$_S226_D/wsdir/.sandy/config" 2>/dev/null \
+        SANDY_HOME="$_S240_D/sh" bash "${3:-$SANDY_SCRIPT}" --validate-config "$_S240_D/wsdir/.sandy/config" 2>/dev/null \
         | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["privileged_keys_requiring_approval"]))' 2>/dev/null || echo ERR
 }
-check "§226(11) --validate-config agrees: workspace SANDY_CODEX_AUTH=oauth is free under a host oauth and pending under a host api_key; SANDY_AGENT=codex is pending under no host value" \
+check "§240(11) --validate-config agrees: workspace SANDY_CODEX_AUTH=oauth is free under a host oauth and pending under a host api_key; SANDY_AGENT=codex is pending under no host value" \
     bash -c 'test "$1" = "" && test "$2" = SANDY_CODEX_AUTH && test "$3" = SANDY_AGENT' _ \
-    "$(_s226_vc 'SANDY_CODEX_AUTH=oauth' 'SANDY_CODEX_AUTH=oauth')" \
-    "$(_s226_vc 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')" \
-    "$(_s226_vc '' 'SANDY_AGENT=codex')"
+    "$(_s240_vc 'SANDY_CODEX_AUTH=oauth' 'SANDY_CODEX_AUTH=oauth')" \
+    "$(_s240_vc 'SANDY_CODEX_AUTH=api_key' 'SANDY_CODEX_AUTH=oauth')" \
+    "$(_s240_vc '' 'SANDY_AGENT=codex')"
 # Mutation, in a temp copy: the two ordered arms become unmatchable labels. The
 # real script must report both keys; the mutant must report neither.
-sed -e 's/^        SANDY_CLAUDE_AUTH|SANDY_GEMINI_AUTH|SANDY_CODEX_AUTH|SANDY_OPENCODE_AUTH|SANDY_GROK_AUTH)$/        S226_MUTATED_AUTH)/' \
-    -e 's/^        SANDY_AGENT)$/        S226_MUTATED_AGENT)/' "$SANDY_SCRIPT" > "$_S226_D/sandy.mut"
-check "§226(12) mutation: with the ordered arms removed the same workspace file goes free, so (1)-(11) can fail (real: $(_s226_vc '' 'SANDY_AGENT=codex
-SANDY_CODEX_AUTH=oauth'); mutant: $(_s226_vc '' 'SANDY_AGENT=codex
-SANDY_CODEX_AUTH=oauth' "$_S226_D/sandy.mut"))" \
-    bash -c 'test "$(grep -c "S226_MUTATED_" "$3")" = 2 && test "$1" = "SANDY_AGENT,SANDY_CODEX_AUTH" && test "$2" = ""' _ \
-    "$(_s226_vc '' 'SANDY_AGENT=codex
-SANDY_CODEX_AUTH=oauth')" "$(_s226_vc '' 'SANDY_AGENT=codex
-SANDY_CODEX_AUTH=oauth' "$_S226_D/sandy.mut")" "$_S226_D/sandy.mut"
+sed -e 's/^        SANDY_CLAUDE_AUTH|SANDY_GEMINI_AUTH|SANDY_CODEX_AUTH|SANDY_OPENCODE_AUTH|SANDY_GROK_AUTH)$/        S240_MUTATED_AUTH)/' \
+    -e 's/^        SANDY_AGENT)$/        S240_MUTATED_AGENT)/' "$SANDY_SCRIPT" > "$_S240_D/sandy.mut"
+check "§240(12) mutation: with the ordered arms removed the same workspace file goes free, so (1)-(11) can fail (real: $(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth'); mutant: $(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth' "$_S240_D/sandy.mut"))" \
+    bash -c 'test "$(grep -c "S240_MUTATED_" "$3")" = 2 && test "$1" = "SANDY_AGENT,SANDY_CODEX_AUTH" && test "$2" = ""' _ \
+    "$(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth')" "$(_s240_vc '' 'SANDY_AGENT=codex
+SANDY_CODEX_AUTH=oauth' "$_S240_D/sandy.mut")" "$_S240_D/sandy.mut"
 # --- (13) the --start approval pre-pass gets --agent, as the supervisor does --
 # The pre-pass hashes the gated set on the client tty; the supervisor re-hashes
 # it under /dev/null and needs the SAME set, or it drops every gated key. With
@@ -29160,20 +29162,20 @@ SANDY_CODEX_AUTH=oauth' "$_S226_D/sandy.mut")" "$_S226_D/sandy.mut"
 # set the supervisor never sees (Opus review, PR-1). Part (a) runs the REAL
 # pre-pass line with a recorder standing in for sandy; part (b) runs the real
 # script: the pre-pass on a pty (answered y), then the supervisor's view.
-_S226_PP="$(grep -m1 'SANDY_APPROVE_ONLY=1 "\$SANDY_SELF"' "$SANDY_SCRIPT" | sed 's#</dev/tty >/dev/tty##')"
-printf '#!/usr/bin/env bash\nprintf "ARGV:%%s\\n" "$*" > "$S226_REC"\n' > "$_S226_D/rec"; chmod +x "$_S226_D/rec"
-_s226_pp() { # $1 = SANDY_AGENT_OVERRIDE -> the argv the pre-pass gave sandy
-    rm -f "$_S226_D/rec.out"
-    env S226_REC="$_S226_D/rec.out" SANDY_SELF="$_S226_D/rec" WORK_DIR="$_S226_D" SANDY_AGENT_OVERRIDE="$1" \
-        _sandy_approve_result="$_S226_D/res" bash -c 'eval "$1"' _ "$_S226_PP" >/dev/null 2>&1 || true
-    cat "$_S226_D/rec.out" 2>/dev/null || echo NOT-RUN
+_S240_PP="$(grep -m1 'SANDY_APPROVE_ONLY=1 "\$SANDY_SELF"' "$SANDY_SCRIPT" | sed 's#</dev/tty >/dev/tty##')"
+printf '#!/usr/bin/env bash\nprintf "ARGV:%%s\\n" "$*" > "$S240_REC"\n' > "$_S240_D/rec"; chmod +x "$_S240_D/rec"
+_s240_pp() { # $1 = SANDY_AGENT_OVERRIDE -> the argv the pre-pass gave sandy
+    rm -f "$_S240_D/rec.out"
+    env S240_REC="$_S240_D/rec.out" SANDY_SELF="$_S240_D/rec" WORK_DIR="$_S240_D" SANDY_AGENT_OVERRIDE="$1" \
+        _sandy_approve_result="$_S240_D/res" bash -c 'eval "$1"' _ "$_S240_PP" >/dev/null 2>&1 || true
+    cat "$_S240_D/rec.out" 2>/dev/null || echo NOT-RUN
 }
-check "§226(13a) the REAL --start pre-pass line hands --agent to the pass (got: $(_s226_pp claude); without --agent: $(_s226_pp ''))" \
-    bash -c 'test "$1" = "ARGV:--agent claude" && test "$2" = "ARGV:"' _ "$(_s226_pp claude)" "$(_s226_pp '')"
+check "§240(13a) the REAL --start pre-pass line hands --agent to the pass (got: $(_s240_pp claude); without --agent: $(_s240_pp ''))" \
+    bash -c 'test "$1" = "ARGV:--agent claude" && test "$2" = "ARGV:"' _ "$(_s240_pp claude)" "$(_s240_pp '')"
 if ! command -v python3 >/dev/null 2>&1; then
-    skip "§226(13b) python3 not available to drive a pty"
+    skip "§240(13b) python3 not available to drive a pty"
 else
-    cat > "$_S226_D/ptyans.py" <<'PY'
+    cat > "$_S240_D/ptyans.py" <<'PY'
 import os, pty, sys, select, time, signal
 answer = sys.argv[1]; argv = sys.argv[2:]
 pid, fd = pty.fork()
@@ -29196,26 +29198,26 @@ os.waitpid(pid, 0)
 sys.stdout.write(buf.decode('utf-8', 'replace'))
 PY
     # $1 fixture  $2 "pty" or "dev-null"  $3.. sandy args
-    _s226_ao() {
-        local T="$_S226_D/$1" how="$2"; shift 2
+    _s240_ao() {
+        local T="$_S240_D/$1" how="$2"; shift 2
         mkdir -p "$T/bin" "$T/home" "$T/ws/.sandy"
         printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/docker"; chmod +x "$T/bin/docker"
         printf 'SANDY_AGENT=codex\nSANDY_CODEX_AUTH=oauth\n' > "$T/ws/.sandy/config"
         if [ "$how" = pty ]; then
             ( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED -u SANDY_AGENT -u SANDY_CODEX_AUTH PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" \
-                SANDY_APPROVE_ONLY=1 python3 "$_S226_D/ptyans.py" y bash "$SANDY_SCRIPT" "$@" 2>&1 ) || true
+                SANDY_APPROVE_ONLY=1 python3 "$_S240_D/ptyans.py" y bash "$SANDY_SCRIPT" "$@" 2>&1 ) || true
         else
             ( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED -u SANDY_AGENT -u SANDY_CODEX_AUTH PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" \
                 SANDY_APPROVE_ONLY=1 bash "$SANDY_SCRIPT" "$@" </dev/null 2>&1 ) || true
         fi
     }
-    _S226_P1="$(_s226_ao fixed pty --agent claude)"
-    _S226_S1="$(_s226_ao fixed dev-null --agent claude)"
-    _S226_P0="$(_s226_ao bug pty)"
-    _S226_S0="$(_s226_ao bug dev-null --agent claude)"
-    check "§226(13b) with --agent on both sides the pty pre-pass approves and the supervisor's /dev/null pass honours it, no keys dropped; the control (pre-pass WITHOUT --agent, the reviewed bug) makes that same supervisor pass drop them" \
+    _S240_P1="$(_s240_ao fixed pty --agent claude)"
+    _S240_S1="$(_s240_ao fixed dev-null --agent claude)"
+    _S240_P0="$(_s240_ao bug pty)"
+    _S240_S0="$(_s240_ao bug dev-null --agent claude)"
+    check "§240(13b) with --agent on both sides the pty pre-pass approves and the supervisor's /dev/null pass honours it, no keys dropped; the control (pre-pass WITHOUT --agent, the reviewed bug) makes that same supervisor pass drop them" \
         bash -c 'grep -q "Approved\." <<<"$1" && grep -q "SANDY_CODEX_AUTH" <<<"$1" && ! grep -q "SANDY_AGENT\$" <<<"$1" && ! grep -q "dropping these keys" <<<"$2" \
-                 && grep -q "Approved\." <<<"$3" && grep -q "dropping these keys" <<<"$4"' _ "$_S226_P1" "$_S226_S1" "$_S226_P0" "$_S226_S0"
+                 && grep -q "Approved\." <<<"$3" && grep -q "dropping these keys" <<<"$4"' _ "$_S240_P1" "$_S240_S1" "$_S240_P0" "$_S240_S0"
 fi
 
 # --- (14) api_key with no key falls back to the HOST's mode, never wider ------
@@ -29224,15 +29226,15 @@ fi
 # forwards a long-lived token past a host that chose profile (Opus review,
 # PR-1). Chains the REAL blocks: the no-key fallback, the mode resolver up to
 # the credential-posture block, and the key-forwarding branch §117 runs.
-_S226_FB="$(awk '/--- api_key with no key: fall back to what the HOST chose/,/fi  # end api_key no-key fallback/' "$SANDY_SCRIPT")"
-_S226_RS="$(awk '/--- SANDY_CLAUDE_AUTH: make the choice EXPLICIT/{f=1} /--- #130: credential posture/{exit} f' "$SANDY_SCRIPT")"
-_S226_FW="if _sandy_agent_has claude; then
+_S240_FB="$(awk '/--- api_key with no key: fall back to what the HOST chose/,/fi  # end api_key no-key fallback/' "$SANDY_SCRIPT")"
+_S240_RS="$(awk '/--- SANDY_CLAUDE_AUTH: make the choice EXPLICIT/{f=1} /--- #130: credential posture/{exit} f' "$SANDY_SCRIPT")"
+_S240_FW="if _sandy_agent_has claude; then
 $(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$SANDY_SCRIPT")"
-mkdir -p "$_S226_D/anth/credentials"; printf '{"access_token":"x"}\n' > "$_S226_D/anth/credentials/default.json"
-_s226_chain() { # $1 = host-resolved baseline -> "mode=<_claude_auth> oauthfile=<kept|none> fwd=<names>"
-    env -i PATH="$PATH" HOME="$_S226_D" ANTHROPIC_CONFIG_DIR="$_S226_D/anth" SANDY_CLAUDE_AUTH=api_key \
-        _SANDY_PASSIVE_BASE_SANDY_CLAUDE_AUTH="$1" CLAUDE_CODE_OAUTH_TOKEN=tok-226 \
-        F1="$_S226_FB" F2="$_S226_RS" F3="$_S226_FW" bash -c '
+mkdir -p "$_S240_D/anth/credentials"; printf '{"access_token":"x"}\n' > "$_S240_D/anth/credentials/default.json"
+_s240_chain() { # $1 = host-resolved baseline -> "mode=<_claude_auth> oauthfile=<kept|none> fwd=<names>"
+    env -i PATH="$PATH" HOME="$_S240_D" ANTHROPIC_CONFIG_DIR="$_S240_D/anth" SANDY_CLAUDE_AUTH=api_key \
+        _SANDY_PASSIVE_BASE_SANDY_CLAUDE_AUTH="$1" CLAUDE_CODE_OAUTH_TOKEN=tok-240 \
+        F1="$_S240_FB" F2="$_S240_RS" F3="$_S240_FW" bash -c '
         set -u
         _sandy_agent_has() { [ "$1" = claude ]; }
         _sandy_add_secret_env() { printf "%s " "$1" >> "$HOME/fwd"; }
@@ -29243,15 +29245,15 @@ _s226_chain() { # $1 = host-resolved baseline -> "mode=<_claude_auth> oauthfile=
         eval "$F3"
         printf "mode=%s oauthfile=%s fwd=%s\n" "$_claude_auth" "$([ -n "$CRED_JSON" ] && echo kept || echo none)" "$(cat "$HOME/fwd")"' 2>&1 || echo "RC=$?"
 }
-_S226_C1="$(_s226_chain profile)"
-_S226_C0="$(_s226_chain '')"
-check "§226(14) host profile, workspace api_key, no ANTHROPIC_API_KEY: the session runs on the profile, with NO OAuth file and NO token forwarded (got: $_S226_C1); control, no host choice: the old fallback to auto stands (got: $_S226_C0)" \
+_S240_C1="$(_s240_chain profile)"
+_S240_C0="$(_s240_chain '')"
+check "§240(14) host profile, workspace api_key, no ANTHROPIC_API_KEY: the session runs on the profile, with NO OAuth file and NO token forwarded (got: $_S240_C1); control, no host choice: the old fallback to auto stands (got: $_S240_C0)" \
     bash -c 'case "$3" in *"--- api_key with no key"*"end api_key no-key fallback"*) ;; *) exit 1 ;; esac
              grep -q "^mode=profile oauthfile=none " <<<"$1" && ! grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$1" \
-             && grep -q "^mode=auto oauthfile=kept " <<<"$2" && grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$2"' _ "$_S226_C1" "$_S226_C0" "$_S226_FB"
-rm -rf "$_S226_D"
-unset _S226_DEFS _S226_D _S226_A _S226_PP _S226_P1 _S226_S1 _S226_P0 _S226_S0 _S226_FB _S226_RS _S226_FW _S226_C1 _S226_C0
-unset -f _s226_load _s226_vc _s226_pp _s226_ao _s226_chain
+             && grep -q "^mode=auto oauthfile=kept " <<<"$2" && grep -q CLAUDE_CODE_OAUTH_TOKEN <<<"$2"' _ "$_S240_C1" "$_S240_C0" "$_S240_FB"
+rm -rf "$_S240_D"
+unset _S240_DEFS _S240_D _S240_A _S240_PP _S240_P1 _S240_S1 _S240_P0 _S240_S0 _S240_FB _S240_RS _S240_FW _S240_C1 _S240_C0
+unset -f _s240_load _s240_vc _s240_pp _s240_ao _s240_chain
 
 # BEGIN SUMMARY
 # ============================================================
