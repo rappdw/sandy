@@ -28710,9 +28710,12 @@ check "§234(17) a fresh record does not hold back the agent rebuild when the ba
     _ "$_S234_RC" "$_S234_B17" "$_S234_AG" "$_S234_REC" "$_S234_K17" "$_S234_D/out"
 
 # (18) An agent build that the base rebuild forced, and that failed, is held
-# back and then retried. BUILD_HASH does not cover the base, so the build hash
-# left from before still matches: unless the failure drops it, every later
-# launch reports the image up to date and never rebuilds it on the new base.
+# back and then retried. This stub gives an image the same id every build, so
+# here the rebuilt base does not move BUILD_HASH (with a real docker its new id
+# does; §243 covers that) and the build hash left from before still matches:
+# unless the failure drops it, every later launch reports the image up to date
+# and never rebuilds it. A trigger outside BUILD_HASH (a release that an
+# offline launch does not look up) still depends on this.
 # Starts from (17): a current .build_hash and no record.
 _S234_H18="absent"; [ -f "$_S234_D/sh/.build_hash" ] && _S234_H18="present"
 rm -f "$_S234_D/sh/.base_build_hash"
@@ -29478,6 +29481,177 @@ check "§240(14) host profile, workspace api_key, no ANTHROPIC_API_KEY: the sess
 rm -rf "$_S240_D"
 unset _S240_DEFS _S240_D _S240_A _S240_PP _S240_P1 _S240_S1 _S240_P0 _S240_S0 _S240_FB _S240_RS _S240_FW _S240_C1 _S240_C0
 unset -f _s240_load _s240_vc _s240_pp _s240_ao _s240_chain
+
+# ============================================================
+section "§243: an agent image is rebuilt when sandy-base moves under it, by any agent's launch, and only then (the agent hash chains the base id)"
+# ============================================================
+# The agent images (and the sandy-full combo) are FROM sandy-base, but their
+# cache key used to cover only their own Dockerfile and the baked-in scripts.
+# A launch with agent A that rebuilt sandy-base rebuilt A (BASE_REBUILT), and
+# every OTHER agent's image still matched its hash file, so it kept launching
+# on the old base. The key now folds in the base image id, as the skills and
+# project layers fold in their parent's.
+#
+# The REAL launcher's --build-only, behind a stub docker that gives every
+# build a fresh image id and records the id of the image its FROM named, so
+# "which base is this image on" is measured, not inferred from the build log.
+_S243_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S243_D/bin" "$_S243_D/sh" "$_S243_D/ws" "$_S243_D/ids" "$_S243_D/on"
+cat > "$_S243_D/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    build)
+        _p=""; _t=""; _f=""
+        for _a in "$@"; do
+            [ "$_p" = -t ] && _t="$_a"
+            [ "$_p" = -f ] && _f="$_a"
+            _p="$_a"
+        done
+        printf '%s\n' "$_t" >> "$S243_D/builds.log"
+        [ -n "${S243_FAILIMG:-}" ] && [ "$_t" = "$S243_FAILIMG" ] && exit 17
+        _n=$(( $(cat "$S243_D/seq" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\n' "$_n" > "$S243_D/seq"
+        _from="$(awk 'toupper($1)=="FROM"{print $2; exit}' "$_f" 2>/dev/null || true)"
+        cat "$S243_D/ids/$_from" > "$S243_D/on/$_t" 2>/dev/null || : > "$S243_D/on/$_t"
+        printf 'sha256:%064d\n' "$_n" > "$S243_D/ids/$_t"
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f|--format) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ -f "$S243_D/ids/$_n" ] || exit 1
+        [ -z "$_f" ] || cat "$S243_D/ids/$_n"
+        exit 0 ;;
+    run)
+        case "$*" in *"--entrypoint cat "*) echo 1.0.0 ;; esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+cat > "$_S243_D/bin/curl" <<'EOF'
+#!/bin/sh
+[ "${S243_NONET:-0}" = 1 ] && exit 6
+case "$*" in *deb.debian.org*|*registry.npmjs.org/) exit 0 ;; esac
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$_S243_D/bin/gh"
+printf '#!/bin/sh\nexit 0\n' > "$_S243_D/bin/sudo"
+printf '#!/bin/sh\nexit 44\n' > "$_S243_D/bin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S243_D/bin/uname"
+chmod +x "$_S243_D/bin/docker" "$_S243_D/bin/curl" "$_S243_D/bin/gh" "$_S243_D/bin/sudo" "$_S243_D/bin/security" "$_S243_D/bin/uname"
+# _s243_run AGENT [VAR=value ...]: one offline --build-only launch; sets
+# _S243_RC and _S243_B (the images it built, space-joined, "" for none).
+_s243_run() {
+    local ag="$1"; shift
+    : > "$_S243_D/builds.log"
+    _S243_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$_S243_D/ws" && env PATH="$_S243_D/bin:$PATH" HOME="$_S243_D" SANDY_HOME="$_S243_D/sh" S243_D="$_S243_D" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 SANDY_AGENT="$ag" "$@" bash "$SANDY_SCRIPT" --build-only </dev/null >"$_S243_D/out" 2>&1
+    ) || _S243_RC=$?
+    _S243_B="$(tr '\n' ' ' < "$_S243_D/builds.log")"
+    _S243_B="${_S243_B% }"
+}
+# _s243_on IMAGE: "current" when IMAGE was built on today's sandy-base, else
+# "stale:" and the id it was built on.
+_s243_on() {
+    local on cur
+    on="$(cat "$_S243_D/on/$1" 2>/dev/null || true)"
+    cur="$(cat "$_S243_D/ids/sandy-base" 2>/dev/null || true)"
+    if [ -n "$cur" ] && [ "$on" = "$cur" ]; then echo current; else echo "stale:${on:-none}"; fi
+}
+# _s243_rebase: rebuild sandy-base through a claude launch (as a changed
+# Dockerfile.base would: the hash file is what sandy compares it with).
+_s243_rebase() {
+    rm -f "$_S243_D/sh/.base_build_hash"
+    _s243_run claude
+    _S243_RB="$_S243_RC|$_S243_B"
+}
+_S243_IMGS="claude:sandy-claude-code gemini:sandy-gemini-cli codex:sandy-codex opencode:sandy-opencode grok:sandy-grok mirror:sandy-mirror claude,codex:sandy-full"
+
+# (pre) every agent image and the combo built once, on one base; then each
+# relaunch builds nothing.
+_S243_P=""; _S243_P2=""
+for _S243_E in $_S243_IMGS; do
+    _s243_run "${_S243_E%%:*}"; _S243_P="$_S243_P ${_S243_E%%:*}=$_S243_RC|$_S243_B"
+done
+for _S243_E in $_S243_IMGS; do
+    _s243_run "${_S243_E%%:*}"; _S243_P2="$_S243_P2 ${_S243_E%%:*}=$_S243_RC|$_S243_B"
+done
+check "§243(pre) control: a fresh home builds base + claude, then each other agent image and the combo alone; relaunching each builds nothing (first:$_S243_P; again:$_S243_P2)" \
+    bash -c 'test "$1" = " claude=0|sandy-base sandy-claude-code gemini=0|sandy-gemini-cli codex=0|sandy-codex opencode=0|sandy-opencode grok=0|sandy-grok mirror=0|sandy-mirror claude,codex=0|sandy-full" && test "$2" = " claude=0| gemini=0| codex=0| opencode=0| grok=0| mirror=0| claude,codex=0|"' \
+    _ "$_S243_P" "$_S243_P2"
+
+# (1) a claude launch rebuilds sandy-base and claude with it; then each OTHER
+# agent's (and the combo's) next launch rebuilds its own image onto the new
+# base. The bug: they were reused on the old one.
+_s243_rebase
+_S243_R=""; _S243_ON=""
+for _S243_E in $_S243_IMGS; do
+    [ "${_S243_E%%:*}" = claude ] && continue
+    _s243_run "${_S243_E%%:*}"; _S243_R="$_S243_R ${_S243_E%%:*}=$_S243_RC|$_S243_B"
+    _S243_ON="$_S243_ON ${_S243_E#*:}=$(_s243_on "${_S243_E#*:}")"
+done
+check "§243(1) after a claude launch rebuilds sandy-base, every other agent image and sandy-full are rebuilt by their next launch, onto the new base (mutation: drop the base id from BUILD_HASH, or chain it for one agent only; rebase rc|built $_S243_RB; next:$_S243_R; on:$_S243_ON)" \
+    bash -c 'test "$1" = "0|sandy-base sandy-claude-code" && test "$2" = " gemini=0|sandy-gemini-cli codex=0|sandy-codex opencode=0|sandy-opencode grok=0|sandy-grok mirror=0|sandy-mirror claude,codex=0|sandy-full" && test "$3" = " sandy-gemini-cli=current sandy-codex=current sandy-opencode=current sandy-grok=current sandy-mirror=current sandy-full=current"' \
+    _ "$_S243_RB" "$_S243_R" "$_S243_ON"
+
+# (2) once rebuilt, an unchanged base id leaves every key alone.
+_S243_R=""
+for _S243_E in $_S243_IMGS; do
+    _s243_run "${_S243_E%%:*}"; _S243_R="$_S243_R ${_S243_E%%:*}=$_S243_RC|$_S243_B"
+done
+check "§243(2) with the base id unchanged, the next launch of every agent and the combo builds nothing (mutation: an input that changes per launch; got:$_S243_R)" \
+    bash -c 'test "$1" = " claude=0| gemini=0| codex=0| opencode=0| grok=0| mirror=0| claude,codex=0|"' _ "$_S243_R"
+
+# (3) a rebuild that cannot run (build resources unreachable, #218) is
+# deferred with the warning and never recorded as done: the next launch on a
+# healthy network still rebuilds onto the new base.
+_s243_rebase
+_s243_run codex S243_NONET=1
+_S243_N="$_S243_RC|$_S243_B"
+_S243_W=no; grep -q "skipping the agent image rebuild" "$_S243_D/out" && _S243_W=yes
+_s243_run codex
+check "§243(3) a codex rebuild the new base needs, with build resources unreachable: skipped with the warning, and the next healthy launch rebuilds it onto the new base (rebase $_S243_RB; unreachable rc|built $_S243_N warned $_S243_W; next $_S243_RC|$_S243_B on $(_s243_on sandy-codex))" \
+    bash -c 'test "$1" = "0|sandy-base sandy-claude-code" && test "$2" = "0|" && test "$3" = yes && test "$4|$5" = "0|sandy-codex" && test "$6" = current' \
+    _ "$_S243_RB" "$_S243_N" "$_S243_W" "$_S243_RC" "$_S243_B" "$(_s243_on sandy-codex)"
+
+# (4) a failed rebuild onto a new base is held back for 30 minutes (B8 G7),
+# with the warning; a further base rebuild changes the key, so the next codex
+# launch retries instead of waiting on a record for a base that is gone.
+_s243_rebase
+_s243_run codex S243_FAILIMG=sandy-codex
+_S243_F="$_S243_RC|$_S243_B"
+_s243_run codex S243_FAILIMG=sandy-codex
+_S243_H="$_S243_RC|$_S243_B"
+_S243_HW=no; grep -q "Skipping the agent image rebuild: The sandy-codex rebuild failed" "$_S243_D/out" && _S243_HW=yes
+_s243_rebase
+_s243_run codex
+check "§243(4) a failed codex rebuild onto the new base is held back with the warning, and a further base rebuild retries it at once, onto that base (mutation: a constant in place of the base id; failed $_S243_F; held $_S243_H warned $_S243_HW; rebase $_S243_RB; next $_S243_RC|$_S243_B on $(_s243_on sandy-codex))" \
+    bash -c 'test "$1" = "0|sandy-codex" && test "$2|$3" = "0||yes" && test "$4" = "0|sandy-base sandy-claude-code" && test "$5|$6" = "0|sandy-codex" && test "$7" = current' \
+    _ "$_S243_F" "$_S243_H" "$_S243_HW" "$_S243_RB" "$_S243_RC" "$_S243_B" "$(_s243_on sandy-codex)"
+
+# (5) upgrading from a sandy whose key did not chain the base: a hash file in
+# the old form (the same four files, no parent line) rebuilds the image once,
+# and the launch after that builds nothing.
+_S243_OLD="$( (cd "$_S243_D/sh" && cat Dockerfile.gemini entrypoint.sh user-setup.sh tmux.conf) | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
+printf '%s\n' "$_S243_OLD" > "$_S243_D/sh/.build_hash_gemini"
+_s243_run gemini
+_S243_U1="$_S243_RC|$_S243_B"
+_s243_run gemini
+check "§243(5) a pre-upgrade hash file (no base id in it) rebuilds the gemini image once, and the next launch builds nothing (old-form hash ${_S243_OLD:0:8}; first $_S243_U1; next $_S243_RC|$_S243_B)" \
+    bash -c 'test "${#1}" = 64 && test "$2" = "0|sandy-gemini-cli" && test "$3|$4" = "0|"' \
+    _ "$_S243_OLD" "$_S243_U1" "$_S243_RC" "$_S243_B"
+rm -rf "$_S243_D"
+unset _S243_OLD _S243_U1
+unset _S243_D _S243_RC _S243_B _S243_RB _S243_IMGS _S243_E _S243_P _S243_P2 _S243_R _S243_ON _S243_N _S243_W _S243_F _S243_H _S243_HW
+unset -f _s243_run _s243_on _s243_rebase
 
 # BEGIN SUMMARY
 # ============================================================
