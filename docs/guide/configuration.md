@@ -102,8 +102,8 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | Flag | Description |
 |---|---|
 | `--help` | Show the usage summary and exit |
-| `--version` | Print the version and exit. `-v` as the **first** argument does the same |
-| `-v` / `-vv` / `-vvv` | Verbosity for this launch: `-v` shows the startup sections and pauses on exit, `-vv` adds a bash trace of the container setup, `-vvv` also traces the entrypoint and shows the docker flags. Same as `SANDY_VERBOSE=1\|2\|3`. Because a leading `-v` prints the version, put it after another argument (e.g. `sandy --new -v`) |
+| `--version` | Print the version and exit. `-v` as the **only** argument does the same; with any other argument (even `--version` or `--help` after it) `-v` means verbose and sandy launches |
+| `-v` / `-vv` / `-vvv` | Verbosity for this launch: `-v` shows the startup sections and pauses on exit, `-vv` adds a bash trace of the container setup, `-vvv` also traces the entrypoint and shows the docker flags. Same as `SANDY_VERBOSE=1\|2\|3`. `-v` on its own prints the version instead; with any other argument it means verbose, in any position (e.g. `sandy -v --new` or `sandy --new -v`) |
 | `--workspace <path>` | Target workspace directory (default: the current directory). Honored by a plain launch (including `-p`, `--rebuild`, `--build-only`), `--start`, `--attach`, `--stop`, `--exec`, `--login`, `--update-sessions`, `--reset-sandbox`, `--remove-sandbox`, `--provision`, `--approvals` and `--accounts` |
 | `--new` | Start a fresh session (default: resume last) |
 | `--resume` | Open session picker (claude's, or `codex resume` for codex) |
