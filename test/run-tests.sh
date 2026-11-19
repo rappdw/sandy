@@ -21739,6 +21739,8 @@ def fn(name):
             return '\n'.join(lines[i:j + 1]) + '\n'
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
+         '_sandy_overlay_detect_dirs', '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint',
+         '_sandy_agent_has', '_sandy_path_symlink_component',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
          '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
@@ -21753,6 +21755,7 @@ S182_EXTRACT
 cat > "$_S182_D/drive.sh" <<'S182_DRIVE'
 set -euo pipefail
 S182_D="$1"; WORK_DIR="$2"; SANDBOX_DIR="$3"; SANDY_HOME="$4"; mode="$5"
+SANDY_AGENT=claude
 GREEN=""; YELLOW=""; NC=""
 . "$S182_D/fns.sh"
 if [ "$mode" = launch ]; then
@@ -29901,16 +29904,15 @@ def fn(name):
             return '\n'.join(lines[i:j + 1]) + '\n'
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
+         '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint', '_sandy_agent_has',
+         '_sandy_path_symlink_component',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
          '_sandy_slug_for', '_sandy_note_session_created_sandy_dir']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
-b = src.index('done < <(_sandy_protected_files)\n', a) + len('done < <(_sandy_protected_files)\n')
-# The slice ends on a `while ...; do [ -e ] && echo; done` whose status is its
-# last test's; sandy runs on past it, so the fragment does too (a real failure
-# inside it still trips set -e before this line).
-open(out + '/snap.sh', 'w').write(src[a:b] + 'true\n')
+b = src.index('unset _lnk_snap\n', a) + len('unset _lnk_snap\n')
+open(out + '/snap.sh', 'w').write(src[a:b])
 a = src.index('    # Detect protected-path appearances')
 b = src.index('    # #80: .git/HEAD is rw in-container', a)
 open(out + '/end.sh', 'w').write(src[a:b])
@@ -29929,10 +29931,15 @@ else
 fi
 echo DRIVE-OK
 S245_DRIVE
-_s245_run() {   # $1 = fixture  $2 = launch|end -> combined output
+_s245_run() {   # $1 = fixture  $2 = launch|end  [$3 = SANDY_AGENT, default claude,gemini] -> combined output
     local T="$_S245_D/$1"
     mkdir -p "$T/ws" "$T/sb" "$T/home"
-    env -i PATH="$PATH" HOME="$T/home" bash "$_S245_D/drive.sh" "$_S245_D" "$T/ws" "$T/sb" "$T/home" "$2" </dev/null 2>&1 || echo "DRIVE-FAILED"
+    env -i PATH="$PATH" HOME="$T/home" SANDY_AGENT="${3:-claude,gemini}" \
+        bash "$_S245_D/drive.sh" "$_S245_D" "$T/ws" "$T/sb" "$T/home" "$2" </dev/null 2>&1 || echo "DRIVE-FAILED"
+}
+_s245_fix() {   # $1 = session-end output: run every remediation line it printed, in a subshell
+    printf '%s\n' "$1" | sed -n 's/^\[sandy\]   \((cd .*)\).*$/\1/p' > "$_S245_D/fix.sh"
+    [ -s "$_S245_D/fix.sh" ] && bash "$_S245_D/fix.sh" >/dev/null 2>&1 || true
 }
 
 check "§245(pre) sliced the launch snapshot and the session-end block out of sandy, and both use the detection list (mutation: a rename empties a slice and must fail HERE)" \
@@ -29950,14 +29957,15 @@ check "§245(1) a .claude/commands/x.md created after the snapshot is reported w
              && printf "%s" "$2" | grep -q "read by the agent CLI on your host"' _ "$_S245_L" "$_S245_OUT" "$_S245_D/A/ws"
 
 # B: existed at launch (so it is overlaid) -> never reported, and never :ro.
-mkdir -p "$_S245_D/B/ws/.claude/commands"; printf 'mine\n' > "$_S245_D/B/ws/.claude/commands/old.md"
+mkdir -p "$_S245_D/B/ws/.claude/commands" "$_S245_D/B/ws/.vscode"
+printf 'mine\n' > "$_S245_D/B/ws/.claude/commands/old.md"; printf '{}\n' > "$_S245_D/B/ws/.vscode/settings.json"
 _S245_L="$(_s245_run B launch)"
 check "§245(2) a .claude/commands that existed at launch is snapshotted and gets no mount from the snapshot: the writable copy-overlay stays the only one (mutation: putting the four in _sandy_protected_dirs adds a :ro mount)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "\.claude/commands" && grep -qFx ".claude/commands" "$2"' \
     _ "$_S245_L" "$_S245_D/B/sb/.protected-existed-at-launch"
 printf 'new\n' > "$_S245_D/B/ws/.claude/commands/new.md"
 _S245_OUT="$(_s245_run B end)"
-check "§245(3) ...and is not reported at session end (mutation: skipping the snapshot, or reporting regardless of it, flags it)" \
+check "§245(3) ...and is not reported at session end, nor is the pre-existing .vscode beside it (mutations: skipping the snapshot, reporting regardless of it, or a snapshot loop that truncates instead of appending)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths appeared"' _ "$_S245_OUT"
 
 # C: an empty new directory -> not reported (the existing with-content rule).
@@ -29982,9 +29990,74 @@ done
 _S245_OUT="$(_s245_run E end)"
 check "§245(6) all four created in one session are each listed in the remediation (mutation: dropping one from _sandy_overlay_detect_dirs)" \
     bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .claude/commands/ .claude/agents/ .claude/plugins/ .gemini/commands/)"' _ "$_S245_OUT" "$_S245_D/E/ws"
+
+# F1: links. The session plants `.claude/commands -> ..` (the workspace's
+# parent: the workspace itself plus a sibling project). Every content test
+# follows the link, and `rm -rf .claude/commands/` would empty that parent.
+mkdir -p "$_S245_D/G/sib"; printf 'keep\n' > "$_S245_D/G/sib/keep"
+_S245_L="$(_s245_run G launch)"
+mkdir -p "$_S245_D/G/ws/.claude"; ln -s .. "$_S245_D/G/ws/.claude/commands"
+_S245_OUT="$(_s245_run G end)"
+_s245_fix "$_S245_OUT"
+check "§245(7) a planted link at the entry is shown as <path> -> <target> and removed with a plain rm, never rm -rf X/; running the printed remediation removes the link and keeps the sibling project (mutation: the old rm -rf X/ empties the parent)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude/commands -> .." \
+             && printf "%s" "$1" | grep -qF "(cd $2 && rm .claude/commands)" \
+             && ! printf "%s" "$1" | grep -q "rm -rf" \
+             && [ ! -L "$2/.claude/commands" ] && [ -f "$3/sib/keep" ] && [ -d "$2/.claude" ]' \
+    _ "$_S245_OUT" "$_S245_D/G/ws" "$_S245_D/G"
+
+# A link at the parent: `.claude -> vendor`, so .claude/commands and
+# .claude/agents both resolve into vendor/. One link, one rm, vendor kept.
+_S245_L="$(_s245_run H launch)"
+mkdir -p "$_S245_D/H/ws/vendor/commands" "$_S245_D/H/ws/vendor/agents"
+printf 'x\n' > "$_S245_D/H/ws/vendor/commands/x.md"; printf 'y\n' > "$_S245_D/H/ws/vendor/agents/y.md"
+ln -s vendor "$_S245_D/H/ws/.claude"
+_S245_OUT="$(_s245_run H end)"
+_s245_fix "$_S245_OUT"
+check "§245(8) a planted link at the parent (.claude -> vendor) is named once with its target, removed with rm .claude, and the vendor tree survives the remediation" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude -> vendor" \
+             && printf "%s" "$1" | grep -qF "(cd $2 && rm .claude)" \
+             && [ "$(printf "%s" "$1" | grep -cF "$2/.claude -> vendor")" = 1 ] \
+             && ! printf "%s" "$1" | grep -q "rm -rf" \
+             && [ ! -e "$2/.claude" ] && [ -f "$2/vendor/commands/x.md" ] && [ -f "$2/vendor/agents/y.md" ]' \
+    _ "$_S245_OUT" "$_S245_D/H/ws"
+
+# A link that existed at launch is the operator's: report the new entry
+# under it, print no removal command for it.
+mkdir -p "$_S245_D/I/ws/vendor"; ln -s vendor "$_S245_D/I/ws/.claude"
+_S245_L="$(_s245_run I launch)"
+mkdir -p "$_S245_D/I/ws/vendor/commands"; printf 'x\n' > "$_S245_D/I/ws/vendor/commands/x.md"
+_S245_OUT="$(_s245_run I end)"
+check "§245(9) under a link that existed at launch, the new entry is reported as reached through it, with no rm command at all (mutation: dropping the #link snapshot offers rm .claude for the operator's own link)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude/commands (through .claude -> vendor, a link that existed at launch" \
+             && ! printf "%s" "$1" | grep -q "&& rm"' _ "$_S245_OUT" "$_S245_D/I/ws"
+
+# F2: no overlay for this agent set. An existing .claude/commands in a codex
+# session is the plain rw workspace path: fingerprinted at launch, and a
+# change is reported (with no removal command: it is the operator's dir).
+mkdir -p "$_S245_D/J/ws/.claude/commands"; printf 'mine\n' > "$_S245_D/J/ws/.claude/commands/old.md"
+_S245_L="$(_s245_run J launch codex)"
+_S245_SNAP="$(cat "$_S245_D/J/sb/.protected-existed-at-launch")"
+printf 'evil\n' > "$_S245_D/J/ws/.claude/commands/new.md"
+_S245_OUT="$(_s245_run J end codex)"
+check "§245(10) codex-only session: an existing .claude/commands is NOT recorded as overlaid, and an addition to it is reported as changed, with no rm -rf of the operator's directory (mutation: snapshotting it as existed regardless of agent hides the write)" \
+    bash -c '! printf "%s\n" "$3" | grep -qFx ".claude/commands" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/commands/ (existed at launch with no sandbox overlay for this agent; its contents changed)" \
+             && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/J/ws" "$_S245_SNAP"
+mkdir -p "$_S245_D/K/ws/.claude/agents"; printf 'a\n' > "$_S245_D/K/ws/.claude/agents/a.md"
+_S245_L="$(_s245_run K launch codex)"
+_S245_OUT="$(_s245_run K end codex)"
+check "§245(11) ...and the same unchanged directory is not reported (the fingerprint is stable across launch and exit)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths appeared"' _ "$_S245_OUT"
+mkdir -p "$_S245_D/L/ws/.claude/plugins" "$_S245_D/L/ws/.gemini/commands"
+_S245_L="$(_s245_run L launch claude)"
+printf 'x\n' > "$_S245_D/L/ws/.claude/plugins/p"; printf 'x\n' > "$_S245_D/L/ws/.gemini/commands/c.toml"
+_S245_OUT="$(_s245_run L end claude)"
+check "§245(12) claude-only session with empty debris dirs: .claude/plugins (overlaid) is not reported, .gemini/commands (no gemini overlay) is (mutation: mapping every entry to claude)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.gemini/commands/ (existed at launch" && ! printf "%s" "$1" | grep -qF ".claude/plugins"' _ "$_S245_OUT" "$_S245_D/L/ws"
 rm -rf "$_S245_D"
-unset _S245_D _S245_L _S245_OUT _s245_p
-unset -f _s245_run
+unset _S245_D _S245_L _S245_OUT _S245_SNAP _s245_p
+unset -f _s245_run _s245_fix
 
 # BEGIN SUMMARY
 # ============================================================
