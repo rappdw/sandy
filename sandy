@@ -2713,6 +2713,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--print-state"';  printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Emit runtime state (sandboxes, approvals, containers) as JSON."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--sizes"';        printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"With --print-state (full mode only): also walk each sandbox with du to fill size_bytes, and report sizes_computed: true. Without it size_bytes is null. Slow on a host with many large sandboxes. --print-state light --sizes is a usage error (exit 1), as is any other --option after --print-state. As a launcher argument (sandy --sizes, sandy -p ... --sizes) it is refused with exit 1; the other introspection flags (--print-schema, --print-version, --validate-config) ignore it, as they ignore any extra argument."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--validate-config"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Validate a config file against the schema; emit JSON."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--print-version"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Emit machine-readable version JSON (schema_version, version, commit, full_version). full_version is the stable cache key for --print-schema consumers — unlike version, it changes on every commit."'; printf '}'
@@ -3681,6 +3683,14 @@ _sandy_emit_state() {
     # output/logic is unchanged — so a consumer can pass "light"
     # unconditionally and older/other sandy just ignores it.
     local _mode="${1:-full}"
+    # $2 = 1 when --sizes was given (B7b): only then does full mode walk each
+    # sandbox for size_bytes. sizes_computed (emitted last) reports whether
+    # the walk ran on this call, so a consumer can tell "not requested" from
+    # "du failed" (the per-sandbox null still means unknown).
+    local _sizes_computed=false
+    if [ "$_mode" != "light" ] && [ "${2:-0}" = 1 ]; then
+        _sizes_computed=true
+    fi
     # Detect which stat flavor we have once. GNU stat (Linux) takes -c;
     # BSD stat (macOS) takes -f. We can't rely on either failing cleanly on
     # the wrong OS — GNU's `stat -f` is a valid different command (filesystem
@@ -3858,8 +3868,9 @@ _sandy_emit_state() {
             printf ','; _json_kv created_at        "$(_json_escape "$sb_created_at")"
             printf ','; _json_kv last_used_at      "$(_json_escape "$sb_last_at")"
             # size_bytes (#176): integer bytes of allocated disk for this sandbox,
-            # FULL MODE ONLY — a du walk over multi-GB sandboxes is exactly the
-            # cost class the light-mode two-spawn poll budget exists to exclude
+            # FULL MODE WITH --sizes ONLY (B7b: opt-in since 2.9.0; without it
+            # full mode emits null exactly as light does) — a du walk over
+            # multi-GB sandboxes is exactly the cost class the light-mode two-spawn poll budget exists to exclude
             # (see the #25 rationale above). Light mode emits the key present as
             # JSON null (not absent), matching the dangling_images/
             # orphaned_containers/proxy_image_created precedent — shape parity
@@ -3878,7 +3889,7 @@ _sandy_emit_state() {
             # `|| true` guards against a nonzero du exit under `set -o
             # pipefail` truncating the JSON stream mid-document.
             local sb_size='null' sb_kb=""
-            if [ "$_mode" != "light" ]; then
+            if [ "$_sizes_computed" = true ]; then
                 sb_kb="$(du -skx "$sb" 2>/dev/null | awk '{print $1}' || true)"
                 if [ -n "$sb_kb" ] && [ "$sb_kb" -eq "$sb_kb" ] 2>/dev/null; then
                     sb_size=$((sb_kb * 1024))
@@ -4498,6 +4509,8 @@ EOF_FEATURE_ENTRIES
         fi
     fi
 
+    # sizes_computed (B7b): last, so every earlier field keeps its position.
+    printf ','; _json_kv sizes_computed "$_sizes_computed"
     printf '}\n'
 }
 
@@ -4844,10 +4857,41 @@ if [[ "${1:-}" == "--print-schema" ]]; then
 fi
 if [[ "${1:-}" == "--print-state" ]]; then
     set -E; trap _sandy_introspect_err_trap ERR
-    # $2 selects the mode: "light" for the cheap single-spawn path (#18),
-    # anything else (incl. absent) → full. Forward-compatible: a consumer can
-    # pass "light" unconditionally; an older sandy ignored $2 entirely.
-    _sandy_emit_state "${2:-}"
+    # The first argument after --print-state that is not --sizes selects the
+    # mode: "light" for the cheap single-spawn path (#18), anything else (incl.
+    # absent) → full. Forward-compatible: a consumer can pass "light"
+    # unconditionally; an older sandy ignored $2 entirely.
+    #
+    # --sizes (2.9.0, B7b) opts in to the per-sandbox du walk behind
+    # size_bytes. Without it full mode reports size_bytes null, as light mode
+    # always has: on a host with ~80 sandboxes the walk was most of a
+    # full-mode call (~55 of ~70 s on a Mac), long enough to time consumers
+    # out. Light mode never walks, so `light --sizes` asks for something it
+    # cannot do: a usage error, the same shape as --validate-config with no
+    # PATH (0 bytes of stdout, one [sandy] ERROR line on stderr, exit 1),
+    # rather than a light document that silently ignores the flag.
+    #
+    # Any other argument starting with -- is refused the same way: --sizes=1
+    # would otherwise be read as the mode (full, no sizes) and a typo such as
+    # --size silently dropped. No such argument ever had a meaning here (only
+    # "light" did), so refusing them takes nothing away.
+    _ps_mode="" _ps_mode_set=0 _ps_sizes=0
+    shift
+    for _ps_arg in "$@"; do
+        if [ "$_ps_arg" = "--sizes" ]; then
+            _ps_sizes=1
+        elif [ "${_ps_arg#--}" != "$_ps_arg" ]; then
+            printf '[sandy] ERROR: --print-state: unknown option %s (it takes an optional mode, light or full, and --sizes)\n' "$_ps_arg" >&2
+            exit 1
+        elif [ "$_ps_mode_set" = 0 ]; then
+            _ps_mode="$_ps_arg"; _ps_mode_set=1
+        fi
+    done
+    if [ "$_ps_mode" = "light" ] && [ "$_ps_sizes" = 1 ]; then
+        echo "[sandy] ERROR: --sizes needs full mode: light mode never walks the sandboxes (use: sandy --print-state --sizes)" >&2
+        exit 1
+    fi
+    _sandy_emit_state "$_ps_mode" "$_ps_sizes"
     exit 0
 fi
 if [[ "${1:-}" == "--validate-config" ]]; then
@@ -8961,6 +9005,11 @@ Introspection (machine-readable JSON; no Docker required):
                           protected paths). See SPEC_INTROSPECTION.md.
   --print-state           Emit runtime state (sandboxes, approvals, running
                           containers). docker_reachable=false if docker absent.
+                          'sandy --print-state light' is the cheap poller mode.
+  --sizes                 With --print-state (full mode): also measure each
+                          sandbox with du to fill size_bytes (null without
+                          it). Slow with many large sandboxes. An error with
+                          light, and as a launcher argument (sandy --sizes).
   --validate-config PATH  Validate a config file against the schema; emit JSON
                           with errors, unknowns, and passive-approval status.
   --print-version         Emit {schema_version, version, commit, full_version}
@@ -9079,6 +9128,13 @@ while [ $# -gt 0 ]; do
         -vvv)         SANDY_VERBOSE=3; _SANDY_VERBOSE_EXPLICIT=1 ;;
         -vv)          SANDY_VERBOSE=2; _SANDY_VERBOSE_EXPLICIT=1 ;;
         -v)           SANDY_VERBOSE=1; _SANDY_VERBOSE_EXPLICIT=1 ;;
+        --sizes)
+            # Only --print-state takes --sizes (its fast path parses it; B7b).
+            # Anywhere else it would be forwarded to the agent, which is not
+            # what anyone typing it means, so refuse it here instead.
+            echo "[sandy] ERROR: --sizes is only accepted with --print-state (e.g. sandy --print-state --sizes)" >&2
+            exit 1
+            ;;
         *)            REMAINING_ARGS+=("$1") ;;
     esac
     shift
