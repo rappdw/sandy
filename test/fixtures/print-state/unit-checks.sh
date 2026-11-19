@@ -6,7 +6,7 @@
 # reference, run here with the host's own tools, so a check fails on any
 # input where bash and the tools disagree.
 #
-# Usage: unit-checks.sh SANDY_SCRIPT GROUP   (GROUP: escape|file|ascii|ws|approval|split)
+# Usage: unit-checks.sh SANDY_SCRIPT GROUP   (GROUP: escape|file|ascii|ws|approval|split|marker)
 # Prints one line per mismatch and exits 1 if there was any; exits 2 if the
 # functions could not be extracted (so a rename cannot pass vacuously).
 # Used by run-tests.sh §242; bash-3.2 and BSD safe.
@@ -22,10 +22,17 @@ _fns="$(sed -n \
     -e '/^_sandy_ps_ws_path() {$/,/^}$/p' \
     -e '/^_sandy_ps_approval_v() {$/,/^}$/p' \
     -e '/^_sandy_ps_split7_v() {$/,/^}$/p' \
+    -e '/^_SANDY_SLURP_MAX=/p' \
+    -e '/^_sandy_slurp_v() {$/,/^}$/p' \
+    -e '/^_sandy_ps_ws_path_cmd() {$/,/^}$/p' \
+    -e '/^_sandy_first_line_v() {$/,/^}$/p' \
+    -e '/^_sandy_ps_marker_read() {$/,/^}$/p' \
+    -e '/^_sandy_ps_marker_read_cmd() {$/,/^}$/p' \
     "$SANDY")"
 eval "$_fns"
 for _f in _json_escape_v _json_escape _sandy_read_file_v _sandy_ctl_strip_v _sandy_is_ascii_print \
-          _sandy_ps_ws_path _sandy_ps_approval_v _sandy_ps_split7_v; do
+          _sandy_ps_ws_path _sandy_ps_approval_v _sandy_ps_split7_v _sandy_slurp_v _sandy_ps_ws_path_cmd \
+          _sandy_first_line_v _sandy_ps_marker_read _sandy_ps_marker_read_cmd; do
     command -v "$_f" >/dev/null 2>&1 || { echo "could not extract $_f from $SANDY"; exit 2; }
 done
 [ -n "${_SANDY_ASCII_PRINT:-}" ] || { echo "could not extract _SANDY_ASCII_PRINT"; exit 2; }
@@ -88,12 +95,14 @@ ascii)
         [ "$_SANDY_CS" = "$t" ] || miss "_sandy_ctl_strip_v $(q "$s"): $(q "$_SANDY_CS") != $(q "$t")"
     done < <(_inputs)
     ;;
-file|ws|approval)
+file|ws|approval|marker)
     D="$(mktemp -d)"; D="$(cd "$D" && pwd -P)"
     trap 'rm -rf "$D"' EXIT
     _mk() { # name printf-format
         printf "$2" > "$D/$1"
     }
+    _bytes() { head -c "$1" /dev/zero | tr '\000' x; }
+    _big() { { _bytes "$(($2 - 1))"; printf '\n'; } > "$D/$1"; }   # exactly $2 bytes
     if [ "$GROUP" = file ]; then
         _mk empty ''
         _mk one 'x'
@@ -108,7 +117,9 @@ file|ws|approval)
         _mk leadnul 'a\303\000b\000c\n'
         _mk leadnl 'x\303\n\ny\n\n'
         mkdir "$D/dir"
-        set -- empty one nl nls inner onlynl cr odd nul nulend leadnul leadnl dir missing
+        _mk nulonly '\000'
+        _big b8191 8191; _big b8192 8192; _big b8193 8193; _big b2m 2600000
+        set -- empty one nl nls inner onlynl cr odd nul nulend leadnul leadnl nulonly b8191 b8192 b8193 b2m dir missing
         for f in "$@"; do
             N=$((N + 1))
             r="$(cat "$D/$f" 2>/dev/null)" 2>/dev/null || true
@@ -138,7 +149,11 @@ file|ws|approval)
         _mk w20 '{"workspace_path"  :  "/t\tab"}\n'
         _mk w22 '{"a": "\303\n"}\n{"workspace_path": "/after/odd"}\n'
         mkdir "$D/w21"
-        set -- w01 w02 w03 w04 w05 w06 w07 w08 w09 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 missing
+        _mk w23 '{"x": "a\000b",\n "workspace_path": "/nul/before"}\n'
+        _mk w24 '{"workspace_path": "/nul/after"}\n\000\n'
+        { yes '{"junk": "line"}' | head -n 60000; printf '{"workspace_path": "/big/last"}\n'; } > "$D/w25"
+        { _bytes 8150; printf '\n{"workspace_path": "/near/bound"}\n'; } > "$D/w26"
+        set -- w01 w02 w03 w04 w05 w06 w07 w08 w09 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 missing
         for f in "$@"; do
             N=$((N + 1))
             r="$(grep -m1 '"workspace_path"' "$D/$f" 2>/dev/null \
@@ -146,6 +161,89 @@ file|ws|approval)
             _sandy_ps_ws_path "$D/$f"
             [ "$_SANDY_WSP" = "$r" ] || miss "_sandy_ps_ws_path $f: $(q "$_SANDY_WSP") != $(q "$r")"
         done
+    elif [ "$GROUP" = marker ]; then
+        # The marker readers as the pre-B7 loop ran them, one sed (and a tail)
+        # per field, copied from 4de285e. Compared field by field with what
+        # _sandy_ps_marker_read leaves in its globals.
+        _ref_marker() {
+            local m="$1"
+            RF="$(sed -n \
+                -e 's/^  "feature_entries": .*/P/p' \
+                -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)"}.*/E \1 \2 new/p' \
+                -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)", "relay_alias": \([a-z]*\), .*/E \1 \2 \3/p' \
+                "$m" 2>/dev/null || true)"
+            RFP=0; printf '%s\n' "$RF" | grep -q '^P$' && RFP=1
+            RG="$(sed -n 's/.*"agents": \(\[[^]]*\]\).*/\1/p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RI="$(sed -n 's/^  "image": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RA="$(sed -n 's/^  "agent_args": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RB="$(sed -n 's/^  "agent_args_composed": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RW="$(sed -n 's/^  "agent_wrappers": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RL="$(sed -n 's/^  "claude_sessions": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RH=0; grep -q '^  "schema": ' "$m" 2>/dev/null && RH=1
+            RV="$(sed -n 's/^  "sandy_version": "\([^"]*\)",$/\1/p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RT="$(sed -n 's/^  "launched_at": "\([^"]*\)",$/\1/p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RX="$(sed -n 's/^  "cross_session_inbound": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+            RY="$(sed -n 's/^  "cross_session_inbound_source": //p' "$m" 2>/dev/null | tail -n 1 || true)"
+        }
+        _cmp_marker() { # name
+            _ref_marker "$D/$1/sandy-session.json"
+            _sandy_ps_marker_read "$D/$1"
+            [ "$RF" = "$_SANDY_MK_FE" ] || miss "marker $1 feature_entries: $(q "$_SANDY_MK_FE") != $(q "$RF")"
+            [ "$RFP" = "$_SANDY_MK_FE_P" ] || miss "marker $1 feature_entries P: $_SANDY_MK_FE_P != $RFP"
+            [ "$RG" = "$_SANDY_MK_AGENTS" ] || miss "marker $1 agents: $(q "$_SANDY_MK_AGENTS") != $(q "$RG")"
+            [ "$RI" = "$_SANDY_MK_IMAGE" ] || miss "marker $1 image: $(q "$_SANDY_MK_IMAGE") != $(q "$RI")"
+            [ "$RA" = "$_SANDY_MK_AA" ] || miss "marker $1 agent_args: $(q "$_SANDY_MK_AA") != $(q "$RA")"
+            [ "$RB" = "$_SANDY_MK_AAC" ] || miss "marker $1 agent_args_composed: $(q "$_SANDY_MK_AAC") != $(q "$RB")"
+            [ "$RW" = "$_SANDY_MK_AW" ] || miss "marker $1 agent_wrappers: $(q "$_SANDY_MK_AW") != $(q "$RW")"
+            [ "$RL" = "$_SANDY_MK_CS" ] || miss "marker $1 claude_sessions: $(q "$_SANDY_MK_CS") != $(q "$RL")"
+            [ "$RH" = "$_SANDY_MK_SCHEMA" ] || miss "marker $1 schema: $_SANDY_MK_SCHEMA != $RH"
+            [ "$RV" = "$_SANDY_MK_VER" ] || miss "marker $1 sandy_version: $(q "$_SANDY_MK_VER") != $(q "$RV")"
+            [ "$RT" = "$_SANDY_MK_AT" ] || miss "marker $1 launched_at: $(q "$_SANDY_MK_AT") != $(q "$RT")"
+            [ "$RX" = "$_SANDY_MK_CSI" ] || miss "marker $1 cross_session_inbound: $(q "$_SANDY_MK_CSI") != $(q "$RX")"
+            [ "$RY" = "$_SANDY_MK_CSIS" ] || miss "marker $1 cross_session_inbound_source: $(q "$_SANDY_MK_CSIS") != $(q "$RY")"
+        }
+        _mkm() { mkdir -p "$D/$1"; printf "$2" > "$D/$1/sandy-session.json"; }
+        _full='{\n  "schema": 1,\n  "sandy_version": "2.9.0",\n  "launched_at": "2026-01-01T00:00:00Z",\n  "cross_session_inbound": "accept",\n  "cross_session_inbound_source": "explicit",\n  "agents": ["claude"],\n  "image": {"name": "sandy-full", "id": null, "project_layer": false},\n  "agent_args": {"a": 1},\n  "agent_args_composed": {"b": 2},\n  "agent_wrappers": {"c": 3},\n  "feature_entries": {\n    "f": {"path": "/opt/sandy/features/f/x"},\n    "g": {"path": "/p", "relay_alias": true, "disabled_by": null}\n  },\n  "claude_sessions": ["s"]\n}\n'
+        _mkm m01 "$_full"
+        _mkm m02 ''
+        _mkm m03 '  "agent_args": {"x": 1}\303\n  "agent_args_composed": {"y": 2},\n  "schema": 1,\n'
+        _mkm m04 '  "sandy_version": "1",\n  "sandy_version": "2",\n  "launched_at": "a",\n  "launched_at": "b",\n  "image": 1\n  "image": 2\n  "claude_sessions": 1\n  "claude_sessions": 2\n  "agent_args_composed": 1\n  "agent_args_composed": 2\n  "cross_session_inbound_source": 1\n  "cross_session_inbound_source": 2\n  "agents": [1]\n  "agents": [2]\n'
+        _mkm m05 '  "agent_args": {"agents": ["a"]},\n  "image": {"agents": ["b"]}\n'
+        _mkm m06 '  "sandy_version": "\377",\n  "agents": ["\377"]\n  "agent_args": {"\351": 1}\n  "launched_at": "\303\251",\n'
+        _mkm m07 '  "feature_entries": {\n    "f\303\251": {"path": "/x"},\n    "ok": {"path": "/\351"}\n  },\n'
+        _mkm m08 '  "agent_wrappers": {}\r\n  "claude_sessions": []'
+        _mkm m09 '\000  "schema": 1,\n  "agents": ["x"]\000\n'
+        { printf '{\n  "schema": 1,\n'; yes '  "agents": ["many"],' | head -n 3000; printf '  "agent_wrappers": {"w": 1}\n'; } > "$D/m10.json"
+        mkdir -p "$D/m10"; mv "$D/m10.json" "$D/m10/sandy-session.json"
+        mkdir -p "$D/m11/sandy-session.json"
+        set -- m01 m02 m03 m04 m05 m06 m07 m08 m09 m10 m11
+        for f in "$@"; do N=$((N + 1)); _cmp_marker "$f"; done
+        # The same with a stand-in for BSD sed in a UTF-8 locale: a script
+        # with the unanchored .*"agents" expression stops at the first line
+        # holding a \377 byte and fails; anchored scripts never scan the byte
+        # and run to the end. The reference then loses only its agents field,
+        # and the combined sed (which carries that expression) must be taken
+        # back to the per-field reads rather than lose every later field.
+        mkdir -p "$D/bin"
+        UC_REALSED="$(command -v sed)"; export UC_REALSED
+        cat > "$D/bin/sed" <<'SHIM'
+#!/bin/sh
+f=""; unanch=0
+for a in "$@"; do f="$a"; case "$a" in *'.*"agents"'*) unanch=1 ;; esac; done
+ff="$(printf '\377')"
+if [ "$unanch" = 1 ] && LC_ALL=C grep -q "$ff" "$f" 2>/dev/null; then
+    LC_ALL=C "$UC_REALSED" "/$ff/,\$d" "$f" > "$f.cut"
+    n=$#; i=0
+    for a in "$@"; do i=$((i + 1)); if [ "$i" -eq "$n" ]; then set -- "$@" "$f.cut"; else set -- "$@" "$a"; fi; done
+    shift "$n"
+    "$UC_REALSED" "$@"; rm -f "$f.cut"; exit 1
+fi
+exec "$UC_REALSED" "$@"
+SHIM
+        chmod +x "$D/bin/sed"
+        PATH="$D/bin:$PATH"
+        _mkm m12 '{\n  "schema": 1,\n  "agents": ["a"],\n  "x": "\377",\n  "agent_wrappers": {"after": 1},\n  "sandy_version": "9",\n}\n'
+        for f in m12 m01 m06; do N=$((N + 1)); _cmp_marker "$f"; done
     else
         _mk a01 'abc123\n# workspace: /ws/one\n# approved: 2026-01-01T00:00:00Z\nKEY=V\n'
         _mk a02 'def456\nKEY=V\n'
@@ -160,7 +258,10 @@ file|ws|approval)
         _mk a11 'h\n# workspace:/tight\t\n'
         _mk a13 'h\303\n# workspace: /w\n# approved: t\n'
         mkdir "$D/a12"
-        set -- a01 a02 a03 a04 a05 a06 a07 a08 a09 a10 a11 a12 a13 missing
+        _mk a14 'h\n# workspace: /nul\000x\n# approved: t\n'
+        _mk a15 'h\n# workspace: /w1\n# workspace: /w2\n# approved: t1\n# approved: t2\n'
+        { printf 'big\n'; yes KEY=VALUE | head -n 5000; printf '# workspace: /big\n# approved: late\n'; } > "$D/a16"
+        set -- a01 a02 a03 a04 a05 a06 a07 a08 a09 a10 a11 a12 a13 a14 a15 a16 missing
         for f in "$@"; do
             N=$((N + 1))
             rh="$(head -n1 "$D/$f" 2>/dev/null || true)"

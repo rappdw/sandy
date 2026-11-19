@@ -202,10 +202,49 @@ printf '{\n  "schema": 1,\n  "cross_session_inbound": null,\n  "cross_session_in
 d="$SB/a14-overlap-eeeeeeee"; mkdir -p "$d"; vers "$d" "2.9.0"
 printf '{\n  "schema": 1,\n  "agent_args": {"agents": ["claude","x"]},\n  "image": {"name": "sandy-x", "id": null, "project_layer": false},\n  "agent_wrappers": {"agents": ["w"]}\n}\n' > "$d/sandy-session.json"
 
+# a15: every marker field twice, the two values different: each reader must
+# report the LAST (what `| tail -n 1` gave), never the first.
+d="$SB/a15-dups-ffffffff"; mkdir -p "$d"; vers "$d" "2.9.0" "2.9.1"
+cat > "$d/sandy-session.json" <<'EOF'
+{
+  "schema": 1,
+  "sandy_version": "1.0.0-first",
+  "launched_at": "2020-01-01T00:00:00Z",
+  "cross_session_inbound": "refuse",
+  "cross_session_inbound_source": "explicit",
+  "agents": ["codex"],
+  "image": {"name": "sandy-first", "id": null, "project_layer": false},
+  "agent_args": {"first": 1},
+  "agent_args_composed": {"first": 1},
+  "agent_wrappers": {"first": 1},
+  "claude_sessions": ["first"],
+  "sandy_version": "2.9.0-last",
+  "launched_at": "2026-11-11T11:11:11Z",
+  "cross_session_inbound": "hold",
+  "cross_session_inbound_source": "feature:last",
+  "agents": ["claude","gemini"],
+  "image": {"name": "sandy-last", "id": "sha256:abc", "project_layer": true},
+  "agent_args": {"last": 2},
+  "agent_args_composed": {"last": 2},
+  "agent_wrappers": {"last": 2},
+  "claude_sessions": ["last"],
+}
+EOF
+
+# a16: only the LAST-used version stamp exists (created_at stays empty).
+d="$SB/a16-lastonly-a1a1a1a1"; mkdir -p "$d"
+printf '2.9.2\n' > "$d/.sandy_last_version"; stamp 202604050607.08 "$d/.sandy_last_version"
+
+# a17: inbound null and agents naming claude only inside another word
+# ("claude-code" is not the agent claude): not_claude.
+d="$SB/a17-claudeish-b2b2b2b2"; mkdir -p "$d"; vers "$d" "2.9.0"
+printf '{\n  "schema": 1,\n  "agents": ["claude-code"],\n  "cross_session_inbound": null,\n}\n' > "$d/sandy-session.json"
+
 # Approvals: full, missing comment lines, leading whitespace, no final newline.
 printf 'abc123\n# workspace: /ws/one\n# approved: 2026-01-01T00:00:00Z\nKEY=V\n' > "$H/approvals/passive-aaaa1111.list"
 printf 'def456\nKEY=V\n' > "$H/approvals/passive-bbbb2222.list"
 printf 'ghi789\n#  workspace:x\n# workspace:  \t /ws/two "q" \\b\n# approved:\t2026' > "$H/approvals/passive-cccc3333.list"
+printf 'jkl\n# workspace: /ws/first\n# workspace: /ws/second\n# approved: a1\n# approved: a2\n' > "$H/approvals/passive-dddd4444.list"
 printf 'ctx1\n# approved: 2026-02-02T00:00:00Z\n# workspace: /ws/df\n' > "$H/approvals/dockerfile-dddd4444.list"
 printf '' > "$H/approvals/dockerfile-eeee5555.list"
 

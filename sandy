@@ -2482,23 +2482,40 @@ _json_kv() { printf '"%s":%s' "$1" "$2"; }
 # The same pair with a string value, escaped here (no fork).
 _json_kv_str() { _json_escape_v "$2"; printf '"%s":%s' "$1" "$_SANDY_JE"; }
 
+# The no-fork readers below take a file's text from ONE bounded read and
+# answer from it only when it is small, NUL-free text; anything else runs the
+# command they replace, so they are never wrong and never much slower than it.
+# _sandy_slurp_v FILE: the whole of FILE into _SANDY_SL, status 0, when it is
+# under _SANDY_SLURP_MAX characters and holds no NUL (read -d '' stops at the
+# first NUL, and -n bounds the read, so a large file costs one bounded read).
+# A missing or unreadable FILE reads as empty, which is what every replaced
+# command printed for it. Status 1 for anything else, _SANDY_SL then partial.
+_SANDY_SLURP_MAX=16384
+_sandy_slurp_v() {
+    local _rc=0
+    _SANDY_SL=""
+    IFS= read -r -d '' -n "$_SANDY_SLURP_MAX" _SANDY_SL 2>/dev/null < "$1" || _rc=$?
+    # 1 = end of file before a NUL and before the bound: the whole file.
+    [ "$_rc" = 1 ]
+}
+
 # What "$(cat FILE 2>/dev/null)" yields, into the global _SANDY_RF, without a
-# fork: the bytes with NULs dropped and every trailing newline removed; empty
-# when FILE is missing or unreadable. For the small files --print-state reads
-# per sandbox (version stamps, a lock's pid). Only text of printable ASCII,
-# tab, CR and newline is taken from bash's read: in a UTF-8 locale bash 5.2's
-# read swallows a delimiter that follows an invalid lead byte, so anything
-# else is read again with cat itself (it always keeps a byte >= 0x80).
+# fork: the bytes with every trailing newline removed; empty when FILE is
+# missing or unreadable. For the small files --print-state reads per sandbox
+# (its version stamps). Taken from bash only for printable ASCII, tab, CR and
+# newline (in a UTF-8 locale bash 5.2's read swallows a delimiter after an
+# invalid lead byte); anything else, a NUL, or a large file is read with cat.
 _sandy_read_file_v() {
-    local _c=""
     _SANDY_RF=""
-    { while IFS= read -r -d '' _c; do _SANDY_RF="$_SANDY_RF$_c"; done
-      _SANDY_RF="$_SANDY_RF$_c"; } 2>/dev/null < "$1" || true
-    case "$_SANDY_RF" in
-        *[!"$_SANDY_ASCII_PRINT"$'\r\n']*)
-            { _SANDY_RF="$(cat "$1" 2>/dev/null || true)"; } 2>/dev/null; return 0 ;;
-    esac
-    while [ "${_SANDY_RF%$'\n'}" != "$_SANDY_RF" ]; do _SANDY_RF="${_SANDY_RF%$'\n'}"; done
+    if _sandy_slurp_v "$1"; then
+        case "$_SANDY_SL" in
+            *[!"$_SANDY_ASCII_PRINT"$'\r\n']*) ;;
+            *)  _SANDY_RF="$_SANDY_SL"
+                while [ "${_SANDY_RF%$'\n'}" != "$_SANDY_RF" ]; do _SANDY_RF="${_SANDY_RF%$'\n'}"; done
+                return 0 ;;
+        esac
+    fi
+    { _SANDY_RF="$(cat "$1" 2>/dev/null || true)"; } 2>/dev/null
     return 0
 }
 
@@ -2573,12 +2590,15 @@ _sandy_entry_exe_present() {
 #                    each key (trailing comma NOT stripped; callers do that)
 # Reads only when the marker is a regular file (-f), as every reader did.
 _sandy_ps_marker_read() {
-    local _m="$1/sandy-session.json" _o="" _l
+    local _m="$1/sandy-session.json" _o="" _l _r _rc=0
     _SANDY_MK_SCHEMA=0; _SANDY_MK_VER=""; _SANDY_MK_AT=""; _SANDY_MK_FE=""; _SANDY_MK_FE_P=0
     _SANDY_MK_AGENTS=""; _SANDY_MK_IMAGE=""; _SANDY_MK_AA=""; _SANDY_MK_AAC=""; _SANDY_MK_AW=""
     _SANDY_MK_CS=""; _SANDY_MK_CSI=""; _SANDY_MK_CSIS=""
     [ -f "$_m" ] || return 0
-    _o="$(sed -n -e h \
+    # A NUL (grep -q, the old schema gate, splits lines there and sed does
+    # not) or a large marker takes the per-field reads.
+    if ! _sandy_slurp_v "$_m"; then _sandy_ps_marker_read_cmd "$_m"; return 0; fi
+    _o="$(trap - ERR; sed -n -e h \
         -e 's/^  "feature_entries": .*/FP/p' \
         -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)"}.*/FE \1 \2 new/p' \
         -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)", "relay_alias": \([a-z]*\), .*/FE \1 \2 \3/p' \
@@ -2593,8 +2613,23 @@ _sandy_ps_marker_read() {
         -e g -e 's/^  "launched_at": "\([^"]*\)",$/T\1/p' \
         -e g -e 's/^  "cross_session_inbound": /X/p' \
         -e g -e 's/^  "cross_session_inbound_source": /Y/p' \
-        "$_m" 2>/dev/null || true)"
-    while IFS= read -r _l; do
+        "$_m" 2>/dev/null)" || _rc=$?
+    # A sed that failed part-way (BSD sed in a UTF-8 locale stops with
+    # "illegal byte sequence" at the first invalid byte one unanchored
+    # expression scans), or an output too large to split cheaply, takes the
+    # per-field seds the combined one replaced, so each field is exactly what
+    # its own sed (aborted or not) gave. The sed runs in the caller's locale,
+    # NOT LC_ALL=C: C would change what [A-Za-z...] ranges and `.` match for
+    # non-ASCII input on some hosts, and the output must not change.
+    if [ "$_rc" != 0 ] || [ "${#_o}" -gt "$_SANDY_SLURP_MAX" ]; then
+        _sandy_ps_marker_read_cmd "$_m"; return 0
+    fi
+    # Split with parameter expansion, never `read`: in a UTF-8 locale bash
+    # 5.2's read joins a line ending in an invalid lead byte to the next.
+    _r="$_o"
+    while [ -n "$_r" ]; do
+        _l="${_r%%$'\n'*}"
+        if [ "$_l" = "$_r" ]; then _r=""; else _r="${_r#*$'\n'}"; fi
         case "$_l" in
             F*) _l="${_l#F}"
                 [ "$_l" = "P" ] && _SANDY_MK_FE_P=1
@@ -2612,53 +2647,62 @@ _sandy_ps_marker_read() {
             X*) _SANDY_MK_CSI="${_l#X}" ;;
             Y*) _SANDY_MK_CSIS="${_l#Y}" ;;
         esac
-    done <<EOF_SANDY_MK
-$_o
-EOF_SANDY_MK
+    done
+    return 0
+}
+# The per-field reads _sandy_ps_marker_read replaced, verbatim (one sed, and
+# a tail, per field), for the files it hands back.
+_sandy_ps_marker_read_cmd() {
+    local _m="$1"
+    _SANDY_MK_FE="$(sed -n \
+        -e 's/^  "feature_entries": .*/P/p' \
+        -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)"}.*/E \1 \2 new/p' \
+        -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)", "relay_alias": \([a-z]*\), .*/E \1 \2 \3/p' \
+        "$_m" 2>/dev/null || true)"
+    if printf '%s\n' "$_SANDY_MK_FE" | grep -q '^P$'; then _SANDY_MK_FE_P=1; fi
+    _SANDY_MK_AGENTS="$(sed -n 's/.*"agents": \(\[[^]]*\]\).*/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_IMAGE="$(sed -n 's/^  "image": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_AA="$(sed -n 's/^  "agent_args": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_AAC="$(sed -n 's/^  "agent_args_composed": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_AW="$(sed -n 's/^  "agent_wrappers": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_CS="$(sed -n 's/^  "claude_sessions": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    if grep -q '^  "schema": ' "$_m" 2>/dev/null; then _SANDY_MK_SCHEMA=1; fi
+    _SANDY_MK_VER="$(sed -n 's/^  "sandy_version": "\([^"]*\)",$/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_AT="$(sed -n 's/^  "launched_at": "\([^"]*\)",$/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_CSI="$(sed -n 's/^  "cross_session_inbound": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    _SANDY_MK_CSIS="$(sed -n 's/^  "cross_session_inbound_source": //p' "$_m" 2>/dev/null | tail -n 1 || true)"
     return 0
 }
 
-# --print-state `marker` (#386, decision 1): the ONE place a consumer learns why
-# a marker-derived field is null. Sets three globals (no subshell, no parsing
-# by the caller):
-#   _SANDY_PSM_STATE  absent | present | unreadable
-#   _SANDY_PSM_VER    JSON string or null -- that launch's own sandy version
-#   _SANDY_PSM_AT     JSON string or null -- that launch's launched_at (UTC)
-# The rule it supports, documented in SPEC_INTROSPECTION.md: a marker-derived
-# field that is null while state is "present" means the launch that wrote the
-# marker PREDATES the field. That holds only because a current sandy never
-# writes a marker-derived field as a deliberate null -- "not applicable" gets
-# its own non-null encoding (see cross_session_inbound.pinned). run-tests.sh
-# pins that invariant.
-# "present" requires the marker's own `"schema":` line, so a truncated or
-# foreign file reads "unreadable" (unknown), never "present" (which would turn
-# every field null into a false "predates" verdict).
 # workspace_path from a WORKSPACE.json, into _SANDY_WSP: what
 #   grep -m1 '"workspace_path"' F | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//'
-# prints, without the two forks. The first line holding the key is found in
-# bash; for a line of printable ASCII the two substitutions are done in bash
-# (the first is greedy, so it ends after the LAST occurrence of the key that
-# is followed by optional blanks, a colon, optional blanks and a quote, and
-# leaves the line alone when there is none). When that line, or one before
-# it, is anything else, the pipeline itself runs, so locale and encoding
-# handling stay grep's and sed's.
+# prints, without the two forks, for a file _sandy_slurp_v reads whole and
+# that is printable ASCII, tabs and newlines only. The first line holding the
+# key is cut out with parameter expansion (never `read`, which can join lines
+# in a UTF-8 locale), then both substitutions are done in bash (the first is
+# greedy, so it ends after the LAST occurrence of the key that is followed by
+# optional blanks, a colon, optional blanks and a quote, and leaves the line
+# alone when there is none). Any other file (large, a NUL, non-ASCII, CR)
+# runs the pipeline itself, so encoding and binary-file handling stay grep's
+# and sed's.
 _sandy_ps_ws_path() {
-    local _l="" _found=0 _pre _post _t _ok=0 _odd=0
+    local _c _l _pre _post _t _ok=0
     _SANDY_WSP=""
-    { while IFS= read -r _l || [ -n "$_l" ]; do
-        _sandy_is_ascii_print "$_l" || _odd=1
-        case "$_l" in *'"workspace_path"'*) _found=1; break ;; esac
-        _l=""
-      done; } 2>/dev/null < "$1" || true
-    [ "$_found" = 1 ] || return 0
-    # _odd: a line so far was not printable ASCII. In a UTF-8 locale bash's
-    # read can then join two lines (it swallows a newline after an invalid
-    # lead byte), so the line found may not be grep's.
-    if [ "$_odd" = 1 ]; then
-        _SANDY_WSP="$(grep -m1 '"workspace_path"' "$1" 2>/dev/null \
-                      | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
-        return 0
+    if ! _sandy_slurp_v "$1"; then
+        _sandy_ps_ws_path_cmd "$1"; return 0
     fi
+    _c="$_SANDY_SL"
+    case "$_c" in
+        *'"workspace_path"'*) ;;
+        *) return 0 ;;
+    esac
+    case "$_c" in
+        *[!"$_SANDY_ASCII_PRINT"$'\n']*) _sandy_ps_ws_path_cmd "$1"; return 0 ;;
+    esac
+    # The line around the key's first occurrence.
+    _pre="${_c%%\"workspace_path\"*}"
+    _post="${_c:${#_pre}}"
+    _l="${_pre##*$'\n'}${_post%%$'\n'*}"
     _pre="$_l"
     while :; do
         case "$_pre" in *'"workspace_path"'*) ;; *) break ;; esac
@@ -2674,39 +2718,50 @@ _sandy_ps_ws_path() {
     _SANDY_WSP="${_l%%\"*}"
     return 0
 }
+_sandy_ps_ws_path_cmd() {
+    _SANDY_WSP="$(grep -m1 '"workspace_path"' "$1" 2>/dev/null \
+                  | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
+}
 
 # One approvals list, into _SANDY_AP_HASH (its first line, as `head -n1`),
 # _SANDY_AP_WS and _SANDY_AP_AT: what
 #   grep -m1 '^# workspace:' F | sed 's/^# workspace:[[:space:]]*//'
-# (and the same for `# approved:`) print, read in one pass with no fork. When
-# a line read is not printable ASCII, the three commands themselves run, for
-# the reason _sandy_ps_ws_path gives.
+# (and the same for `# approved:`) print, with no fork, for a file
+# _sandy_slurp_v reads whole and that is printable ASCII, tabs and newlines
+# only; any other runs the three commands themselves, as _sandy_ps_ws_path
+# does.
 _sandy_ps_approval_v() {
-    local _l="" _n=0 _w="" _a="" _hw=0 _ha=0 _odd=0
+    local _c
     _SANDY_AP_HASH=""; _SANDY_AP_WS=""; _SANDY_AP_AT=""
-    { while IFS= read -r _l || [ -n "$_l" ]; do
-        _n=$((_n + 1))
-        _sandy_is_ascii_print "$_l" || { _odd=1; break; }
-        [ "$_n" = 1 ] && _SANDY_AP_HASH="$_l"
-        case "$_l" in
-            '# workspace:'*) [ "$_hw" = 1 ] || { _hw=1; _w="$_l"; } ;;
-            '# approved:'*)  [ "$_ha" = 1 ] || { _ha=1; _a="$_l"; } ;;
+    if _sandy_slurp_v "$1"; then
+        _c="$_SANDY_SL"
+        case "$_c" in
+            *[!"$_SANDY_ASCII_PRINT"$'\n']*) ;;
+            *)  _SANDY_AP_HASH="${_c%%$'\n'*}"
+                if _sandy_first_line_v "$_c" '# workspace:'; then
+                    _c="${_SANDY_FL#\# workspace:}"; _SANDY_AP_WS="${_c#"${_c%%[! 	]*}"}"
+                fi
+                _c="$_SANDY_SL"
+                if _sandy_first_line_v "$_c" '# approved:'; then
+                    _c="${_SANDY_FL#\# approved:}"; _SANDY_AP_AT="${_c#"${_c%%[! 	]*}"}"
+                fi
+                return 0 ;;
         esac
-        [ "$_hw" = 1 ] && [ "$_ha" = 1 ] && break
-        _l=""
-      done; } 2>/dev/null < "$1" || true
-    if [ "$_odd" = 1 ]; then
-        _SANDY_AP_HASH="$(head -n1 "$1" 2>/dev/null || true)"
-        _SANDY_AP_WS="$(grep -m1 '^# workspace:' "$1" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
-        _SANDY_AP_AT="$(grep -m1 '^# approved:' "$1" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
-        return 0
     fi
-    if [ "$_hw" = 1 ]; then
-        _w="${_w#\# workspace:}"; _SANDY_AP_WS="${_w#"${_w%%[! 	]*}"}"
-    fi
-    if [ "$_ha" = 1 ]; then
-        _a="${_a#\# approved:}"; _SANDY_AP_AT="${_a#"${_a%%[! 	]*}"}"
-    fi
+    _SANDY_AP_HASH="$(head -n1 "$1" 2>/dev/null || true)"
+    _SANDY_AP_WS="$(grep -m1 '^# workspace:' "$1" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
+    _SANDY_AP_AT="$(grep -m1 '^# approved:' "$1" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
+    return 0
+}
+# The first line of text $1 that starts with $2, into _SANDY_FL (status 1
+# when there is none), by parameter expansion.
+_sandy_first_line_v() {
+    _SANDY_FL=""
+    case "$1" in
+        "$2"*)           _SANDY_FL="${1%%$'\n'*}" ;;
+        *$'\n'"$2"*)     _SANDY_FL="${1#*$'\n'"$2"}"; _SANDY_FL="$2${_SANDY_FL%%$'\n'*}" ;;
+        *)               return 1 ;;
+    esac
     return 0
 }
 
@@ -2727,6 +2782,21 @@ _sandy_ps_split7_v() {
     done
 }
 
+# --print-state `marker` (#386, decision 1): the ONE place a consumer learns why
+# a marker-derived field is null. Sets three globals (no subshell, no parsing
+# by the caller):
+#   _SANDY_PSM_STATE  absent | present | unreadable
+#   _SANDY_PSM_VER    JSON string or null -- that launch's own sandy version
+#   _SANDY_PSM_AT     JSON string or null -- that launch's launched_at (UTC)
+# The rule it supports, documented in SPEC_INTROSPECTION.md: a marker-derived
+# field that is null while state is "present" means the launch that wrote the
+# marker PREDATES the field. That holds only because a current sandy never
+# writes a marker-derived field as a deliberate null -- "not applicable" gets
+# its own non-null encoding (see cross_session_inbound.pinned). run-tests.sh
+# pins that invariant.
+# "present" requires the marker's own `"schema":` line, so a truncated or
+# foreign file reads "unreadable" (unknown), never "present" (which would turn
+# every field null into a false "predates" verdict).
 # Takes the lines from _sandy_ps_marker_read, which must have read the same
 # sandbox first.
 _sandy_ps_marker() {
