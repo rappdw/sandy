@@ -29654,7 +29654,7 @@ unset _S243_D _S243_RC _S243_B _S243_RB _S243_IMGS _S243_E _S243_P _S243_P2 _S24
 unset -f _s243_run _s243_on _s243_rebase
 
 # ============================================================
-section "§244: -v alone prints the version; -v with any other argument is verbose and does not (decision D4a)"
+section "§244: -v alone prints the version; -v with any other argument is verbose and does not (decision D4a); a live-session refusal prints a --stop hint that round-trips (Doc6)"
 # ============================================================
 # Before 2.9.0 the version fast-path matched "${1:-}" == "-v" whatever
 # followed, so `sandy -v <anything>` printed the version and exited where
@@ -29665,7 +29665,8 @@ section "§244: -v alone prints the version; -v with any other argument is verbo
 # stops at its Docker preflight (exit 1) before building or running anything.
 # The stub logs every call: a non-empty log proves the probe reached the
 # launcher (not a vacuous early exit), and no "run" line proves nothing ran.
-# Mutation: restore the old first-argument `-v` test and (2) fails.
+# Mutations: restore the old first-argument `-v` test and (2) fails; accept
+# -v while $# < 3 and (2b) fails; accept a trailing -v and (2c) fails.
 _S244_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _S244_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S244_D/home" "$_S244_D/bin" "$_S244_D/ws"
@@ -29695,15 +29696,44 @@ check "§244(pre) --print-version gave a full_version to compare against (so the
 _s244_run alone -v
 check "§244(1) sandy -v alone prints exactly 'sandy <full_version>' and exits 0" \
     bash -c '[ "$(cat "$1/alone.rc")" = 0 ] && [ "$(cat "$1/alone.out")" = "sandy $2" ] || { cat "$1/alone.rc" "$1/alone.out" "$1/alone.err"; exit 1; }' _ "$_S244_D" "$_S244_FULL"
+# One launcher probe, three argument shapes: -v first with two others, -v
+# first with one other, and -v last.
+_s244_not_version() {
+    bash -c '! grep -qxF "sandy $3" "$1/$2.out" && [ "$(cat "$1/$2.rc")" != 0 ] && [ -s "$1/$2.log" ] && ! grep -q "^docker run" "$1/$2.log" || { cat "$1/$2.rc" "$1/$2.out" "$1/$2.err" "$1/$2.log"; exit 1; }' _ "$_S244_D" "$1" "$_S244_FULL"
+}
 _s244_run withws -v --workspace "$_S244_D/ws"
 check "§244(2) sandy -v --workspace P does not print the version: it reaches the launcher (docker probed), stops at the Docker preflight, and runs nothing (mutation: the old first-argument -v test)" \
-    bash -c '! grep -qxF "sandy $2" "$1/withws.out" && [ "$(cat "$1/withws.rc")" != 0 ] && [ -s "$1/withws.log" ] && ! grep -q "^docker run" "$1/withws.log" || { cat "$1/withws.rc" "$1/withws.out" "$1/withws.err" "$1/withws.log"; exit 1; }' _ "$_S244_D" "$_S244_FULL"
+    _s244_not_version withws
+_s244_run twoargs -v --rebuild
+check "§244(2b) sandy -v --rebuild (two arguments) does not print the version either (mutation: accept -v while fewer than 3 arguments)" \
+    _s244_not_version twoargs
+_s244_run trailing --workspace "$_S244_D/ws" -v
+check "§244(2c) a trailing -v (sandy --workspace P -v) is verbose, not the version (mutation: test the last argument)" \
+    _s244_not_version trailing
 _s244_run longform --version --workspace "$_S244_D/ws"
 check "§244(3) --version still prints the version whatever follows it, and touches no docker" \
     bash -c '[ "$(cat "$1/longform.rc")" = 0 ] && [ "$(cat "$1/longform.out")" = "sandy $2" ] && [ ! -s "$1/longform.log" ] || { cat "$1/longform.rc" "$1/longform.out" "$1/longform.err"; exit 1; }' _ "$_S244_D" "$_S244_FULL"
-unset -f _s244_run
+# (4) The live-session refusal (here --reset-sandbox, with the workspace lock
+# held by this live shell) says how to end the session, and its
+# `sandy --stop --workspace` hint survives a shell round trip for a path with
+# a space and a backslash: echo -e (error()) would collapse the %q backslashes
+# and the pasted command would name another directory.
+# Mutation: print the hint with error instead of error_lit and (4b) fails.
+_S244_WS="$_S244_D/ws one\\back"
+mkdir -p "$_S244_WS"
+_S244_WS="$(cd "$_S244_WS" && pwd -P)"
+_S244_H="$(printf '%s' "$_S244_WS" | { shasum -a 256 2>/dev/null || sha256sum; })"
+_S244_N="wsoneback-${_S244_H:0:8}"
+mkdir -p "$_S244_D/home/.sandy/sandboxes/$_S244_N" "$_S244_D/home/.sandy/sandboxes/.$_S244_N.lock"
+echo "$$" > "$_S244_D/home/.sandy/sandboxes/.$_S244_N.lock/pid"
+_s244_run adv --reset-sandbox --workspace "$_S244_WS" --keep-history --yes
+check "§244(4a) --reset-sandbox under a held lock refuses (exit 1) and says to end the session, naming both the terminal and the daemon way" \
+    bash -c '[ "$(cat "$1/adv.rc")" = 1 ] && grep -q "holds this workspace" "$1/adv.err" && grep -q "End it first: exit it in its terminal, or for a daemon session run: sandy --stop --workspace " "$1/adv.err" || { cat "$1/adv.rc" "$1/adv.err"; exit 1; }' _ "$_S244_D"
+check "§244(4b) the hint, evaluated by a shell, is exactly: sandy --stop --workspace <the workspace path, space and backslash intact>" \
+    bash -c 'h="$(sed -n "s/.*for a daemon session run: //p" "$1/adv.err")"; [ -n "$h" ] && eval "set -- $h" && [ "$#" = 4 ] && [ "$1 $2 $3" = "sandy --stop --workspace" ] && [ "$4" = "$0" ] || { printf "hint: %s\n" "$h"; exit 1; }' "$_S244_WS" "$_S244_D"
+unset -f _s244_run _s244_not_version
 rm -rf "$_S244_D"
-unset _S244_SANDY _S244_D _S244_FULL
+unset _S244_SANDY _S244_D _S244_FULL _S244_WS _S244_H _S244_N
 
 # BEGIN SUMMARY
 # ============================================================

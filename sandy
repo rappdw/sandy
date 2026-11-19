@@ -400,6 +400,11 @@ fi
 info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
+# The same lines for text that carries a path or other outside data: printed
+# literally, never through echo -e, so a backslash in a workspace name is not
+# collapsed and a "\e[31m" in it is not turned into a terminal escape.
+error_lit() { printf '%b[sandy]%b %s\n' "$RED" "$NC" "$*" >&2; }
+warn_lit()  { printf '%b[sandy]%b %s\n' "$YELLOW" "$NC" "$*"; }
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 # #493: give the terminal back in a usable state after an interactive client
@@ -2190,7 +2195,7 @@ SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip the agents' in-session permi
 SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[A-Za-z0-9._-]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
-SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
+SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS=strict) these are the only hosts reachable beyond defaults; in permissive mode (SANDY_EGRESS=permissive) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
 SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). The name lists COMPOSE (2.4.0): the effective list is the union of the host lists, any approved workspace list, and an env-set list (env ADDS, it does not replace), deduplicated in that order. Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
 SANDY_AGENT_ARGS|string|||1.3.0|stable|Extra command-line arguments appended to the agent command (claude/codex/gemini/opencode) on EVERY launch — bare sandy, headless -p, the --start daemon, and sandy-ui alike. Whitespace-split into argv (no embedded-space/quoting support in v1) and forwarded through the same per-agent translation as command-line pass-through args, ordered AFTER sandy's own flags and BEFORE any command-line args. Privileged tier: free from host ~/.sandy/config, but from a workspace .sandy/config it triggers the per-workspace approval prompt (headless/non-TTY drops it). Never eval'd. Typical use: a fixed --mcp-config <path> or project feature flags. Applies to every selected agent (each pane in a multi-agent combo) unless overridden per agent by an operator file $SANDBOX_DIR/agent-args.<agent> (sandbox top level, agent-unwritable, privileged by location — no prompt); when both are present the sandbox file wins for that agent, values are never merged, and sandy prints a one-line notice.
 ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
@@ -5219,13 +5224,15 @@ _sandy_accounts() {
 # a terminal session -- and without --workspace it targets the current
 # directory, not the workspace the command was given. $1 is that workspace
 # path; empty or gone means sandy --stop cannot reach it at all (it resolves
-# the path first), so the advice says how to get there.
+# the path first), so the advice says how to get there. Paths go through %q so
+# the printed command round-trips when pasted into a shell; callers print the
+# result with error_lit/warn_lit, never error()/warn() (echo -e would undo %q).
 _sandy_live_session_advice() {
     local _w="${1:-}"
     if [ -n "$_w" ] && [ -d "$_w" ]; then
         printf 'End it first: exit it in its terminal, or for a daemon session run: sandy --stop --workspace %q' "$_w"
     elif [ -n "$_w" ]; then
-        printf "End it first: exit it in its terminal; for a daemon session, recreate its workspace directory (%s) and run 'sandy --stop --workspace' on it." "$_w"
+        printf 'End it first: exit it in its terminal; for a daemon session, recreate its workspace directory, then run: sandy --stop --workspace %q' "$_w"
     else
         printf "End it first: exit it in its terminal, or stop its daemon session with 'sandy --stop --workspace <its workspace>'."
     fi
@@ -5623,7 +5630,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         _rs_lockpid="$(cat "$SANDY_HOME/sandboxes/.${_rs_name}.lock/pid" 2>/dev/null || true)"
     if [ -n "$_rs_lockpid" ] && [ "$_rs_lockpid" -eq "$_rs_lockpid" ] 2>/dev/null && kill -0 "$_rs_lockpid" 2>/dev/null; then
         error "--reset-sandbox: a live sandy session (pid $_rs_lockpid) holds this workspace."
-        error "$(_sandy_live_session_advice "$_rs_wd")"
+        error_lit "$(_sandy_live_session_advice "$_rs_wd")"
         exit 1
     fi
 
@@ -6173,10 +6180,10 @@ if [[ "${1:-}" == "--rsync" ]]; then
     if [ -n "$_rsy_lockpid" ] && [ "$_rsy_lockpid" -eq "$_rsy_lockpid" ] 2>/dev/null && kill -0 "$_rsy_lockpid" 2>/dev/null; then
         _rsy_live="a live sandy session (pid $_rsy_lockpid) holds this workspace; copy after it ends. $(_sandy_live_session_advice "$_rsy_wd")"
     elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "sandy-${_rsy_name}"; then
-        _rsy_live="container sandy-${_rsy_name} is running. Stop it first (sandy --stop --workspace $_rsy_wd)."
+        _rsy_live="container sandy-${_rsy_name} is running. Stop it first: sandy --stop --workspace $(printf '%q' "$_rsy_wd")"
     fi
     if [ -n "$_rsy_live" ] && [ "$_rsy_dry" != true ]; then
-        error "--rsync: $_rsy_live"
+        error_lit "--rsync: $_rsy_live"
         exit 1
     fi
 
@@ -6406,7 +6413,7 @@ PROBE
     fi
 
     if [ "$_rsy_dry" = true ]; then
-        [ -n "$_rsy_live" ] && warn "A real run would REFUSE: $_rsy_live"
+        [ -n "$_rsy_live" ] && warn_lit "A real run would REFUSE: $_rsy_live"
         info "--dry-run: nothing copied."
         exit 0
     fi
@@ -6708,12 +6715,12 @@ DETAIL
     # prints the plan and says a real run would refuse.
     _rsf_live=""
     if [ -n "$_rsf_livepid" ]; then
-        _rsf_live="a live sandy session (pid $_rsf_livepid) holds that workspace on $_rsf_host. End it there first: exit it in its terminal, or for a daemon session run 'sandy --stop --workspace $_rsf_swd' on $_rsf_host."
+        _rsf_live="a live sandy session (pid $_rsf_livepid) holds that workspace on $_rsf_host. End it there first: exit it in its terminal, or on $_rsf_host for a daemon session run: sandy --stop --workspace $(printf '%q' "$_rsf_swd")"
     elif [ "$_rsf_livec" = yes ]; then
-        _rsf_live="container sandy-$_rsf_sname is running on $_rsf_host. Stop it there first (sandy --stop --workspace $_rsf_swd)."
+        _rsf_live="container sandy-$_rsf_sname is running on $_rsf_host. Stop it there first: sandy --stop --workspace $(printf '%q' "$_rsf_swd")"
     fi
     if [ -n "$_rsf_live" ] && [ "$_rsf_dry" != true ]; then
-        error "--rsync-from: $_rsf_live"
+        error_lit "--rsync-from: $_rsf_live"
         exit 1
     fi
     # A sandbox created by a newer sandy major than this one is the #248
@@ -6788,7 +6795,7 @@ DETAIL
     printf '  Size            %s\n\n' "$_rsf_size"
 
     if [ "$_rsf_dry" = true ]; then
-        [ -n "$_rsf_live" ] && warn "A real run would REFUSE: $_rsf_live"
+        [ -n "$_rsf_live" ] && warn_lit "A real run would REFUSE: $_rsf_live"
         info "--dry-run: nothing copied."
         exit 0
     fi
@@ -7137,7 +7144,7 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
                 _rms_skip+="$_rms_n"$'\t'"$_rms_wp"$'\n'
             else
                 error "--remove-sandbox: a live sandy session or container holds $_rms_n."
-                error "$(_sandy_live_session_advice "$_rms_wp")"
+                error_lit "$(_sandy_live_session_advice "$_rms_wp")"
                 exit 1
             fi
         else
@@ -8857,11 +8864,12 @@ that started it, so a closed tab/dropped SSH/IDE quit does not end it):
                      daemon session on the host; scope to one session with
                      --workspace PATH. Sub-options: --dry-run, --yes,
                      --idle-for <minutes>, --rebuild, --workspace PATH
-
-Docker cleanup (no config/mutex/build — needs only a reachable Docker daemon):
   --stop-all         Fleet emergency stop: enumerate every daemon session on the
                      host and stop each via the hardened per-session teardown.
-                     Sub-options: --dry-run, --yes
+                     Needs only a reachable Docker daemon (no config, mutex
+                     or build). Sub-options: --dry-run, --yes
+
+Docker cleanup (no config/mutex/build — needs only a reachable Docker daemon):
   --prune-orphans    Reap orphaned sandy_* networks (dead-owner, no attached
                      container) and exit
   --gc               One-shot global reclaim: dead-owner containers, orphaned
@@ -8930,7 +8938,8 @@ Sandbox maintenance (each entry says what it needs):
                      it. Sub-options: --fix, --yes
 
   --provision        Non-interactively create one workspace's sandbox by
-                     running the REAL launch path once: start a detached
+                     running the REAL launch path once (so it needs a
+                     reachable Docker daemon): start a detached
                      daemon session, confirm it is up, then stop it. NOT a
                      flag that fabricates sandbox state — the launch path
                      itself is what materializes pip/, the settings
