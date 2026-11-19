@@ -2458,19 +2458,72 @@ _sandy_key_meta_field() {
 
 # Escape a string for JSON: backslash, quote, newline, carriage return, tab,
 # plus wrapping double quotes. No external deps.
-_json_escape() {
+# _json_escape_v is the same escape into the global _SANDY_JE instead of
+# stdout, so a caller needs no $( ) fork per value: --print-state escapes a
+# few dozen values per sandbox, and on macOS each fork costs milliseconds.
+# _json_escape is defined through it, so the two cannot drift.
+_json_escape_v() {
     local s="$1"
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
     s="${s//$'\n'/\\n}"
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
-    printf '"%s"' "$s"
+    _SANDY_JE="\"$s\""
+}
+_json_escape() {
+    _json_escape_v "$1"
+    printf '%s' "$_SANDY_JE"
 }
 
 # Emit a `"key": <value>` pair (value already JSON-formatted — caller's job
 # to wrap strings via _json_escape and pass booleans/nulls literally).
 _json_kv() { printf '"%s":%s' "$1" "$2"; }
+# The same pair with a string value, escaped here (no fork).
+_json_kv_str() { _json_escape_v "$2"; printf '"%s":%s' "$1" "$_SANDY_JE"; }
+
+# What "$(cat FILE 2>/dev/null)" yields, into the global _SANDY_RF, without a
+# fork: the bytes with NULs dropped and every trailing newline removed; empty
+# when FILE is missing or unreadable. For the small files --print-state reads
+# per sandbox (version stamps, a lock's pid). Only text of printable ASCII,
+# tab, CR and newline is taken from bash's read: in a UTF-8 locale bash 5.2's
+# read swallows a delimiter that follows an invalid lead byte, so anything
+# else is read again with cat itself (it always keeps a byte >= 0x80).
+_sandy_read_file_v() {
+    local _c=""
+    _SANDY_RF=""
+    { while IFS= read -r -d '' _c; do _SANDY_RF="$_SANDY_RF$_c"; done
+      _SANDY_RF="$_SANDY_RF$_c"; } 2>/dev/null < "$1" || true
+    case "$_SANDY_RF" in
+        *[!"$_SANDY_ASCII_PRINT"$'\r\n']*)
+            { _SANDY_RF="$(cat "$1" 2>/dev/null || true)"; } 2>/dev/null; return 0 ;;
+    esac
+    while [ "${_SANDY_RF%$'\n'}" != "$_SANDY_RF" ]; do _SANDY_RF="${_SANDY_RF%$'\n'}"; done
+    return 0
+}
+
+# What `printf '%s' "$1" | LC_ALL=C tr -d '\000-\037'` yields, into the
+# global _SANDY_CS. The common value has no control byte at all and costs no
+# fork; one that may have (the [[:cntrl:]] test is a superset in every
+# locale) goes through the same tr, so the answer is tr's either way.
+_sandy_ctl_strip_v() {
+    case "$1" in
+        *[[:cntrl:]]*) _SANDY_CS="$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037')" ;;
+        *) _SANDY_CS="$1" ;;
+    esac
+}
+
+# True when $1 is printable ASCII and tabs only. Readers below emulate a
+# grep|sed pipeline in bash only for such a line, and run the pipeline itself
+# for anything else, where the tools' locale handling (GNU grep calls a line
+# with an encoding error binary data) is the answer to reproduce.
+_SANDY_ASCII_PRINT=' !"#$%&'"'"'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~	'
+_sandy_is_ascii_print() {
+    case "$1" in
+        *[!"$_SANDY_ASCII_PRINT"]*) return 1 ;;
+    esac
+    return 0
+}
 
 # executable_present for a manifest entry's container path (#344, generalized
 # for #381's feature_entries so every entry is checked the same way). A FACT,
@@ -2478,21 +2531,91 @@ _json_kv() { printf '"%s":%s' "$1" "$2"; }
 # feature payload tree, null when it cannot be answered at all -- which is the
 # honest value for a path resolved INSIDE the container against a host that
 # may have nothing corresponding to it.
-_sandy_entry_exe_present() {
+# _sandy_entry_exe_present_v sets the answer in _SANDY_EXE instead (no fork).
+_sandy_entry_exe_present_v() {
     local _p="$1" _rest _feat _sub
+    _SANDY_EXE='null'
     _rest="${_p#/opt/sandy/features/}"
     if [ "$_rest" = "$_p" ] || [ -z "$_rest" ]; then
-        printf 'null'; return 0
+        return 0
     fi
     _feat="${_rest%%/*}"; _sub="${_rest#*/}"
     if [ -z "$_feat" ] || [ "$_feat" = "$_rest" ]; then
-        printf 'null'; return 0
+        return 0
     fi
     if [ -f "$SANDY_HOME/features/$_feat/payload/$_sub" ]; then
-        printf 'true'
+        _SANDY_EXE='true'
     else
-        printf 'false'
+        _SANDY_EXE='false'
     fi
+}
+_sandy_entry_exe_present() {
+    _sandy_entry_exe_present_v "$1"
+    printf '%s' "$_SANDY_EXE"
+}
+
+# Read a sandbox's sandy-session.json ONCE for every marker-derived field
+# --print-state reports (it used to take a sed and a tail per field). One sed
+# pass applies each field's own expression to the ORIGINAL line (`h` keeps it,
+# `g` restores it before the next expression), tagging the output with one
+# letter, so every expression matches exactly what it matched as a separate
+# sed. Each global holds the LAST match (what `| tail -n 1` gave), "" if none:
+#   _SANDY_MK_SCHEMA 1 when a line matches ^  "schema":  (the grep -q gate)
+#   _SANDY_MK_VER _SANDY_MK_AT  sandy_version / launched_at (",$"-anchored)
+#   _SANDY_MK_FE     the feature_entries lines (P / E ...), in order, joined
+#                    by newlines; _SANDY_MK_FE_P 1 when one of them is P.
+#                    These three expressions run in sequence on one pattern
+#                    space, exactly as they did in their own sed: the tag F
+#                    cannot make a later one match, since each needs four
+#                    leading spaces.
+#   _SANDY_MK_AGENTS _SANDY_MK_IMAGE _SANDY_MK_AA _SANDY_MK_AAC _SANDY_MK_AW
+#   _SANDY_MK_CS _SANDY_MK_CSI _SANDY_MK_CSIS  the rest of the line after
+#                    each key (trailing comma NOT stripped; callers do that)
+# Reads only when the marker is a regular file (-f), as every reader did.
+_sandy_ps_marker_read() {
+    local _m="$1/sandy-session.json" _o="" _l
+    _SANDY_MK_SCHEMA=0; _SANDY_MK_VER=""; _SANDY_MK_AT=""; _SANDY_MK_FE=""; _SANDY_MK_FE_P=0
+    _SANDY_MK_AGENTS=""; _SANDY_MK_IMAGE=""; _SANDY_MK_AA=""; _SANDY_MK_AAC=""; _SANDY_MK_AW=""
+    _SANDY_MK_CS=""; _SANDY_MK_CSI=""; _SANDY_MK_CSIS=""
+    [ -f "$_m" ] || return 0
+    _o="$(sed -n -e h \
+        -e 's/^  "feature_entries": .*/FP/p' \
+        -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)"}.*/FE \1 \2 new/p' \
+        -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)", "relay_alias": \([a-z]*\), .*/FE \1 \2 \3/p' \
+        -e g -e 's/.*"agents": \(\[[^]]*\]\).*/G\1/p' \
+        -e g -e 's/^  "image": /I/p' \
+        -e g -e 's/^  "agent_args": /A/p' \
+        -e g -e 's/^  "agent_args_composed": /B/p' \
+        -e g -e 's/^  "agent_wrappers": /W/p' \
+        -e g -e 's/^  "claude_sessions": /L/p' \
+        -e g -e 's/^  "schema": /H/p' \
+        -e g -e 's/^  "sandy_version": "\([^"]*\)",$/V\1/p' \
+        -e g -e 's/^  "launched_at": "\([^"]*\)",$/T\1/p' \
+        -e g -e 's/^  "cross_session_inbound": /X/p' \
+        -e g -e 's/^  "cross_session_inbound_source": /Y/p' \
+        "$_m" 2>/dev/null || true)"
+    while IFS= read -r _l; do
+        case "$_l" in
+            F*) _l="${_l#F}"
+                [ "$_l" = "P" ] && _SANDY_MK_FE_P=1
+                _SANDY_MK_FE="${_SANDY_MK_FE:+$_SANDY_MK_FE
+}$_l" ;;
+            G*) _SANDY_MK_AGENTS="${_l#G}" ;;
+            I*) _SANDY_MK_IMAGE="${_l#I}" ;;
+            A*) _SANDY_MK_AA="${_l#A}" ;;
+            B*) _SANDY_MK_AAC="${_l#B}" ;;
+            W*) _SANDY_MK_AW="${_l#W}" ;;
+            L*) _SANDY_MK_CS="${_l#L}" ;;
+            H*) _SANDY_MK_SCHEMA=1 ;;
+            V*) _SANDY_MK_VER="${_l#V}" ;;
+            T*) _SANDY_MK_AT="${_l#T}" ;;
+            X*) _SANDY_MK_CSI="${_l#X}" ;;
+            Y*) _SANDY_MK_CSIS="${_l#Y}" ;;
+        esac
+    done <<EOF_SANDY_MK
+$_o
+EOF_SANDY_MK
+    return 0
 }
 
 # --print-state `marker` (#386, decision 1): the ONE place a consumer learns why
@@ -2510,18 +2633,112 @@ _sandy_entry_exe_present() {
 # "present" requires the marker's own `"schema":` line, so a truncated or
 # foreign file reads "unreadable" (unknown), never "present" (which would turn
 # every field null into a false "predates" verdict).
+# workspace_path from a WORKSPACE.json, into _SANDY_WSP: what
+#   grep -m1 '"workspace_path"' F | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//'
+# prints, without the two forks. The first line holding the key is found in
+# bash; for a line of printable ASCII the two substitutions are done in bash
+# (the first is greedy, so it ends after the LAST occurrence of the key that
+# is followed by optional blanks, a colon, optional blanks and a quote, and
+# leaves the line alone when there is none). When that line, or one before
+# it, is anything else, the pipeline itself runs, so locale and encoding
+# handling stay grep's and sed's.
+_sandy_ps_ws_path() {
+    local _l="" _found=0 _pre _post _t _ok=0 _odd=0
+    _SANDY_WSP=""
+    { while IFS= read -r _l || [ -n "$_l" ]; do
+        _sandy_is_ascii_print "$_l" || _odd=1
+        case "$_l" in *'"workspace_path"'*) _found=1; break ;; esac
+        _l=""
+      done; } 2>/dev/null < "$1" || true
+    [ "$_found" = 1 ] || return 0
+    # _odd: a line so far was not printable ASCII. In a UTF-8 locale bash's
+    # read can then join two lines (it swallows a newline after an invalid
+    # lead byte), so the line found may not be grep's.
+    if [ "$_odd" = 1 ]; then
+        _SANDY_WSP="$(grep -m1 '"workspace_path"' "$1" 2>/dev/null \
+                      | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
+        return 0
+    fi
+    _pre="$_l"
+    while :; do
+        case "$_pre" in *'"workspace_path"'*) ;; *) break ;; esac
+        _pre="${_pre%\"workspace_path\"*}"
+        _post="${_l:$((${#_pre} + 16))}"
+        _t="${_post#"${_post%%[! 	]*}"}"
+        case "$_t" in
+            :*) _t="${_t#:}"; _t="${_t#"${_t%%[! 	]*}"}"
+                case "$_t" in \"*) _l="${_t#\"}"; _ok=1 ;; esac ;;
+        esac
+        [ "$_ok" = 1 ] && break
+    done
+    _SANDY_WSP="${_l%%\"*}"
+    return 0
+}
+
+# One approvals list, into _SANDY_AP_HASH (its first line, as `head -n1`),
+# _SANDY_AP_WS and _SANDY_AP_AT: what
+#   grep -m1 '^# workspace:' F | sed 's/^# workspace:[[:space:]]*//'
+# (and the same for `# approved:`) print, read in one pass with no fork. When
+# a line read is not printable ASCII, the three commands themselves run, for
+# the reason _sandy_ps_ws_path gives.
+_sandy_ps_approval_v() {
+    local _l="" _n=0 _w="" _a="" _hw=0 _ha=0 _odd=0
+    _SANDY_AP_HASH=""; _SANDY_AP_WS=""; _SANDY_AP_AT=""
+    { while IFS= read -r _l || [ -n "$_l" ]; do
+        _n=$((_n + 1))
+        _sandy_is_ascii_print "$_l" || { _odd=1; break; }
+        [ "$_n" = 1 ] && _SANDY_AP_HASH="$_l"
+        case "$_l" in
+            '# workspace:'*) [ "$_hw" = 1 ] || { _hw=1; _w="$_l"; } ;;
+            '# approved:'*)  [ "$_ha" = 1 ] || { _ha=1; _a="$_l"; } ;;
+        esac
+        [ "$_hw" = 1 ] && [ "$_ha" = 1 ] && break
+        _l=""
+      done; } 2>/dev/null < "$1" || true
+    if [ "$_odd" = 1 ]; then
+        _SANDY_AP_HASH="$(head -n1 "$1" 2>/dev/null || true)"
+        _SANDY_AP_WS="$(grep -m1 '^# workspace:' "$1" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
+        _SANDY_AP_AT="$(grep -m1 '^# approved:' "$1" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
+        return 0
+    fi
+    if [ "$_hw" = 1 ]; then
+        _w="${_w#\# workspace:}"; _SANDY_AP_WS="${_w#"${_w%%[! 	]*}"}"
+    fi
+    if [ "$_ha" = 1 ]; then
+        _a="${_a#\# approved:}"; _SANDY_AP_AT="${_a#"${_a%%[! 	]*}"}"
+    fi
+    return 0
+}
+
+# One `docker ps` line split on "|" into _SANDY_F1.._SANDY_F7, as
+# `echo LINE | awk -F'|' '{print $N}'` gave each (missing fields empty, an
+# 8th and later field dropped), with no fork per field.
+_sandy_ps_split7_v() {
+    local _r="$1" _f _i _more=1
+    for _i in 1 2 3 4 5 6 7; do
+        _f=""
+        if [ "$_more" = 1 ]; then
+            case "$_r" in
+                *'|'*) _f="${_r%%|*}"; _r="${_r#*|}" ;;
+                *)     _f="$_r"; _more=0 ;;
+            esac
+        fi
+        printf -v "_SANDY_F$_i" '%s' "$_f"
+    done
+}
+
+# Takes the lines from _sandy_ps_marker_read, which must have read the same
+# sandbox first.
 _sandy_ps_marker() {
-    local _m="$1/sandy-session.json" _v
+    local _m="$1/sandy-session.json"
     _SANDY_PSM_STATE="absent"; _SANDY_PSM_VER="null"; _SANDY_PSM_AT="null"
     [ -e "$_m" ] || [ -L "$_m" ] || return 0
-    if [ ! -f "$_m" ] || [ ! -r "$_m" ] || ! grep -q '^  "schema": ' "$_m" 2>/dev/null; then
+    if [ ! -f "$_m" ] || [ ! -r "$_m" ] || [ "$_SANDY_MK_SCHEMA" != 1 ]; then
         _SANDY_PSM_STATE="unreadable"; return 0
     fi
     _SANDY_PSM_STATE="present"
-    _v="$(sed -n 's/^  "sandy_version": "\([^"]*\)",$/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
-    [ -n "$_v" ] && _SANDY_PSM_VER="$(_json_escape "$_v")"
-    _v="$(sed -n 's/^  "launched_at": "\([^"]*\)",$/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
-    [ -n "$_v" ] && _SANDY_PSM_AT="$(_json_escape "$_v")"
+    if [ -n "$_SANDY_MK_VER" ]; then _json_escape_v "$_SANDY_MK_VER"; _SANDY_PSM_VER="$_SANDY_JE"; fi
+    if [ -n "$_SANDY_MK_AT" ]; then _json_escape_v "$_SANDY_MK_AT"; _SANDY_PSM_AT="$_SANDY_JE"; fi
     return 0
 }
 
@@ -3035,7 +3252,7 @@ _sandy_emit_container_daemon_fields() {
         _ac="null"
     fi
 
-    printf ','; _json_kv sandbox "$(_json_escape "$_sandbox")"
+    printf ','; _json_kv_str sandbox "$_sandbox"
     printf ','; printf '"daemon":%s' "$_isdaemon"
     printf ','; printf '"attached_clients":%s' "$_ac"
     # updated_at (#44): the sandy.updated_at label, stamped by --update-sessions
@@ -3045,7 +3262,7 @@ _sandy_emit_container_daemon_fields() {
     # consumer (sandy-ui reconnect) tell "restarted for updates" from a session
     # the user stopped/started themselves.
     if [ -n "$_cupdated" ]; then
-        printf ','; _json_kv updated_at "$(_json_escape "$_cupdated")"
+        printf ','; _json_kv_str updated_at "$_cupdated"
     else
         printf ',"updated_at":null'
     fi
@@ -3074,6 +3291,9 @@ _sandy_emit_container_daemon_fields() {
 # Always returns 0.
 _sandy_lock_state() {
     _SANDY_LOCK_STATE="unknown"
+    # Read with cat, not _sandy_read_file_v: run-tests.sh §179 times its
+    # --doctor --fix race on this exact read, and it is one spawn only for
+    # a sandbox whose lock dir exists.
     _SANDY_LOCK_PID="$(cat "$1/pid" 2>/dev/null || true)"
     if [ -n "$_SANDY_LOCK_PID" ] && [ "$_SANDY_LOCK_PID" -eq "$_SANDY_LOCK_PID" ] 2>/dev/null; then
         if kill -0 "$_SANDY_LOCK_PID" 2>/dev/null; then
@@ -3819,20 +4039,69 @@ _sandy_emit_state() {
     # so created_at/last_used_at were off by the host's UTC offset while
     # claiming to be UTC. Whole seconds on both, too: GNU %y carries
     # nanoseconds that BSD never had, so the same field had two shapes.
-    local _stat_mtime_iso
+    local _stat_mtime_iso _stat_flavor=none
     if stat -c '%y' / >/dev/null 2>&1; then
         # GNU stat: %y is "2006-01-02 15:04:05.000000000 +0000" under TZ=UTC;
         # keep date and whole-second time, append Z.
+        _stat_flavor=gnu
         _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -c '%y' "$1" 2>/dev/null | awk '{split($2,t,"."); print $1"T"t[1]"Z"}' || true; }
     elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
+        _stat_flavor=bsd
         _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     else
         _stat_mtime_iso() { return 0; }
     fi
+    # _stat_mtime_iso for TWO files with one stat and no awk, into
+    # _SANDY_MT1/_SANDY_MT2 (one per sandbox: its two version stamps). stat
+    # prints one line per file it could stat, in argument order; any other
+    # count (a file vanished between the -e test and the stat) takes the
+    # one-file helper for both, so the answer is always that helper's.
+    _stat_line_iso() {   # one stat line -> _SANDY_MTL, as the helper prints it
+        local _d _t
+        if [ -z "$1" ]; then _SANDY_MTL=""; return 0; fi
+        if [ "$_stat_flavor" = gnu ]; then
+            # awk: $1 "T" (the part of $2 before the first ".") "Z"
+            _d="${1%% *}"; _t=""
+            [ "$_d" != "$1" ] && { _t="${1#* }"; _t="${_t%% *}"; }
+            _SANDY_MTL="${_d}T${_t%%.*}Z"
+        else
+            _SANDY_MTL="$1"
+        fi
+    }
+    _stat_mtime_iso2() {
+        local _o _l1 _l2 _n=0
+        _SANDY_MT1=""; _SANDY_MT2=""
+        [ "$_stat_flavor" != none ] || return 0
+        [ -e "$1" ] && _n=$((_n + 1))
+        [ -e "$2" ] && _n=$((_n + 2))
+        case "$_n" in
+            0) return 0 ;;
+            1) set -- "$1" ;;
+            2) set -- "$2" ;;
+        esac
+        if [ "$_stat_flavor" = gnu ]; then
+            _o="$(TZ=UTC stat -c '%y' "$@" 2>/dev/null || true)"
+        else
+            _o="$(TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$@" 2>/dev/null || true)"
+        fi
+        if [ "$_n" = 3 ]; then
+            _l1="${_o%%$'\n'*}"; _l2="${_o#*$'\n'}"
+            if [ "$_l1" = "$_o" ] || [ "$_l2" != "${_l2%%$'\n'*}" ]; then
+                _SANDY_MT1="$(_stat_mtime_iso "$1")"; _SANDY_MT2="$(_stat_mtime_iso "$2")"
+                return 0
+            fi
+            _stat_line_iso "$_l1"; _SANDY_MT1="$_SANDY_MTL"
+            _stat_line_iso "$_l2"; _SANDY_MT2="$_SANDY_MTL"
+            return 0
+        fi
+        case "$_o" in *$'\n'*) _o="$(_stat_mtime_iso "$1")"; _SANDY_MTL="$_o" ;; *) _stat_line_iso "$_o" ;; esac
+        if [ "$_n" = 1 ]; then _SANDY_MT1="$_SANDY_MTL"; else _SANDY_MT2="$_SANDY_MTL"; fi
+        return 0
+    }
 
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
-    printf ','; _json_kv sandy_home "$(_json_escape "$SANDY_HOME")"
+    printf ','; _json_kv_str sandy_home "$SANDY_HOME"
 
     # host_id / host_id_source (#179): advisory host identity for multi-host
     # fleet aggregation. Sandbox names are basename-<hash-of-workspace-path>,
@@ -3867,13 +4136,13 @@ _sandy_emit_state() {
     fi
     printf ','
     if [ -n "$_host_id" ]; then
-        _json_kv host_id "$(_json_escape "$_host_id")"
+        _json_kv_str host_id "$_host_id"
     else
         _json_kv host_id 'null'
     fi
     printf ','
     if [ -n "$_host_id_source" ]; then
-        _json_kv host_id_source "$(_json_escape "$_host_id_source")"
+        _json_kv_str host_id_source "$_host_id_source"
     else
         _json_kv host_id_source 'null'
     fi
@@ -3903,9 +4172,9 @@ _sandy_emit_state() {
             [ $first -eq 0 ] && printf ','
             first=0
             printf '{'
-            _json_kv name    "$(_json_escape "$img")"
-            printf ','; _json_kv id      "$(_json_escape "$img_id")"
-            printf ','; _json_kv created "$(_json_escape "$img_created")"
+            _json_kv_str name    "$img"
+            printf ','; _json_kv_str id      "$img_id"
+            printf ','; _json_kv_str created "$img_created"
             printf '}'
         done
     fi
@@ -3921,18 +4190,21 @@ _sandy_emit_state() {
             sb="${sb%/}"
             local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_lock_state sb_ws_path
             local sb_aa sb_aa_agent
-            sb_name="$(basename "$sb")"
-            sb_created_ver="$(cat "$sb/.sandy_created_version" 2>/dev/null || true)"
-            sb_last_ver="$(cat "$sb/.sandy_last_version" 2>/dev/null || true)"
+            # Per-sandbox cost is what a poller pays (B7): every value below
+            # is read without a fork where bash can produce the identical
+            # bytes, and the marker is read by ONE sed for all its fields.
+            sb_name="${sb##*/}"
+            _sandy_read_file_v "$sb/.sandy_created_version"; sb_created_ver="$_SANDY_RF"
+            _sandy_read_file_v "$sb/.sandy_last_version"; sb_last_ver="$_SANDY_RF"
             # workspace_path: read the WORKSPACE.json marker sandy writes into
             # every sandbox on launch (same lightweight parse the sibling-scan
             # uses). Empty string for a legacy sandbox with no marker. Fulfills
             # the SPEC_INTROSPECTION contract that each sandbox carries a stable
             # workspace_path (consumers like sandy-ui key their tree on it).
-            sb_ws_path="$(grep -m1 '"workspace_path"' "$sb/WORKSPACE.json" 2>/dev/null \
-                          | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
-            sb_created_at="$(_stat_mtime_iso "$sb/.sandy_created_version")"
-            sb_last_at="$(_stat_mtime_iso "$sb/.sandy_last_version")"
+            _sandy_ps_ws_path "$sb/WORKSPACE.json"; sb_ws_path="$_SANDY_WSP"
+            _stat_mtime_iso2 "$sb/.sandy_created_version" "$sb/.sandy_last_version"
+            sb_created_at="$_SANDY_MT1"; sb_last_at="$_SANDY_MT2"
+            _sandy_ps_marker_read "$sb"
             sb_lock_dir="$SANDY_HOME/sandboxes/.${sb_name}.lock"
             sb_lock_pid=""
             sb_lock_state="unknown"
@@ -3945,8 +4217,8 @@ _sandy_emit_state() {
             [ $first -eq 0 ] && printf ','
             first=0
             printf '{'
-            _json_kv name "$(_json_escape "$sb_name")"
-            printf ','; _json_kv path "$(_json_escape "$sb")"
+            _json_kv_str name "$sb_name"
+            printf ','; _json_kv_str path "$sb"
             # null, not "", when WORKSPACE.json is absent or unreadable. Empty
             # string is a VALUE; null is the absence of one, and every other
             # unknown in this document (agents, effort, lock_holder_alive) is
@@ -3954,7 +4226,7 @@ _sandy_emit_state() {
             # distinguish "no marker" from "the field is not emitted at all" --
             # which is exactly the conclusion one consumer drew.
             if [ -n "$sb_ws_path" ]; then
-                printf ','; _json_kv workspace_path "$(_json_escape "$sb_ws_path")"
+                printf ','; _json_kv_str workspace_path "$sb_ws_path"
             else
                 printf ','; _json_kv workspace_path null
             fi
@@ -3977,10 +4249,10 @@ _sandy_emit_state() {
             else
                 printf ','; _json_kv workspace_exists 'null'
             fi
-            printf ','; _json_kv created_version   "$(_json_escape "$sb_created_ver")"
-            printf ','; _json_kv last_used_version "$(_json_escape "$sb_last_ver")"
-            printf ','; _json_kv created_at        "$(_json_escape "$sb_created_at")"
-            printf ','; _json_kv last_used_at      "$(_json_escape "$sb_last_at")"
+            printf ','; _json_kv_str created_version   "$sb_created_ver"
+            printf ','; _json_kv_str last_used_version "$sb_last_ver"
+            printf ','; _json_kv_str created_at        "$sb_created_at"
+            printf ','; _json_kv_str last_used_at      "$sb_last_at"
             # size_bytes (#176): integer bytes of allocated disk for this sandbox,
             # FULL MODE WITH --sizes ONLY (B7b: opt-in since 2.9.0; without it
             # full mode emits null exactly as light does) — a du walk over
@@ -4043,14 +4315,9 @@ _sandy_emit_state() {
             # shape it matches, never to a neighbouring field (§88b).
             local sb_fe_raw='' sb_fe_obj='' sb_fe_tag sb_fe_f sb_fe_p sb_fe_shape
             local sb_fe_dir sb_fe_state sb_fe_restarts sb_fe_rc sb_fe_at sb_fe_k sb_fe_v sb_fe_exe sb_fe_entry
-            if [ -f "$sb/sandy-session.json" ]; then
-                sb_fe_raw="$(sed -n \
-                    -e 's/^  "feature_entries": .*/P/p' \
-                    -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)"}.*/E \1 \2 new/p' \
-                    -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)", "relay_alias": \([a-z]*\), .*/E \1 \2 \3/p' \
-                    "$sb/sandy-session.json" 2>/dev/null || true)"
-            fi
-            if ! printf '%s\n' "$sb_fe_raw" | grep -q '^P$'; then
+            # The expressions now run inside _sandy_ps_marker_read's one sed.
+            sb_fe_raw="$_SANDY_MK_FE"
+            if [ "$_SANDY_MK_FE_P" != 1 ]; then
                 printf ','; _json_kv feature_entries 'null'
             else
                 while IFS=' ' read -r sb_fe_tag sb_fe_f sb_fe_p sb_fe_shape; do
@@ -4079,8 +4346,9 @@ _sandy_emit_state() {
                             esac
                         done < "$sb_fe_dir/.state" 2>/dev/null
                     fi
-                    sb_fe_exe="$(_sandy_entry_exe_present "$sb_fe_p")"
-                    sb_fe_entry="{\"state\":$sb_fe_state,\"restarts\":$sb_fe_restarts,\"last_exit_code\":$sb_fe_rc,\"last_restart_at\":$sb_fe_at,\"executable_present\":$sb_fe_exe,\"path\":\"$sb_fe_p\",\"state_dir\":$(_json_escape "$sb_fe_dir")}"
+                    _sandy_entry_exe_present_v "$sb_fe_p"; sb_fe_exe="$_SANDY_EXE"
+                    _json_escape_v "$sb_fe_dir"
+                    sb_fe_entry="{\"state\":$sb_fe_state,\"restarts\":$sb_fe_restarts,\"last_exit_code\":$sb_fe_rc,\"last_restart_at\":$sb_fe_at,\"executable_present\":$sb_fe_exe,\"path\":\"$sb_fe_p\",\"state_dir\":$_SANDY_JE}"
                     sb_fe_obj="${sb_fe_obj:+$sb_fe_obj,}\"$sb_fe_f\":$sb_fe_entry"
                 done <<EOF_FEATURE_ENTRIES
 $sb_fe_raw
@@ -4109,10 +4377,8 @@ EOF_FEATURE_ENTRIES
             # per-agent component could never work there, and nothing readable
             # said so.
             sb_agents='null'
-            if [ -f "$sb/sandy-session.json" ]; then
-                sb_ag_line="$(sed -n 's/.*"agents": \(\[[^]]*\]\).*/\1/p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
-                [ -n "$sb_ag_line" ] && sb_agents="$sb_ag_line"
-            fi
+            sb_ag_line="$_SANDY_MK_AGENTS"
+            [ -n "$sb_ag_line" ] && sb_agents="$sb_ag_line"
             printf ','; _json_kv agents "$sb_agents"
             # image (#295): which image the LAST launch ran, read back from the
             # marker -- {name, id, project_layer}. Same caveats as agents: last
@@ -4126,7 +4392,7 @@ EOF_FEATURE_ENTRIES
             local sb_image='null' sb_im_line sb_im_re
             sb_im_re='^[{]"name": "[A-Za-z0-9._/:@-]*", "id": ("sha256:[0-9a-f]+"|null), "project_layer": (true|false)[}]$'
             if [ -f "$sb/sandy-session.json" ]; then
-                sb_im_line="$(sed -n 's/^  "image": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_im_line="$_SANDY_MK_IMAGE"
                 sb_im_line="${sb_im_line%,}"
                 [[ "$sb_im_line" =~ $sb_im_re ]] && sb_image="$sb_im_line"
             fi
@@ -4190,9 +4456,9 @@ EOF_FEATURE_ENTRIES
                     IFS= read -r sb_fl < "$sb_fd/.selected/$sb_name" || sb_fl=""
                     sb_fw="${sb_fl%%	*}"
                     if [ -z "$sb_fw" ]; then
-                        sb_feat="$sb_feat${sb_feat:+,}$(_json_escape "$sb_fn")"
+                        _json_escape_v "$sb_fn"; sb_feat="$sb_feat${sb_feat:+,}$_SANDY_JE"
                     else
-                        sb_featp="$sb_featp${sb_featp:+,}$(_json_escape "$sb_fn: $sb_fw")"
+                        _json_escape_v "$sb_fn: $sb_fw"; sb_featp="$sb_featp${sb_featp:+,}$_SANDY_JE"
                     fi
                 done
             fi
@@ -4215,7 +4481,7 @@ EOF_FEATURE_ENTRIES
             # which field happens to sit next to it (§88b).
             sb_fargs='null'
             if [ -f "$sb/sandy-session.json" ]; then
-                sb_fa_line="$(sed -n 's/^  "agent_args": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_fa_line="$_SANDY_MK_AA"
                 sb_fa_line="${sb_fa_line%,}"
                 [ -n "$sb_fa_line" ] && sb_fargs="$sb_fa_line"
             fi
@@ -4236,7 +4502,7 @@ EOF_FEATURE_ENTRIES
             # since that pattern requires the closing quote and colon (§88b).
             sb_facomp='null'
             if [ -f "$sb/sandy-session.json" ]; then
-                sb_fc_line="$(sed -n 's/^  "agent_args_composed": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_fc_line="$_SANDY_MK_AAC"
                 sb_fc_line="${sb_fc_line%,}"
                 [ -n "$sb_fc_line" ] && sb_facomp="$sb_fc_line"
             fi
@@ -4247,7 +4513,7 @@ EOF_FEATURE_ENTRIES
             # {} = looked, nothing wrapped.
             sb_faw='null'
             if [ -f "$sb/sandy-session.json" ]; then
-                sb_faw_line="$(sed -n 's/^  "agent_wrappers": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_faw_line="$_SANDY_MK_AW"
                 sb_faw_line="${sb_faw_line%,}"
                 [ -n "$sb_faw_line" ] && sb_faw="$sb_faw_line"
             fi
@@ -4261,20 +4527,30 @@ EOF_FEATURE_ENTRIES
             # stripped of control bytes here: it is a report, not a trust root.
             sb_cs='null'
             if [ -f "$sb/sandy-session.json" ]; then
-                sb_cs_decl="$(sed -n 's/^  "claude_sessions": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_cs_decl="$_SANDY_MK_CS"
                 sb_cs_decl="${sb_cs_decl%,}"
                 if [ -n "$sb_cs_decl" ]; then
                     sb_cs_st='null'
                     sb_cs_f="$sb/claude/.sandy-sessions.tsv"
                     if [ -f "$sb_cs_f" ] && [ ! -L "$sb_cs_f" ]; then
                         sb_cs_items=""; sb_cs_lid='null'
-                        while IFS=$'\t' read -r sb_c1 sb_c2 sb_c3 sb_c4 sb_c5 sb_c6 sb_c7; do
+                        # The first 64 lines (was `head -n 64`), read in this
+                        # shell; each value stripped of control bytes and
+                        # escaped without a fork (_sandy_ctl_strip_v).
+                        local sb_cs_n=0 sb_cs_k sb_cs_o
+                        { while [ "$sb_cs_n" -lt 64 ] && IFS=$'\t' read -r sb_c1 sb_c2 sb_c3 sb_c4 sb_c5 sb_c6 sb_c7; do
+                            sb_cs_n=$((sb_cs_n + 1))
                             if [ "$sb_c1" = launch ]; then
-                                sb_cs_lid="$(_json_escape "$(printf '%s' "$sb_c2" | LC_ALL=C tr -d '\000-\037')")"; continue
+                                _sandy_ctl_strip_v "$sb_c2"; _json_escape_v "$_SANDY_CS"; sb_cs_lid="$_SANDY_JE"; continue
                             fi
                             [ -n "$sb_c1" ] || continue
-                            sb_cs_items="${sb_cs_items:+$sb_cs_items,}{\"slug\":$(_json_escape "$(printf '%s' "$sb_c1" | LC_ALL=C tr -d '\000-\037')"),\"state\":$(_json_escape "$(printf '%s' "$sb_c2" | LC_ALL=C tr -d '\000-\037')"),\"session_id\":$(_json_escape "$(printf '%s' "$sb_c3" | LC_ALL=C tr -d '\000-\037')"),\"name\":$(_json_escape "$(printf '%s' "$sb_c4" | LC_ALL=C tr -d '\000-\037')"),\"inbound_pinned\":$(_json_escape "$(printf '%s' "$sb_c5" | LC_ALL=C tr -d '\000-\037')"),\"drift\":$(_json_escape "$(printf '%s' "$sb_c6" | LC_ALL=C tr -d '\000-\037')"),\"reason\":$(_json_escape "$(printf '%s' "$sb_c7" | LC_ALL=C tr -d '\000-\037')")}"
-                        done < <(head -n 64 "$sb_cs_f" 2>/dev/null || true)
+                            sb_cs_o=""
+                            for sb_cs_k in slug:"$sb_c1" state:"$sb_c2" session_id:"$sb_c3" name:"$sb_c4" inbound_pinned:"$sb_c5" drift:"$sb_c6" reason:"$sb_c7"; do
+                                _sandy_ctl_strip_v "${sb_cs_k#*:}"; _json_escape_v "$_SANDY_CS"
+                                sb_cs_o="${sb_cs_o:+$sb_cs_o,}\"${sb_cs_k%%:*}\":$_SANDY_JE"
+                            done
+                            sb_cs_items="${sb_cs_items:+$sb_cs_items,}{$sb_cs_o}"
+                        done; } 2>/dev/null < "$sb_cs_f" || true
                         sb_cs_st="{\"launch_id\":$sb_cs_lid,\"sessions\":[$sb_cs_items]}"
                     fi
                     sb_cs="{\"declared\":$sb_cs_decl,\"status\":$sb_cs_st}"
@@ -4282,8 +4558,8 @@ EOF_FEATURE_ENTRIES
             fi
             printf ','; _json_kv claude_sessions "$sb_cs"
             # marker (#386, decision 1): why any marker-derived field above or
-            # below is null. See _sandy_ps_marker. Both modes (two seds, no
-            # parser).
+            # below is null. See _sandy_ps_marker. Both modes (no parser: the
+            # lines come from _sandy_ps_marker_read above).
             _sandy_ps_marker "$sb"
             printf ','; _json_kv marker "{\"state\":\"$_SANDY_PSM_STATE\",\"sandy_version\":$_SANDY_PSM_VER,\"launched_at\":$_SANDY_PSM_AT}"
             # cross_session_inbound (#386, decision 2). pinned is what the LAST
@@ -4299,9 +4575,9 @@ EOF_FEATURE_ENTRIES
             # files are not all of its inputs.
             local sb_csi_pin='null' sb_csi_v sb_csi_s sb_csi_src_in sb_csi_user sb_csi_ws
             if [ "$_SANDY_PSM_STATE" = "present" ]; then
-                sb_csi_v="$(sed -n 's/^  "cross_session_inbound": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_csi_v="$_SANDY_MK_CSI"
                 sb_csi_v="${sb_csi_v%,}"
-                sb_csi_s="$(sed -n 's/^  "cross_session_inbound_source": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_csi_s="$_SANDY_MK_CSIS"
                 sb_csi_s="${sb_csi_s%,}"
                 # source is sandy's own token (explicit|feature:<name>|default,
                 # or a 2.4-2.5 relay-legacy). Anything else -- including JSON
@@ -4319,10 +4595,12 @@ EOF_FEATURE_ENTRIES
                 elif [ "$sb_csi_v" = "null" ]; then
                     if [ "$sb_agents" = "null" ]; then
                         sb_csi_pin='{"value":null,"source":null,"status":"unknown"}'
-                    elif printf '%s' "$sb_agents" | grep -q '"claude"'; then
-                        sb_csi_pin='{"value":null,"source":null,"status":"not_written"}'
                     else
-                        sb_csi_pin='{"value":null,"source":null,"status":"not_claude"}'
+                        # sb_agents is one line, so this is the old grep -q.
+                        case "$sb_agents" in
+                            *'"claude"'*) sb_csi_pin='{"value":null,"source":null,"status":"not_written"}' ;;
+                            *)            sb_csi_pin='{"value":null,"source":null,"status":"not_claude"}' ;;
+                        esac
                     fi
                 else
                     case "$sb_csi_v" in
@@ -4348,7 +4626,7 @@ EOF_FEATURE_ENTRIES
             printf ','; _json_kv cross_session_inbound "{\"pinned\":$sb_csi_pin,\"user_settings\":$sb_csi_user,\"workspace_settings\":$sb_csi_ws}"
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
-                printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
+                printf ','; _json_kv_str lock_holder_pid "$sb_lock_pid"
                 # lock_holder_alive: distinguishes "real lock" from "stale
                 # lock waiting to be cleared on next launch". true/false when
                 # we have a numeric PID; null when the file is missing or
@@ -4381,23 +4659,19 @@ EOF_FEATURE_ENTRIES
         for app in "$SANDY_HOME/approvals"/passive-*.list; do
             [ -f "$app" ] || continue
             local app_hash app_workspace app_time app_wd_hash
-            app_hash="$(head -n1 "$app" 2>/dev/null || true)"
-            # grep | sed under `set -eo pipefail`: a non-matching grep exits 1, pipefail
-            # propagates, and the command substitution fails. `|| true` inside the subshell
-            # absorbs that without masking real errors in the caller.
-            app_workspace="$(grep -m1 '^# workspace:' "$app" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
-            app_time="$(grep -m1 '^# approved:' "$app" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
-            app_wd_hash="$(basename "$app")"
+            _sandy_ps_approval_v "$app"
+            app_hash="$_SANDY_AP_HASH"; app_workspace="$_SANDY_AP_WS"; app_time="$_SANDY_AP_AT"
+            app_wd_hash="${app##*/}"
             app_wd_hash="${app_wd_hash#passive-}"
             app_wd_hash="${app_wd_hash%.list}"
 
             [ $first -eq 0 ] && printf ','
             first=0
             printf '{'
-            _json_kv workspace_hash       "$(_json_escape "$app_wd_hash")"
-            printf ','; _json_kv workspace_path_hint  "$(_json_escape "$app_workspace")"
-            printf ','; _json_kv approved_keys_sha256 "$(_json_escape "$app_hash")"
-            printf ','; _json_kv approved_at          "$(_json_escape "$app_time")"
+            _json_kv_str workspace_hash       "$app_wd_hash"
+            printf ','; _json_kv_str workspace_path_hint  "$app_workspace"
+            printf ','; _json_kv_str approved_keys_sha256 "$app_hash"
+            printf ','; _json_kv_str approved_at          "$app_time"
             printf '}'
         done
     fi
@@ -4419,20 +4693,19 @@ EOF_FEATURE_ENTRIES
         for app in "$SANDY_HOME/approvals"/dockerfile-*.list; do
             [ -f "$app" ] || continue
             local dfa_hash dfa_workspace dfa_time dfa_wd_hash
-            dfa_hash="$(head -n1 "$app" 2>/dev/null || true)"
-            dfa_workspace="$(grep -m1 '^# workspace:' "$app" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
-            dfa_time="$(grep -m1 '^# approved:' "$app" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
-            dfa_wd_hash="$(basename "$app")"
+            _sandy_ps_approval_v "$app"
+            dfa_hash="$_SANDY_AP_HASH"; dfa_workspace="$_SANDY_AP_WS"; dfa_time="$_SANDY_AP_AT"
+            dfa_wd_hash="${app##*/}"
             dfa_wd_hash="${dfa_wd_hash#dockerfile-}"
             dfa_wd_hash="${dfa_wd_hash%.list}"
 
             [ $first -eq 0 ] && printf ','
             first=0
             printf '{'
-            _json_kv workspace_hash       "$(_json_escape "$dfa_wd_hash")"
-            printf ','; _json_kv workspace_path_hint  "$(_json_escape "$dfa_workspace")"
-            printf ','; _json_kv context_sha256       "$(_json_escape "$dfa_hash")"
-            printf ','; _json_kv approved_at          "$(_json_escape "$dfa_time")"
+            _json_kv_str workspace_hash       "$dfa_wd_hash"
+            printf ','; _json_kv_str workspace_path_hint  "$dfa_workspace"
+            printf ','; _json_kv_str context_sha256       "$dfa_hash"
+            printf ','; _json_kv_str approved_at          "$dfa_time"
             printf '}'
         done
     fi
@@ -4461,20 +4734,16 @@ EOF_FEATURE_ENTRIES
             while IFS= read -r _cline; do
                 [ -z "$_cline" ] && continue
                 local _cid _cname _cimg _cstarted _cdaemon _csession _cupdated
-                _cid="$(echo "$_cline"      | awk -F'|' '{print $1}')"
-                _cname="$(echo "$_cline"    | awk -F'|' '{print $2}')"
-                _cimg="$(echo "$_cline"     | awk -F'|' '{print $3}')"
-                _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
-                _cdaemon="$(echo "$_cline"  | awk -F'|' '{print $5}')"
-                _csession="$(echo "$_cline" | awk -F'|' '{print $6}')"
-                _cupdated="$(echo "$_cline"  | awk -F'|' '{print $7}')"
+                _sandy_ps_split7_v "$_cline"
+                _cid="$_SANDY_F1"; _cname="$_SANDY_F2"; _cimg="$_SANDY_F3"; _cstarted="$_SANDY_F4"
+                _cdaemon="$_SANDY_F5"; _csession="$_SANDY_F6"; _cupdated="$_SANDY_F7"
                 [ $first -eq 0 ] && printf ','
                 first=0
                 printf '{'
-                _json_kv id         "$(_json_escape "$_cid")"
-                printf ','; _json_kv name       "$(_json_escape "$_cname")"
-                printf ','; _json_kv image      "$(_json_escape "$_cimg")"
-                printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+                _json_kv_str id         "$_cid"
+                printf ','; _json_kv_str name       "$_cname"
+                printf ','; _json_kv_str image      "$_cimg"
+                printf ','; _json_kv_str started_at "$_cstarted"
                 _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession" "$_cupdated"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
@@ -4528,7 +4797,7 @@ EOF_FEATURE_ENTRIES
             # array guard keeps the empty case a no-op on bash 3.2 + set -u.
             local _pf_cids=()
             while IFS= read -r _pfl; do
-                [ -n "$_pfl" ] && _pf_cids+=("$(printf '%s' "$_pfl" | awk -F'|' '{print $1}')")
+                [ -n "$_pfl" ] && _pf_cids+=("${_pfl%%|*}")
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
             [ "${#_pf_cids[@]}" -gt 0 ] && _sandy_prefetch_container_inspect "${_pf_cids[@]}"
             printf ',"running_containers":['
@@ -4539,20 +4808,16 @@ EOF_FEATURE_ENTRIES
                 [ -z "$_cline" ] && continue
                 # line format: id|name|image|started|daemon-label|session-label
                 local _cid _cname _cimg _cstarted _cdaemon _csession _cupdated
-                _cid="$(echo "$_cline"     | awk -F'|' '{print $1}')"
-                _cname="$(echo "$_cline"   | awk -F'|' '{print $2}')"
-                _cimg="$(echo "$_cline"    | awk -F'|' '{print $3}')"
-                _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
-                _cdaemon="$(echo "$_cline"  | awk -F'|' '{print $5}')"
-                _csession="$(echo "$_cline" | awk -F'|' '{print $6}')"
-                _cupdated="$(echo "$_cline"  | awk -F'|' '{print $7}')"
+                _sandy_ps_split7_v "$_cline"
+                _cid="$_SANDY_F1"; _cname="$_SANDY_F2"; _cimg="$_SANDY_F3"; _cstarted="$_SANDY_F4"
+                _cdaemon="$_SANDY_F5"; _csession="$_SANDY_F6"; _cupdated="$_SANDY_F7"
                 [ $first -eq 0 ] && printf ','
                 first=0
                 printf '{'
-                _json_kv id         "$(_json_escape "$_cid")"
-                printf ','; _json_kv name       "$(_json_escape "$_cname")"
-                printf ','; _json_kv image      "$(_json_escape "$_cimg")"
-                printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+                _json_kv_str id         "$_cid"
+                printf ','; _json_kv_str name       "$_cname"
+                printf ','; _json_kv_str image      "$_cimg"
+                printf ','; _json_kv_str started_at "$_cstarted"
                 _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession" "$_cupdated"
                 printf ','; printf '"image_stale":%s' "$(_sandy_image_stale "$_cid")"
                 printf '}'
@@ -4602,12 +4867,12 @@ EOF_FEATURE_ENTRIES
                 printf ',"proxy_image_created":null'
             fi
             if [ -n "$_proxy_src" ]; then
-                printf ','; _json_kv proxy_image_src "$(_json_escape "$_proxy_src")"
+                printf ','; _json_kv_str proxy_image_src "$_proxy_src"
             else
                 printf ',"proxy_image_src":null'
             fi
             if [ -n "$_proxy_epoch" ]; then
-                printf ','; _json_kv proxy_image_epoch "$(_json_escape "$_proxy_epoch")"
+                printf ','; _json_kv_str proxy_image_epoch "$_proxy_epoch"
             else
                 printf ',"proxy_image_epoch":null'
             fi
