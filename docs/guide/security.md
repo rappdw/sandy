@@ -38,15 +38,15 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 
 A redirected `core.hooksPath` (e.g. `.githooks/`) is resolved at launch and its target directory is mounted read-only too, so the protection follows git's actual hook path rather than only the default `.git/hooks/`.
 
-**Sandbox-mounted directories** — overlaid with writable sandbox copies so Claude can create and modify them without touching the host:
+**Sandbox-mounted directories** — when the workspace has one of these directories, the session sees a writable sandbox copy mounted over it instead of the host directory:
 
 | Path | Behavior |
 |---|---|
-| `.claude/commands/` | Starts empty. Claude can create new slash commands |
-| `.claude/agents/` | Starts empty. Claude can create new agents |
-| `.claude/plugins/` | Starts empty. Managed via `/plugin install` inside the container |
+| `.claude/commands/` | Claude's slash commands. The copy can gain new ones without touching the host |
+| `.claude/agents/` | Claude's agents. The copy can gain new ones without touching the host |
+| `.claude/plugins/` | Managed via `/plugin install` inside the container |
 
-`.gemini/extensions/` and `.gemini/commands/` are overlaid the same way for Gemini. On a sandbox's first launch the copy is seeded from what the workspace has at that path. If that path is a symlink (or sits under one, such as `.claude -> elsewhere`) pointing outside the workspace, the dangerous-symlink prompt asks about it, wherever it points. Approved, the sandbox gets a copy of the target's contents, and the agent's changes stay in the sandbox. The copy that is mounted is always a real directory, never a link. Since 2.9.0, sandy refuses to launch a sandbox whose copy is still a link left by an earlier version, and tells you the `rm` command that fixes it. Sandy's cleanup of empty leftover directories (`.github/workflows/` and the overlay stubs) never removes anything through a symlink.
+`.gemini/extensions/` and `.gemini/commands/` work the same way for Gemini. The sandbox's copy is made the first time a launch finds the directory in the workspace. If it has content then, the copy starts with that content; if it is empty then, the copy starts empty. After that the copy is kept: later host edits do not reach the sandbox, and the agent's edits stay in the sandbox. `sandy --reset-sandbox` discards the copies, along with the rest of the sandbox's agent state, so the next launch makes them afresh. **If the workspace has no such directory (and the sandbox has no copy yet), sandy mounts nothing there**, so anything the agent creates at that path lands in the workspace on the host. If that path is a symlink (or sits under one, such as `.claude -> elsewhere`) pointing outside the workspace, the dangerous-symlink prompt asks about it, wherever it points. Approved, the sandbox gets a copy of the target's contents, and the agent's changes stay in the sandbox. The copy that is mounted is always a real directory, never a link. Since 2.9.0, sandy refuses to launch a sandbox whose copy is still a link left by an earlier version, and tells you the `rm` command that fixes it. Sandy's cleanup of empty leftover directories (`.github/workflows/` and the overlay stubs) never removes anything through a symlink.
 
 **Mount policy (existence-gated).** Protected files and directories are mounted read-only only when they exist on the host — a path the host doesn't have gets no mount (an always-mount-with-empty-stubs approach was tried and reverted: the stubs polluted `git status`, broke `direnv`, and confused IDE scanners). The trade-off is covered by **session-end detection**: sandy records which protected paths existed at launch, and on exit warns about any protected file or directory that newly appeared (e.g. an agent-written `.git/hooks/post-checkout` or `.github/workflows/ci.yml`), with the remediation command — so you can review it before the next `git pull`/`push`/IDE-open would fire it.
 

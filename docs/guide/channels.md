@@ -26,7 +26,7 @@ Sandy supports [Claude Code channels](https://code.claude.com/docs/en/channels) 
    ```
 3. Add to `.sandy/config`:
    ```
-   SANDY_CHANNELS=plugin:telegram@claude-plugins-official
+   SANDY_CHANNELS=telegram
    ```
 4. Run `sandy` — the plugin is auto-installed, credentials are seeded, and Claude starts with the channel active
 
@@ -47,7 +47,7 @@ To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
    ```
 6. Add to `.sandy/config`:
    ```
-   SANDY_CHANNELS=plugin:discord@claude-plugins-official
+   SANDY_CHANNELS=discord
    ```
 7. Run `sandy` — the plugin is auto-installed, credentials are seeded, and Claude starts with the channel active
 
@@ -55,14 +55,17 @@ If `DISCORD_ALLOWED_SENDERS` is omitted, sandy starts in `pairing` mode — DM y
 
 ## Using both channels
 
-Set both tokens in `.sandy/.secrets` and list both plugins in `.sandy/config`:
+Set both tokens in `.sandy/.secrets` and list both channels, comma-separated, in `.sandy/config`:
 
 ```
-SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
+SANDY_CHANNELS=telegram,discord
 ```
+
+The same bare names work for every agent that supports the channel (Discord needs single-agent `claude`; the relay is Telegram-only): single-agent `claude` passes each one to `claude --channels` as `plugin:<name>@claude-plugins-official`, and the host relay (below) matches them as they are. The older `plugin:<name>@<marketplace>` spelling still works for single-agent `claude` but prints a deprecation warning, and the relay does not recognize it.
+
+With [named Claude sessions](agents.md#named-claude-sessions-sandysessions), channels go to the session whose file declares `receives: [channels]`: `SANDY_CHANNELS` set with no such session refuses the launch, and the host-side relay does not run.
 
 ## Channels with Gemini / Codex / multi-agent mode
 
 For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` to route messages to a specific agent in multi-agent mode — `N` is the Nth agent listed in `SANDY_AGENT`, 0-based (default `0` = the first); the relay looks up that agent's pane by its tag rather than trusting the tmux pane number. Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
 
-> ⚠️ **`SANDY_CHANNELS` format for the relay is different.** The relay matches the **bare channel name** — `SANDY_CHANNELS=telegram` — *not* the `plugin:telegram@claude-plugins-official` form used for single-agent `claude` above (that qualified form is what `claude --channels` needs, but it won't trigger the relay). Use bare names when the relay is in play (any non-single-`claude` `SANDY_AGENT`). This dual-format wart is tracked in [#30](https://github.com/rappdw/sandy/issues/30) and will be unified.

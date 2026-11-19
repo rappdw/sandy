@@ -133,7 +133,7 @@ td.strong{font-family:var(--display);font-weight:800}
 .limits li{display:grid;grid-template-columns:minmax(0,13rem) minmax(0,1fr);gap:14px;padding-bottom:9px;border-bottom:1px solid var(--rule);font-size:.95rem}
 .limits li b{font-family:var(--display);font-weight:800}
 .limits li span{color:var(--muted)}
-.agents{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.agents{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .agents .card h3{font-size:.98rem}
 .grid4{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;width:180px;aspect-ratio:16/10;max-width:100%}
 .grid4 span{background:var(--panel);border:1px solid var(--rule);font:600 .72rem var(--mono);display:grid;place-items:center;color:var(--ink)}
@@ -241,7 +241,7 @@ td.strong{font-family:var(--display);font-weight:800}
       <div class="inner">
         <p class="eyebrow">sandy · an isolated sibling for your coding agents</p>
         <h1><span class="a">Turn the permission prompts off.</span> <span class="h">Keep the boundary on.</span></h1>
-        <p class="lede">sandy runs Claude Code, Gemini CLI, Codex, OpenCode and Grok in a per-project Docker sandbox with their permission prompts switched off. The agent works without stopping to ask, and the operating system, not the agent, decides what it can touch. Press <strong>Next</strong> to see what that means, watch the boundary turn things away, and get it running.</p>
+        <p class="lede">sandy runs Claude Code, Gemini CLI, Codex, OpenCode and Grok (and, from 2.9.0, Mirror) in a per-project Docker sandbox with their permission prompts switched off. The agent works without stopping to ask, and the operating system, not the agent, decides what it can touch. Press <strong>Next</strong> to see what that means, watch the boundary turn things away, and get it running.</p>
         <p class="invariant"><b>The invariant</b>The sandbox's guarantees do not depend on the agent behaving. With the default settings, an agent that has been prompt-injected, and holds every permission it asks for, still cannot plant a git hook, reach your home network, or read a credential it was not given.</p>
         <p class="mountline" aria-label="Example mounts"><span>~/dev/myapp <b>rw</b></span><span>.git/hooks <b>ro</b></span><span>.github/workflows <b>ro</b></span><span>~/.ssh <b>not mounted</b></span><span>192.168.0.0/16 <b>no route</b></span></p>
       </div>
@@ -299,12 +299,12 @@ td.strong{font-family:var(--display);font-weight:800}
     <section class="screen" data-id="layers" data-ch="2">
       <div class="inner">
         <p class="eyebrow">The layers</p>
-        <h2>Six layers, each enforced below the agent</h2>
+        <h2>Each layer is enforced below the agent</h2>
         <div class="grid3">
           <article class="card"><header><h3>Per-project sandbox</h3><span class="tag n">isolation</span></header><p>One sandbox per workspace, one sandy per workspace at a time. Projects never share agent state.</p><span class="mech">~/.sandy/sandboxes/&lt;name&gt;-&lt;hash&gt;</span></article>
           <article class="card"><header><h3>Filesystem</h3><span class="tag r">read-only</span></header><p>Read-only root filesystem, a throwaway home, and only the project directory mounted from the host. About 25 sensitive paths inside it are read-only too.</p><span class="mech">--read-only · -v …:ro</span></article>
           <article class="card"><header><h3>Network</h3><span class="tag h">egress proxy</span></header><p>The agent sits on a network with no route out except a small proxy. Private and LAN addresses are refused; non-TCP traffic is dropped by the topology.</p><span class="mech">--internal · SNI proxy</span></article>
-          <article class="card"><header><h3>Credentials</h3><span class="tag h">one per agent</span></header><p>Each agent gets only its own login. Claude's is read fresh from your host at every launch and never stored in the sandbox. No SSH private key enters unless you name it.</p><span class="mech">SANDY_SSH_KEYS · SANDY_SUSPICIOUS</span></article>
+          <article class="card"><header><h3>Credentials</h3><span class="tag h">one per agent</span></header><p>Each agent gets only its own login. Claude's host login is read fresh at every launch and never written to the sandbox. No SSH private key enters unless you name it.</p><span class="mech">SANDY_SSH_KEYS · SANDY_SUSPICIOUS</span></article>
           <article class="card"><header><h3>Process and privilege</h3><span class="tag n">no escalation</span></header><p>Non-root, every capability dropped, no new privileges, Docker's default seccomp and AppArmor profiles, and no Docker socket.</p><span class="mech">--cap-drop ALL · no-new-privileges</span></article>
           <article class="card"><header><h3>Resources</h3><span class="tag n">limits</span></header><p>CPU, memory, process count and temporary storage are capped, sized from your machine, so a runaway build can't take the host down with it.</p><span class="mech">--cpus · --memory · --pids-limit</span></article>
         </div>
@@ -431,9 +431,9 @@ td.strong{font-family:var(--display);font-weight:800}
             <tbody>
               <tr><td class="strong">Boundary</td><td>Hardened container, shared kernel</td><td><strong>microVM, its own kernel</strong></td><td>Container or VM, plus Landlock and seccomp</td><td>Shell commands only</td></tr>
               <tr><td class="strong">You install</td><td>One script, on the Docker you have</td><td>Its CLI and VM runtime</td><td>A gateway and supervisor</td><td>Nothing</td></tr>
-              <tr><td class="strong">Agents</td><td><strong>Five, up to four side by side</strong></td><td>Eleven</td><td>Several, via providers</td><td>Itself</td></tr>
+              <tr><td class="strong">Agents</td><td><strong>Six (Mirror from 2.9.0), up to four side by side</strong></td><td>Eleven</td><td>Several, via providers</td><td>Itself</td></tr>
               <tr><td class="strong">Per-project agent state</td><td><strong>Yes</strong></td><td>Per sandbox</td><td>Per sandbox</td><td>No, global</td></tr>
-              <tr><td class="strong">Credentials</td><td>Mounted per session, never stored</td><td><strong>Injected by a proxy, never inside</strong></td><td><strong>Injected by a proxy, never seen</strong></td><td>The agent's own</td></tr>
+              <tr><td class="strong">Credentials</td><td>Host credentials mounted per launch, never stored; logins made inside are kept per project when no host login is mounted</td><td><strong>Injected by a proxy, never inside</strong></td><td><strong>Injected by a proxy, never seen</strong></td><td>The agent's own</td></tr>
               <tr><td class="strong">Network</td><td>Host allowlist proxy, no TLS decryption</td><td>Default deny, host and method/path rules</td><td>Default deny, L7 rules</td><td>Domain rules for shell commands</td></tr>
               <tr><td class="strong">A repo you didn't write</td><td><strong>Hooks, CI and shell rc read-only; approval gates</strong></td><td>Clone mode, or review changes</td><td>Filesystem policy</td><td>Partial</td></tr>
               <tr><td class="strong">Cost</td><td>Free, MIT</td><td>Free locally; paid governance</td><td>Apache 2.0, early</td><td>Free</td></tr>
@@ -447,7 +447,7 @@ td.strong{font-family:var(--display);font-weight:800}
     <section class="screen" data-id="agents" data-ch="7">
       <div class="inner">
         <p class="eyebrow">Many agents</p>
-        <h2>Five agents, alone or side by side</h2>
+        <h2>Six agents (Mirror from 2.9.0), alone or side by side</h2>
         <p class="lede">Every agent gets the same boundary and its own home directory and credentials inside the project's sandbox. Pick one per project, or run up to four at once.</p>
         <div class="agents">
           <article class="card"><h3>Claude Code</h3><p>Pro or Max login from your host, an API key, or a Console profile.</p></article>
@@ -455,6 +455,7 @@ td.strong{font-family:var(--display);font-weight:800}
           <article class="card"><h3>Codex CLI</h3><p>An API key, or a ChatGPT login that persists per project.</p></article>
           <article class="card"><h3>OpenCode</h3><p>Any provider, including a local model on your LAN through one narrow opening.</p></article>
           <article class="card"><h3>Grok Build</h3><p>An xAI API key, or an interactive login.</p></article>
+          <article class="card"><h3>Mirror</h3><p>A Reflection AI API key. New in 2.9.0, experimental, and runs alone, not side by side.</p></article>
         </div>
         <div class="steps2">
           <div class="cmd"><div class="label"><span>.sandy/config</span><button type="button" class="copy">Copy</button></div>

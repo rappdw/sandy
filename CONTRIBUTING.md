@@ -48,7 +48,7 @@ see [docs/CI-CREDENTIALS.md](docs/CI-CREDENTIALS.md).
 `test/run-tests.sh` also enforces the doc/template regen `--check` modes and
 `shellcheck`, so it catches drift as well as behavior regressions. Manual /
 interactive-TUI validation steps that can't be scripted live in
-`TESTING_PLAN.md`.
+[`docs/TESTING_PLAN.md`](docs/TESTING_PLAN.md).
 
 Please **run both suites and share the results in your PR.** Because they require
 the maintainer's Docker + API keys in some cases, the maintainer may re-run them,
