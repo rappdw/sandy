@@ -72,7 +72,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 **`--start` exit codes** are `0` ready, `6` refused before launch, `7` crash-looping, `8` timed out, `9` a named Claude session did not come up (user-facing table: `docs/guide/configuration.md`). **Changed in 2.9.0 (B5):** a feature entry that starts and then exits non-zero inside its 5s startup window now exits **`6`** (the session is torn down and nothing is left running); before 2.9.0 the container crash-looped and `--start` exited `7`. An entry that cannot start at all (missing, not executable, no state mount, no `flock`) still exits `7`. The set of codes is unchanged.
 
-- Only the **usage-error** cases depart from the JSON contract: stdout is exactly 0 bytes, stderr is non-empty and carries a `[sandy] ERROR: ...` line, and the exit code is 1. There are two. `--validate-config` invoked with no PATH argument at all: there is no path to validate, so there is nothing to build a JSON body around. `--print-state light --sizes` (2.9.0, in either order): light mode never walks the sandboxes, so the invocation asks for a document sandy will not produce; it is refused rather than answered with a light document that silently drops the flag.
+- Only the **usage-error** cases depart from the JSON contract: stdout is exactly 0 bytes, stderr is non-empty and carries a `[sandy] ERROR: ...` line, and the exit code is 1. There are two. `--validate-config` invoked with no PATH argument at all: there is no path to validate, so there is nothing to build a JSON body around. `--print-state light --sizes` (2.9.0, in either order): light mode never walks the sandboxes, so the invocation asks for a document sandy will not produce; it is refused rather than answered with a light document that silently drops the flag. The same refusal covers any other argument after `--print-state` that starts with `--` (`--sizes=1`, `--size`), which would otherwise be read as the mode or dropped.
 - Consumers may therefore pipe the stdout of any of these four invocations directly into a strict JSON parser (`json.load`, `jq -e`) without pre-filtering: a parse failure signals a genuine sandy bug, not an expected log line sharing the stream.
 
 **Implementation rule.** Introspection handlers (`_sandy_emit_schema`, `_sandy_emit_state`, `_sandy_validate_config`, `_sandy_emit_version`, and their fast-path dispatchers) must never call `info()` or `warn()` — both are stdout writers by design (sandy:291-292; only `error()` redirects to stderr, sandy:293) — and may only call `error()` for the usage-error cases above. A future `info`/`warn` call added inside one of these handlers would corrupt the "pure JSON" guarantee without a single byte landing on stderr to hint at it; see the two-sided (stdout-purity AND stderr-emptiness) assertions in `test/run-tests.sh` §92, which pin exactly this (case (h) covers `--print-version`).
@@ -468,9 +468,16 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > after the mode argument (`--print-state --sizes`, `--print-state full
 > --sizes`, `--print-state --sizes full`). With `light` it is a usage error
 > (see "Stream contract" above: 0 bytes of stdout, a `[sandy] ERROR:` line on
-> stderr, exit 1). Anywhere else (`sandy --sizes`, `sandy -p … --sizes`) the
-> launcher's own parser refuses it with exit 1 rather than forwarding it to
-> the agent. An older sandy treats `--print-state --sizes` as full mode and
+> stderr, exit 1). So is any other argument after `--print-state` that
+> starts with `--` (`--sizes=1`, a typo such as `--size`): none ever had a
+> meaning there, and reading one as the mode would quietly give full mode
+> without sizes. The mode is the FIRST argument that is not `--sizes`
+> (`--print-state full light --sizes` is full mode with sizes, as `$2` was
+> before 2.9.0); a later one is ignored, as before. As a launcher argument
+> (`sandy --sizes`, `sandy -p … --sizes`) the launcher's parser refuses it
+> with exit 1 rather than forwarding it to the agent. The other introspection
+> flags (`--print-schema`, `--print-version`, `--validate-config PATH`) do not
+> refuse it: they ignore it, as they ignore any extra argument. An older sandy treats `--print-state --sizes` as full mode and
 > computes sizes anyway, so a consumer may pass it unconditionally when it
 > wants sizes; a consumer that does not want them should simply omit it.
 
@@ -1280,7 +1287,7 @@ Additions to `test/run-tests.sh`:
 9. **§91 (1.7.0, #156) parser↔cli_flags lockstep** — extracts every flag sandy's real parsers accept (fast-path if-dispatches + case labels) and diffs it against `cli_flags`, both directions, against a small hand-verified allowlist of sub-options/private/forwarded exceptions
 10. **§92 (1.7.0, #160/#159) stream contract pin** — for `--print-schema`, `--print-state` (both modes), `--validate-config` (valid/unknown/privileged-from-passive fixture, missing-file, and no-argument cases), and `--print-version` (case (h), base + `SANDY_VERBOSE=1`), asserts stdout is exactly one JSON document (or exactly 0 bytes in the no-argument case) and stderr is exactly 0 bytes (or non-empty and contains `ERROR` in the no-argument case) — two-sided, so a future `info`/`warn` call landing on stdout is caught even though it would leave stderr untouched
 11. **§93 (1.7.0, #159) machine-readable version** — pins `--print-version`'s `.version` against `SANDY_VERSION` in source; the `--version` ⇄ `--print-version.full_version` identity byte-for-byte; cross-surface agreement between `--print-schema`'s `sandy.version`/`sandy.commit` and `--print-version`'s `version`/`commit` (both computed via the shared `_sandy_commit_hash()` helper); the `full_version = version[-commit]` composition and the `commit` hex-hash shape; two NEGATIVE fixtures — a stubbed-`git`, outside-any-repo copy (`commit==""`, `full_version==version`) and the same copy with `install.sh`'s exact `SANDY_COMMIT` bake-in sed applied (`commit=="abc1234"`); and `.schema_version` against `SANDY_SCHEMA_VERSION` in source
-12. **§241 (2.9.0, B7b) opt-in size walk** — with a `du` stub that logs every call: full mode without `--sizes` makes zero `du` calls and reports every `size_bytes` `null` with `sizes_computed: false`; `--sizes` (before or after `full`) makes one call per sandbox and reports the stub's KiB × 1024 with `sizes_computed: true`, the last top-level key; light makes zero calls; `light --sizes` (either order) exits 1 with 0 bytes of stdout and a `[sandy] ERROR` line; `--sizes` without `--print-state` is refused. §98 covers the walk itself (`-k`, garbage and failing `du`) and now passes `--sizes`.
+12. **§241 (2.9.0, B7b) opt-in size walk** — with a `du` stub that logs every call: full mode without `--sizes` makes zero `du` calls and reports every `size_bytes` `null` with `sizes_computed: false`; `--sizes` (before or after `full`) makes one call per sandbox and reports the stub's KiB × 1024 with `sizes_computed: true`, the last top-level key; light makes zero calls; `light --sizes` (either order), `--sizes=1` and a misspelled `--size` exit 1 with 0 bytes of stdout and a `[sandy] ERROR` line; the first non-`--sizes` argument is the mode; `sizes_computed` is `true` with `--sizes` even with no sandboxes or no `du` on `PATH`; `--sizes` as a launcher argument is refused. §98 covers the walk itself (`-k`, garbage and failing `du`) and now passes `--sizes`.
 
 ## Migration for sandy itself
 

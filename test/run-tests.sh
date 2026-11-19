@@ -29750,10 +29750,11 @@ section "§241: --print-state measures sandbox sizes only with --sizes (B7b)"
 # light --sizes is a usage error (0 bytes of stdout, exit 1), never a light
 # document that quietly dropped the flag. --sizes anywhere else is refused.
 # Fixture homes: A holds one sandbox (value checks), B holds two (the
-# once-per-sandbox count); every JSON assertion parses the document.
+# once-per-sandbox count), C holds none; every JSON assertion parses the
+# document.
 _S241="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S241/A/sandboxes/one-aaaa1111" "$_S241/B/sandboxes/one-bbbb1111" \
-    "$_S241/B/sandboxes/two-bbbb2222" "$_S241/bin"
+    "$_S241/B/sandboxes/two-bbbb2222" "$_S241/C/sandboxes" "$_S241/bin"
 for _s241_sb in "$_S241/A/sandboxes/one-aaaa1111" "$_S241/B/sandboxes/one-bbbb1111" "$_S241/B/sandboxes/two-bbbb2222"; do
     echo "2.9.0" > "$_s241_sb/.sandy_created_version"
     printf '{ "schema_version": 1, "sandbox_name": "%s", "workspace_path": "/ws/x" }\n' \
@@ -29775,13 +29776,20 @@ echo "$*" >> "$S241_DU_LOG"
 printf '7\t%s\n' "${2:-x}"
 S241DU
 chmod +x "$_S241/bin/docker" "$_S241/bin/du"
+# A PATH with no du at all (every other tool still resolves), plus the docker stub.
+_path_farm "$_S241/nodu" du docker
+cp "$_S241/bin/docker" "$_S241/nodu/docker"
 
-# _s241_run NAME HOME ARGS... : run sandy with the stubs first on PATH; keeps
-# NAME.out, NAME.err, NAME.rc, NAME.du (one line per du call) and NAME.docker.
+# _s241_run NAME HOME ARGS... : run sandy with the stubs first on PATH (or
+# with PATH="$_S241_RUN_PATH" when that is set); keeps NAME.out, NAME.err,
+# NAME.rc, NAME.du (one line per du call) and NAME.docker. Every inherited
+# SANDY_* is unset first: this suite can run inside a live sandy session.
 _s241_run() {
-    local _n="$1" _h="$2" _rc=0; shift 2
+    local _n="$1" _h="$2" _rc=0 _v; shift 2
+    local _unset=()
+    for _v in $(env | sed -n 's/^\(SANDY_[A-Za-z0-9_]*\)=.*/\1/p'); do _unset+=(-u "$_v"); done
     : > "$_S241/$_n.du"; : > "$_S241/$_n.docker"
-    env -u SANDY_VERBOSE -u SANDY_AGENT -u SANDY_HOST_ID PATH="$_S241/bin:$PATH" \
+    env ${_unset[@]+"${_unset[@]}"} PATH="${_S241_RUN_PATH:-$_S241/bin:$PATH}" \
         SANDY_HOME="$_S241/$_h" S241_DU_LOG="$_S241/$_n.du" S241_DOCKER_LOG="$_S241/$_n.docker" \
         bash "$SANDY_SCRIPT" "$@" >"$_S241/$_n.out" 2>"$_S241/$_n.err" </dev/null || _rc=$?
     echo "$_rc" > "$_S241/$_n.rc"
@@ -29797,6 +29805,13 @@ _s241_run lsizes  A --print-state light --sizes
 _s241_run sizesl  A --print-state --sizes light
 _s241_run bare    A --sizes
 _s241_run prompt  A -p hello --sizes
+_s241_run empty   C --print-state --sizes
+_s241_run fl      A --print-state full light --sizes
+_s241_run lf      A --print-state light full
+_s241_run eq      A --print-state --sizes=1
+_s241_run typo    A --print-state light --size
+_s241_run unk     A --print-state --frobnicate
+_S241_RUN_PATH="$_S241/nodu" _s241_run nodu A --print-state --sizes
 
 # One checker: NAME, expected sizes_computed (true|false), expected size_bytes
 # for every sandbox (null or an integer), expected sandbox count. It also
@@ -29839,11 +29854,19 @@ check "§241(6) light --sizes, in either order, is a usage error: exit 1, 0 byte
     bash -c 'for n in lsizes sizesl; do [ "$(cat "$1/$n.rc")" = 1 ] && [ ! -s "$1/$n.out" ] && grep -q "^\[sandy\] ERROR: .*--sizes" "$1/$n.err" && [ ! -s "$1/$n.du" ] || { echo "case $n"; cat "$1/$n.rc" "$1/$n.out" "$1/$n.err"; exit 1; }; done' _ "$_S241"
 check "§241(7) --sizes without --print-state is refused (exit 1, named on stderr), never forwarded to an agent or launched" \
     bash -c 'for n in bare prompt; do [ "$(cat "$1/$n.rc")" = 1 ] && grep -q "ERROR: --sizes is only accepted with --print-state" "$1/$n.err" && ! grep -q "^run" "$1/$n.docker" && [ ! -s "$1/$n.du" ] || { echo "case $n"; cat "$1/$n.rc" "$1/$n.err" "$1/$n.docker"; exit 1; }; done' _ "$_S241"
+check "§241(9) --sizes with no sandboxes at all: sizes_computed is still true (the walk was asked for and ran over nothing)" \
+    bash -c 'python3 "$1" "$2" empty true null 0' _ "$_S241_PY" "$_S241"
+check "§241(10) --sizes with no du on PATH: sizes_computed true, size_bytes null, one JSON document, 0 bytes of stderr" \
+    bash -c '[ ! -e "$2/nodu/du" ] && [ -x "$2/nodu/bash" ] && python3 "$1" "$2" nodu true null 1' _ "$_S241_PY" "$_S241"
+check "§241(11) the FIRST argument that is not --sizes is the mode: full light --sizes is full mode with sizes, light full is light (mutation: last argument wins)" \
+    bash -c 'python3 "$1" "$2" fl true 7168 1 && python3 "$1" "$2" lf false null 1 && grep -q "\"not_computed\"" "$2/lf.out" && ! grep -q "\"not_computed\"" "$2/fl.out" && [ "$3" = 1 ] && [ "$4" = 0 ]' _ "$_S241_PY" "$_S241" "$(_s241_ndu fl)" "$(_s241_ndu lf)"
+check "§241(12) any other --option after --print-state is a usage error naming it (--sizes=1, a --size typo, an unknown one): exit 1, 0 bytes of stdout, no du call" \
+    bash -c 'for n in eq:--sizes=1 typo:--size unk:--frobnicate; do c="${n%%:*}"; a="${n#*:}"; [ "$(cat "$1/$c.rc")" = 1 ] && [ ! -s "$1/$c.out" ] && grep -qF -- "[sandy] ERROR: --print-state: unknown option $a " "$1/$c.err" && [ ! -s "$1/$c.du" ] || { echo "case $c"; cat "$1/$c.rc" "$1/$c.out" "$1/$c.err"; exit 1; }; done' _ "$_S241"
 check "§241(8) --print-schema advertises --sizes in cli_flags" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any(f[\"name\"]==\"--sizes\" for f in d[\"cli_flags\"])" "$1"' _ "$_SCHEMA_CACHE"
 unset -f _s241_run _s241_ndu
 rm -rf "$_S241"
-unset _S241 _S241_PY
+unset _S241 _S241_PY _S241_RUN_PATH
 
 # BEGIN SUMMARY
 # ============================================================

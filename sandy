@@ -2713,7 +2713,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--print-state"';  printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Emit runtime state (sandboxes, approvals, containers) as JSON."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--sizes"';        printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"With --print-state (full mode only): also walk each sandbox with du to fill size_bytes, and report sizes_computed: true. Without it size_bytes is null. Slow on a host with many large sandboxes. --print-state light --sizes is a usage error (exit 1); --sizes without --print-state is refused."'; printf '}'
+    printf '{'; _json_kv name '"--sizes"';        printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"With --print-state (full mode only): also walk each sandbox with du to fill size_bytes, and report sizes_computed: true. Without it size_bytes is null. Slow on a host with many large sandboxes. --print-state light --sizes is a usage error (exit 1), as is any other --option after --print-state. As a launcher argument (sandy --sizes, sandy -p ... --sizes) it is refused with exit 1; the other introspection flags (--print-schema, --print-version, --validate-config) ignore it, as they ignore any extra argument."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--validate-config"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Validate a config file against the schema; emit JSON."'; printf '}'
     printf ','
@@ -4870,11 +4870,19 @@ if [[ "${1:-}" == "--print-state" ]]; then
     # cannot do: a usage error, the same shape as --validate-config with no
     # PATH (0 bytes of stdout, one [sandy] ERROR line on stderr, exit 1),
     # rather than a light document that silently ignores the flag.
+    #
+    # Any other argument starting with -- is refused the same way: --sizes=1
+    # would otherwise be read as the mode (full, no sizes) and a typo such as
+    # --size silently dropped. No such argument ever had a meaning here (only
+    # "light" did), so refusing them takes nothing away.
     _ps_mode="" _ps_mode_set=0 _ps_sizes=0
     shift
     for _ps_arg in "$@"; do
         if [ "$_ps_arg" = "--sizes" ]; then
             _ps_sizes=1
+        elif [ "${_ps_arg#--}" != "$_ps_arg" ]; then
+            printf '[sandy] ERROR: --print-state: unknown option %s (it takes an optional mode, light or full, and --sizes)\n' "$_ps_arg" >&2
+            exit 1
         elif [ "$_ps_mode_set" = 0 ]; then
             _ps_mode="$_ps_arg"; _ps_mode_set=1
         fi
@@ -9000,8 +9008,8 @@ Introspection (machine-readable JSON; no Docker required):
                           'sandy --print-state light' is the cheap poller mode.
   --sizes                 With --print-state (full mode): also measure each
                           sandbox with du to fill size_bytes (null without
-                          it). Slow with many large sandboxes. Not valid with
-                          light, or without --print-state.
+                          it). Slow with many large sandboxes. An error with
+                          light, and as a launcher argument (sandy --sizes).
   --validate-config PATH  Validate a config file against the schema; emit JSON
                           with errors, unknowns, and passive-approval status.
   --print-version         Emit {schema_version, version, commit, full_version}
