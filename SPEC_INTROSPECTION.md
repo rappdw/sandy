@@ -58,7 +58,7 @@ All four:
 
 As of 1.7.0, sandy guarantees a stronger, test-pinned contract for these four flags (#160, extended to `--print-version` by #159): **exactly one JSON document on stdout and nothing else** — including in JSON-shaped failure cases. Concretely:
 
-- `--print-schema`, `--print-state` (both modes), and `--print-version` always write exactly one JSON document to stdout and zero bytes to stderr, on every exercised code path.
+- `--print-schema`, `--print-state` (both modes, with or without `--sizes`), and `--print-version` always write exactly one JSON document to stdout and zero bytes to stderr, on every exercised code path, except the `--print-state light --sizes` usage error below.
 - `--validate-config PATH` on a resolvable invocation (the file exists or does not; the key set is valid, unknown, or requires approval) writes exactly one JSON document to stdout and zero bytes to stderr, with the outcome encoded in the JSON body (`errors[]`, `warnings[]`, `approval_status`) and the exit code — including the file-not-found case, which exits 1 WITH a JSON body naming the failure in `errors[]`, not a bare stderr message.
 ### Daemon exit codes: no code observed is not a verdict (#157)
 
@@ -72,10 +72,10 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 **`--start` exit codes** are `0` ready, `6` refused before launch, `7` crash-looping, `8` timed out, `9` a named Claude session did not come up (user-facing table: `docs/guide/configuration.md`). **Changed in 2.9.0 (B5):** a feature entry that starts and then exits non-zero inside its 5s startup window now exits **`6`** (the session is torn down and nothing is left running); before 2.9.0 the container crash-looped and `--start` exited `7`. An entry that cannot start at all (missing, not executable, no state mount, no `flock`) still exits `7`. The set of codes is unchanged.
 
-- Only the **usage-error** case — `--validate-config` invoked with no PATH argument at all — departs from the JSON contract: stdout is exactly 0 bytes, stderr is non-empty and carries a `[sandy] ERROR: ...` line, and the exit code is 1. This is the one case where there is no path to validate, so there is nothing to build a JSON body around.
+- Only the **usage-error** cases depart from the JSON contract: stdout is exactly 0 bytes, stderr is non-empty and carries a `[sandy] ERROR: ...` line, and the exit code is 1. There are two. `--validate-config` invoked with no PATH argument at all: there is no path to validate, so there is nothing to build a JSON body around. `--print-state light --sizes` (2.9.0, in either order): light mode never walks the sandboxes, so the invocation asks for a document sandy will not produce; it is refused rather than answered with a light document that silently drops the flag.
 - Consumers may therefore pipe the stdout of any of these four invocations directly into a strict JSON parser (`json.load`, `jq -e`) without pre-filtering: a parse failure signals a genuine sandy bug, not an expected log line sharing the stream.
 
-**Implementation rule.** Introspection handlers (`_sandy_emit_schema`, `_sandy_emit_state`, `_sandy_validate_config`, `_sandy_emit_version`, and their fast-path dispatchers) must never call `info()` or `warn()` — both are stdout writers by design (sandy:291-292; only `error()` redirects to stderr, sandy:293) — and may only call `error()` for the usage-error case above. A future `info`/`warn` call added inside one of these handlers would corrupt the "pure JSON" guarantee without a single byte landing on stderr to hint at it; see the two-sided (stdout-purity AND stderr-emptiness) assertions in `test/run-tests.sh` §92, which pin exactly this (case (h) covers `--print-version`).
+**Implementation rule.** Introspection handlers (`_sandy_emit_schema`, `_sandy_emit_state`, `_sandy_validate_config`, `_sandy_emit_version`, and their fast-path dispatchers) must never call `info()` or `warn()` — both are stdout writers by design (sandy:291-292; only `error()` redirects to stderr, sandy:293) — and may only call `error()` for the usage-error cases above. A future `info`/`warn` call added inside one of these handlers would corrupt the "pure JSON" guarantee without a single byte landing on stderr to hint at it; see the two-sided (stdout-purity AND stderr-emptiness) assertions in `test/run-tests.sh` §92, which pin exactly this (case (h) covers `--print-version`).
 
 **Honest bound.** This contract covers only bytes sandy itself writes to file descriptors 1 and 2 inside the handler. It says nothing about what an inherited fd 1 already carries before sandy's `printf`s run — e.g. a login shell's prompt hook (PS1/PROMPT_COMMAND) that emits an OSC terminal-title escape sequence on every command, which lands on the same stdout a consumer captures if sandy is invoked from an interactive shell with such a hook installed. That failure mode motivated this section but is out of sandy's control — pipe sandy's introspection flags from a plain, hook-free shell (or a script) for a stream a strict parser can trust. See `test/run-tests.sh` §91 (parser↔cli_flags lockstep), §92 (this stream contract), and §93 (`--print-version`-specific composition/identity guarantees, #159) for the pinned assertions.
 
@@ -277,7 +277,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "last_used_version": "0.11.4",
       "created_at": "2026-04-15T10:00:00Z",
       "last_used_at": "2026-04-20T14:45:00Z",
-      "size_bytes": 123456789,
+      "size_bytes": null,
       "agents": ["claude"],
       "image": {"name": "sandy-claude-code", "id": "sha256:def...", "project_layer": false},
       "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/feature-state/notify"}},
@@ -344,7 +344,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
   "orphaned_containers": 0,
   "proxy_image_created": "2026-07-28T12:00:00Z",
   "proxy_image_src": "sha256:9f2c…",
-  "proxy_image_epoch": "2026-07"
+  "proxy_image_epoch": "2026-07",
+  "sizes_computed": false
 }
 ```
 
@@ -428,23 +429,50 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > that wants a staleness badge on a light-mode poll fetches full mode
 > on demand.
 
-> **`size_bytes`** (per sandbox, **FULL MODE ONLY**, added additively in `1.8.0`,
-> #176 — no `schema_version` bump). Integer bytes of allocated disk for the
+> **`size_bytes`** (per sandbox, **FULL MODE WITH `--sizes` ONLY**, added
+> additively in `1.8.0`, #176; opt-in since `2.9.0` — no `schema_version` bump
+> either time). Computed only for `sandy --print-state --sizes` (or
+> `--print-state full --sizes`); without `--sizes`, full mode reports `null`
+> for every sandbox, exactly as light mode always has. The key stays
+> **present** either way. Before 2.9.0 every full-mode call walked every
+> sandbox, which on a host with ~80 sandboxes was most of the call (~55 of
+> ~70 s on a Mac) and timed consumers out. Integer bytes of allocated disk for the
 > sandbox directory (`du -skx`, block-allocated size, not apparent size,
 > multiplied by 1,024 to convert the KiB result to bytes). `-x` stays on one
 > filesystem; a subpath unreadable by the sandy process still yields a
 > best-effort partial total (du warns to stderr but still emits a total on
 > stdout). `null` on any failure — `du` missing, empty output, non-numeric
-> output — and `null`, always, in `--print-state light`: a du walk over a
+> output — `null` when `--sizes` was not given (see `sizes_computed`
+> below to tell the two apart), and `null`, always, in `--print-state light`: a du walk over a
 > multi-GB sandbox is exactly the cost class the light-mode two-spawn poll
 > budget (see "Light mode" below) exists to exclude. The key is **present**
 > as `null` in light mode rather than absent, matching the
 > `dangling_images`/`orphaned_containers`/`proxy_image_created` precedent
-> above. Cost note: one `du` walk per sandbox per full-mode call —
-> seconds-scale at tens of large sandboxes, and materially worse on a cold
-> cache over a virtiofs mount (macOS/OrbStack) — pollers that want a cheap,
-> frequent read should stick to light mode and fetch full mode only when a
-> size figure is actually needed.
+> above. Cost note: `--sizes` costs one `du` walk per sandbox per call —
+> seconds-scale at tens of large sandboxes, tens of seconds at ~80 on a Mac,
+> and materially worse on a cold cache over a virtiofs mount
+> (macOS/OrbStack) — so pass it only when a size figure is actually needed.
+> Full mode without it pays nothing for this field.
+
+> **`sizes_computed`** (top-level bool, **both modes**, added additively in
+> `2.9.0` — no `schema_version` bump). `true` only when this call ran the
+> `size_bytes` walk, that is full mode with `--sizes`; `false` otherwise
+> (full mode without `--sizes`, and light mode always). It is the last
+> top-level field, so every earlier field keeps its position. It lets a
+> consumer tell "sizes were not requested" (`false`, every `size_bytes`
+> `null`) from "the walk ran and `du` failed for this sandbox" (`true`, that
+> sandbox's `size_bytes` `null`). It is `true` with `--sizes` even when there
+> are no sandboxes, or `du` is missing: the walk was asked for and ran.
+
+> **`--sizes`** (flag, `2.9.0`). Accepted after `--print-state`, before or
+> after the mode argument (`--print-state --sizes`, `--print-state full
+> --sizes`, `--print-state --sizes full`). With `light` it is a usage error
+> (see "Stream contract" above: 0 bytes of stdout, a `[sandy] ERROR:` line on
+> stderr, exit 1). Anywhere else (`sandy --sizes`, `sandy -p … --sizes`) the
+> launcher's own parser refuses it with exit 1 rather than forwarding it to
+> the agent. An older sandy treats `--print-state --sizes` as full mode and
+> computes sizes anyway, so a consumer may pass it unconditionally when it
+> wants sizes; a consumer that does not want them should simply omit it.
 
 > **`workspace_path`** (per sandbox) is read from the `WORKSPACE.json` marker
 > sandy writes into each sandbox on launch; it is an empty string for a legacy
@@ -843,7 +871,9 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > diverge between the two modes — it is always `null` in light mode, because
 > the `du` walk it requires costs the same class of latency the light-mode
 > budget exists to avoid, even though computing it needs no docker spawn at
-> all. `cross_session_inbound`'s two file objects (2.7.0, #386) are the
+> all. (Since 2.9.0 full mode also reports it `null` unless `--sizes` is
+> given, so the two modes agree on it by default; `light --sizes` is a usage
+> error.) `cross_session_inbound`'s two file objects (2.7.0, #386) are the
 > second: each needs a JSON parse per file, so light mode reports them as
 > `{"value": null, "status": "not_computed"}`. `pinned` and `marker` come from
 > the marker with no parse and are identical in both modes. Every other
@@ -1034,6 +1064,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 - **`2.8.0` (decision 3, 2026-10-05):** every config key object gains `base_type` (`string` | `bool` | `int`), derived from `type`; see "Config field types" above. Additive, so `schema_version` stays `4`.
 - **`2.8.0` (decision 1, 2026-10-05):** one new `config.env_only_keys` entry, `SANDY_CHANNEL` (`release` | `dev`): which build `--upgrade` and `install.sh` install. Additive, so `schema_version` stays `4`.
 - **`2.8.0`:** one new `cli_flags` entry, `--accounts`, whose sub-options are `--json` and `--workspace`. Additive, so `schema_version` stays `4`. Its `--json` document is described under `### --accounts` above; it carries the same `schema_version`.
+- **`2.9.0` (B7b):** `--print-state` full mode no longer computes `size_bytes` by default. A new flag, `--sizes` (`sandy --print-state --sizes`), opts in; without it every `size_bytes` is `null`, as in light mode. The key is still emitted, so no field is removed and `schema_version` stays `4`. One new top-level field, `sizes_computed` (bool, both modes, last), says whether the walk ran. `--print-state light --sizes` is a usage error (exit 1, 0 bytes of stdout). One new `cli_flags` entry, `--sizes`. No listed consumer reads `size_bytes`.
 - **`2.9.0`:** additive, so `schema_version` stays `4`: `--print-state` gains `claude_sessions` per sandbox (named Claude sessions), and `--accounts --json` gains `agents` and `accounts` per sandbox, reporting every agent rather than Claude Code alone. The session marker gains `credentials` (each with the operator's `label` when `$SANDY_HOME/credential-labels` names it), and `cli_flags` gains `--fingerprint-token`. The passive key `SANDY_CLAUDE_USAGE` is added. `account.recorded_at` is now ISO-8601 when Claude Code recorded epoch milliseconds.
 - **`2.8.0` (#428, #427):** one new `cli_flags` entry, `--login`, whose sub-options are `--workspace` and `--dry-run`; the `--new` and `--resume` descriptions now say they apply to codex too. Additive, so `schema_version` stays `4`. (`--login` is a launch-family flag, not an introspection flag: it has no JSON output.)
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
@@ -1204,7 +1235,7 @@ A single new function `_sandy_emit_schema()` that:
 - Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files; `created_at` / `last_used_at` are those files' **mtimes in UTC**, `YYYY-MM-DDTHH:MM:SSZ` (whole seconds) on both GNU and BSD `stat`. Before 2.4.0 they were rendered in the host's **local** time with a `Z` appended — off by the UTC offset on any non-UTC host — and the GNU branch carried nanoseconds (`…T14:45:00.123456789Z`). A consumer that compensated for either should stop; `--remove-sandbox`'s "last used" plan line shares the fix.
 - Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries, and `$SANDY_HOME/approvals/dockerfile-*.list` for `dockerfile_approvals` (2.7.0, #296)
 - Calls `docker ps --filter label=sandy --format json` for running containers (if Docker is reachable; silent skip if not)
-- Calls `stat` for directory sizes (portable — macOS `stat -f %z`, Linux `stat -c %s`)
+- With `--sizes` (full mode only), calls `du -skx` once per sandbox for `size_bytes`; without it, no size walk at all
 
 ### JSON-without-jq safety
 
@@ -1249,6 +1280,7 @@ Additions to `test/run-tests.sh`:
 9. **§91 (1.7.0, #156) parser↔cli_flags lockstep** — extracts every flag sandy's real parsers accept (fast-path if-dispatches + case labels) and diffs it against `cli_flags`, both directions, against a small hand-verified allowlist of sub-options/private/forwarded exceptions
 10. **§92 (1.7.0, #160/#159) stream contract pin** — for `--print-schema`, `--print-state` (both modes), `--validate-config` (valid/unknown/privileged-from-passive fixture, missing-file, and no-argument cases), and `--print-version` (case (h), base + `SANDY_VERBOSE=1`), asserts stdout is exactly one JSON document (or exactly 0 bytes in the no-argument case) and stderr is exactly 0 bytes (or non-empty and contains `ERROR` in the no-argument case) — two-sided, so a future `info`/`warn` call landing on stdout is caught even though it would leave stderr untouched
 11. **§93 (1.7.0, #159) machine-readable version** — pins `--print-version`'s `.version` against `SANDY_VERSION` in source; the `--version` ⇄ `--print-version.full_version` identity byte-for-byte; cross-surface agreement between `--print-schema`'s `sandy.version`/`sandy.commit` and `--print-version`'s `version`/`commit` (both computed via the shared `_sandy_commit_hash()` helper); the `full_version = version[-commit]` composition and the `commit` hex-hash shape; two NEGATIVE fixtures — a stubbed-`git`, outside-any-repo copy (`commit==""`, `full_version==version`) and the same copy with `install.sh`'s exact `SANDY_COMMIT` bake-in sed applied (`commit=="abc1234"`); and `.schema_version` against `SANDY_SCHEMA_VERSION` in source
+12. **§241 (2.9.0, B7b) opt-in size walk** — with a `du` stub that logs every call: full mode without `--sizes` makes zero `du` calls and reports every `size_bytes` `null` with `sizes_computed: false`; `--sizes` (before or after `full`) makes one call per sandbox and reports the stub's KiB × 1024 with `sizes_computed: true`, the last top-level key; light makes zero calls; `light --sizes` (either order) exits 1 with 0 bytes of stdout and a `[sandy] ERROR` line; `--sizes` without `--print-state` is refused. §98 covers the walk itself (`-k`, garbage and failing `du`) and now passes `--sizes`.
 
 ## Migration for sandy itself
 

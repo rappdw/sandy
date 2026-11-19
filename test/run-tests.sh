@@ -6866,9 +6866,12 @@ unset _S97 _S97_ACC _S97_ACC_ALL
 # ============================================================
 section "§98: --print-state size_bytes (#176)"
 # ============================================================
-# size_bytes (full mode only, disk usage via du -skx times 1024, null on any
-# failure or in light mode) — see the sandy ~1819 comment block for the
-# design rationale (poll safety, portability, stream contract, unit math).
+# size_bytes (full mode with --sizes only, disk usage via du -skx times 1024,
+# null on any failure, in light mode, and since 2.9.0 in full mode without
+# --sizes) — see the sandy size_bytes comment block for the design rationale
+# (poll safety, portability, stream contract, unit math). Every full-mode run
+# here passes --sizes, since these checks are about the walk itself; §241
+# pins the opt-in (no --sizes, no walk).
 # Fixture: one sandbox with a 1 MiB /dev/urandom payload (urandom so a
 # compressing filesystem cannot shrink allocation below the lower bound).
 _S98_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
@@ -6899,7 +6902,7 @@ S98DOCKERSHIM
 # --- (1)/(2): real du against the fixture, full vs light ---
 _S98_BIN0="$(mktemp -d)"
 _s98_write_docker_shim "$_S98_BIN0"
-_s98_full="$(PATH="$_S98_BIN0:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state 2>/dev/null)"
+_s98_full="$(PATH="$_S98_BIN0:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state --sizes 2>/dev/null)"
 check "§98(1) full mode: size_bytes present, integer, within [1MiB,16MiB]" \
     bash -c 'echo "$1" | python3 -c "
 import json,sys
@@ -6940,7 +6943,7 @@ check "§98(3) NEGATIVE: light mode makes ZERO du calls" \
 
 _S98_DULOG_FULL="$(mktemp)"
 PATH="$_S98_BIN_LOG:$PATH" SANDY_HOME="$_S98_HOME" DU_CALL_LOG="$_S98_DULOG_FULL" \
-    bash "$_S98_SCRIPT" --print-state >/dev/null 2>&1
+    bash "$_S98_SCRIPT" --print-state --sizes >/dev/null 2>&1
 check "§98(4) full mode: exactly ONE du call, args name the sandbox path" \
     bash -c '[ "$(wc -l < "$1" | tr -d " ")" = "1" ] && grep -q "demo-abc12345" "$1"' -- "$_S98_DULOG_FULL"
 
@@ -6963,7 +6966,7 @@ cat > "$_S98_BIN_GARBAGE/du" <<'S98DUSHIM_GARBAGE'
 printf 'notanumber\t/x\n'
 S98DUSHIM_GARBAGE
 chmod +x "$_S98_BIN_GARBAGE/du"
-_s98_garbage="$(PATH="$_S98_BIN_GARBAGE:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state 2>/dev/null)"
+_s98_garbage="$(PATH="$_S98_BIN_GARBAGE:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state --sizes 2>/dev/null)"
 check "§98(5) garbage du output -> size_bytes null, JSON still parses" \
     bash -c 'echo "$1" | python3 -c "
 import json,sys
@@ -6987,7 +6990,7 @@ exit 1
 S98DUSHIM_FAIL
 chmod +x "$_S98_BIN_FAIL/du"
 _S98_ERR_FAIL="$(mktemp)"
-_s98_fail="$(PATH="$_S98_BIN_FAIL:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state 2>"$_S98_ERR_FAIL")"
+_s98_fail="$(PATH="$_S98_BIN_FAIL:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state --sizes 2>"$_S98_ERR_FAIL")"
 check "§98(6a) failing noisy du -> size_bytes null" \
     bash -c 'echo "$1" | python3 -c "
 import json,sys
@@ -29734,6 +29737,113 @@ check "§244(4b) the hint, evaluated by a shell, is exactly: sandy --stop --work
 unset -f _s244_run _s244_not_version
 rm -rf "$_S244_D"
 unset _S244_SANDY _S244_D _S244_FULL _S244_WS _S244_H _S244_N
+
+# ============================================================
+section "§241: --print-state measures sandbox sizes only with --sizes (B7b)"
+# ============================================================
+# The du walk behind size_bytes was ~55 of ~70 s of a full-mode call on a host
+# with 84 sandboxes, long enough to time two consumers out, so since 2.9.0 it
+# is opt-in. The property, measured with a du stub that logs every call: full
+# mode without --sizes runs du ZERO times and reports size_bytes null with
+# sizes_computed false; --sizes runs it once per sandbox and reports the
+# stub's KiB times 1024 with sizes_computed true; light never runs it; and
+# light --sizes is a usage error (0 bytes of stdout, exit 1), never a light
+# document that quietly dropped the flag. --sizes anywhere else is refused.
+# Fixture homes: A holds one sandbox (value checks), B holds two (the
+# once-per-sandbox count); every JSON assertion parses the document.
+_S241="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S241/A/sandboxes/one-aaaa1111" "$_S241/B/sandboxes/one-bbbb1111" \
+    "$_S241/B/sandboxes/two-bbbb2222" "$_S241/bin"
+for _s241_sb in "$_S241/A/sandboxes/one-aaaa1111" "$_S241/B/sandboxes/one-bbbb1111" "$_S241/B/sandboxes/two-bbbb2222"; do
+    echo "2.9.0" > "$_s241_sb/.sandy_created_version"
+    printf '{ "schema_version": 1, "sandbox_name": "%s", "workspace_path": "/ws/x" }\n' \
+        "$(basename "$_s241_sb")" > "$_s241_sb/WORKSPACE.json"
+done
+unset _s241_sb
+cat > "$_S241/bin/docker" <<'S241DOCKER'
+#!/usr/bin/env bash
+echo "$*" >> "$S241_DOCKER_LOG"
+case "$1" in
+    info|ps) exit 0 ;;
+    image) exit 1 ;;
+    *) exit 0 ;;
+esac
+S241DOCKER
+cat > "$_S241/bin/du" <<'S241DU'
+#!/usr/bin/env bash
+echo "$*" >> "$S241_DU_LOG"
+printf '7\t%s\n' "${2:-x}"
+S241DU
+chmod +x "$_S241/bin/docker" "$_S241/bin/du"
+
+# _s241_run NAME HOME ARGS... : run sandy with the stubs first on PATH; keeps
+# NAME.out, NAME.err, NAME.rc, NAME.du (one line per du call) and NAME.docker.
+_s241_run() {
+    local _n="$1" _h="$2" _rc=0; shift 2
+    : > "$_S241/$_n.du"; : > "$_S241/$_n.docker"
+    env -u SANDY_VERBOSE -u SANDY_AGENT -u SANDY_HOST_ID PATH="$_S241/bin:$PATH" \
+        SANDY_HOME="$_S241/$_h" S241_DU_LOG="$_S241/$_n.du" S241_DOCKER_LOG="$_S241/$_n.docker" \
+        bash "$SANDY_SCRIPT" "$@" >"$_S241/$_n.out" 2>"$_S241/$_n.err" </dev/null || _rc=$?
+    echo "$_rc" > "$_S241/$_n.rc"
+}
+_s241_run full    A --print-state
+_s241_run sizes   A --print-state --sizes
+_s241_run fsizes  A --print-state full --sizes
+_s241_run sizesf  A --print-state --sizes full
+_s241_run two     B --print-state --sizes
+_s241_run twonone B --print-state
+_s241_run light   A --print-state light
+_s241_run lsizes  A --print-state light --sizes
+_s241_run sizesl  A --print-state --sizes light
+_s241_run bare    A --sizes
+_s241_run prompt  A -p hello --sizes
+
+# One checker: NAME, expected sizes_computed (true|false), expected size_bytes
+# for every sandbox (null or an integer), expected sandbox count. It also
+# requires exit 0, exactly one JSON document, 0 bytes of stderr, and
+# sizes_computed as the LAST top-level key (every earlier key keeps its place).
+_S241_PY="$_S241/check.py"
+cat > "$_S241_PY" <<'PY'
+import json, os, sys
+d, name, want_sc, want_size, want_n = sys.argv[1:6]
+p = os.path.join(d, name)
+assert open(p + ".rc").read().strip() == "0", "rc " + open(p + ".rc").read()
+assert os.path.getsize(p + ".err") == 0, "stderr: " + open(p + ".err").read()
+doc = json.loads(open(p + ".out").read())
+keys = list(doc.keys())
+assert keys[-1] == "sizes_computed", keys[-3:]
+assert doc["sizes_computed"] is (want_sc == "true"), doc["sizes_computed"]
+sbs = doc["sandboxes"]
+assert len(sbs) == int(want_n), len(sbs)
+for s in sbs:
+    assert "size_bytes" in s, s["name"]
+    if want_size == "null":
+        assert s["size_bytes"] is None, (s["name"], s["size_bytes"])
+    else:
+        v = s["size_bytes"]
+        assert isinstance(v, int) and not isinstance(v, bool) and v == int(want_size), (s["name"], v)
+PY
+_s241_ndu() { wc -l < "$_S241/$1.du" | tr -d ' '; }
+
+check "§241(1) full mode without --sizes: zero du calls, every size_bytes present and null, sizes_computed false (mutations: always walk; sizes_computed hard-coded true)" \
+    bash -c 'python3 "$1" "$2" full false null 1 && [ "$3" = 0 ] || { cat "$2/full.du"; exit 1; }' _ "$_S241_PY" "$_S241" "$(_s241_ndu full)"
+check "§241(2) full mode with --sizes: one du call naming the sandbox, size_bytes is the stub KiB times 1024, sizes_computed true (mutation: never walk)" \
+    bash -c 'python3 "$1" "$2" sizes true 7168 1 && [ "$3" = 1 ] && grep -q "one-aaaa1111" "$2/sizes.du" || { cat "$2/sizes.du"; exit 1; }' _ "$_S241_PY" "$_S241" "$(_s241_ndu sizes)"
+check "§241(3) --sizes is accepted before or after the full mode argument, with the same document" \
+    bash -c 'python3 "$1" "$2" fsizes true 7168 1 && python3 "$1" "$2" sizesf true 7168 1 && cmp -s "$2/sizes.out" "$2/fsizes.out" && cmp -s "$2/sizes.out" "$2/sizesf.out" && [ "$3" = 1 ] && [ "$4" = 1 ]' _ "$_S241_PY" "$_S241" "$(_s241_ndu fsizes)" "$(_s241_ndu sizesf)"
+check "§241(4) with --sizes du runs once per sandbox (two sandboxes: two calls, one per path); without it, none" \
+    bash -c 'python3 "$1" "$2" two true 7168 2 && [ "$3" = 2 ] && [ "$(grep -c "one-bbbb1111" "$2/two.du")" = 1 ] && [ "$(grep -c "two-bbbb2222" "$2/two.du")" = 1 ] && python3 "$1" "$2" twonone false null 2 && [ "$4" = 0 ] || { cat "$2/two.du"; exit 1; }' _ "$_S241_PY" "$_S241" "$(_s241_ndu two)" "$(_s241_ndu twonone)"
+check "§241(5) light mode: zero du calls, size_bytes null, sizes_computed false" \
+    bash -c 'python3 "$1" "$2" light false null 1 && [ "$3" = 0 ]' _ "$_S241_PY" "$_S241" "$(_s241_ndu light)"
+check "§241(6) light --sizes, in either order, is a usage error: exit 1, 0 bytes of stdout, one [sandy] ERROR line naming --sizes on stderr, no du call (mutation: accept --sizes with light)" \
+    bash -c 'for n in lsizes sizesl; do [ "$(cat "$1/$n.rc")" = 1 ] && [ ! -s "$1/$n.out" ] && grep -q "^\[sandy\] ERROR: .*--sizes" "$1/$n.err" && [ ! -s "$1/$n.du" ] || { echo "case $n"; cat "$1/$n.rc" "$1/$n.out" "$1/$n.err"; exit 1; }; done' _ "$_S241"
+check "§241(7) --sizes without --print-state is refused (exit 1, named on stderr), never forwarded to an agent or launched" \
+    bash -c 'for n in bare prompt; do [ "$(cat "$1/$n.rc")" = 1 ] && grep -q "ERROR: --sizes is only accepted with --print-state" "$1/$n.err" && ! grep -q "^run" "$1/$n.docker" && [ ! -s "$1/$n.du" ] || { echo "case $n"; cat "$1/$n.rc" "$1/$n.err" "$1/$n.docker"; exit 1; }; done' _ "$_S241"
+check "§241(8) --print-schema advertises --sizes in cli_flags" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any(f[\"name\"]==\"--sizes\" for f in d[\"cli_flags\"])" "$1"' _ "$_SCHEMA_CACHE"
+unset -f _s241_run _s241_ndu
+rm -rf "$_S241"
+unset _S241 _S241_PY
 
 # BEGIN SUMMARY
 # ============================================================

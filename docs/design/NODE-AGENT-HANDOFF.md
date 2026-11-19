@@ -68,7 +68,7 @@ New in 1.8.0:
 | Field | Where | Mode | Meaning |
 |---|---|---|---|
 | `host_id`, `host_id_source` | top level | both | Advisory host identity (`uname -n`, or `SANDY_HOST_ID`) |
-| `size_bytes` | `sandboxes[]` | **full only** | Allocated disk (`du -skx` × 1024). `null` in light mode |
+| `size_bytes` | `sandboxes[]` | **full + `--sizes` only** | Allocated disk (`du -skx` × 1024). `null` in light mode and, since 2.9.0, in full mode without `--sizes` (top-level `sizes_computed` says whether the walk ran) |
 | `workspace_exists` | `sandboxes[]` | both | Tri-state; costs no extra spawn |
 | `handoff_enabled` | `sandboxes[]` | both | The `.handoff-enabled` **marker only** |
 
@@ -125,8 +125,8 @@ sandy --doctor >/dev/null 2>&1 && echo healthy || echo unhealthy
 sandy --print-state light | jq -c '{host: .host_id, n: (.sandboxes|length),
   live: [.running_containers[] | select(.daemon)] | length}'
 
-# Disk pressure (full mode; du walk)
-sandy --print-state | jq -r '.sandboxes | sort_by(-(.size_bytes//0))[:5][]
+# Disk pressure (full mode with --sizes; du walk)
+sandy --print-state --sizes | jq -r '.sandboxes | sort_by(-(.size_bytes//0))[:5][]
   | "\(.size_bytes/1048576|floor)MB \(.name)"'
 
 # Find sandboxes whose workspace is gone
