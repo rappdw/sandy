@@ -113,7 +113,7 @@ Grok Build is xAI's coding agent. Sandy installs it in the image from `https://x
 | API key | `XAI_API_KEY=xai-...` in `.sandy/.secrets` or env | Forwarded into the container; the primary path |
 | OAuth | `grok login` inside the container | Session persists in the `~/.grok` sandbox mount across launches |
 
-- Model: `GROK_MODEL=grok-4.5` (default; passed as `-m`). Probe override: `SANDY_GROK_AUTH=auto|api_key|oauth`.
+- Model: `GROK_MODEL=<model>` passes `-m <model>`. Unset, sandy passes no `-m` and grok uses its own default. Probe override: `SANDY_GROK_AUTH=auto|api_key|oauth`.
 - Headless mode (`-p` / `--print` / `--prompt "..."`) runs `grok --no-auto-update -p "<prompt>"` (grok can't self-update against the read-only rootfs). `--continue` / `-c` is dropped.
 - Not supported with `grok` in v0: `--remote`, `SANDY_SKILL_PACKS`, synthkit slash-commands, channels beyond the host-side Telegram relay. Auto-update detection isn't wired (no version API) — `sandy --rebuild` re-fetches the latest grok.
 

@@ -51,7 +51,14 @@ starts a fresh session (with a supervisor still alive, it exits `6` instead).
 See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
-**Exit codes** — `--attach`: `0` = the session ended while you were attached,
+**Exit codes** — `--start`: `0` = ready, `6` = refused before launch (an approval
+couldn't be granted; answer it once interactively) or a feature entry started
+and then exited inside its startup window, `7` = the container is crash-looping
+(including a feature entry that cannot start at all), `8` = timed out waiting
+for the session, `9` = a named Claude session (`.sandy/sessions/`) did not come
+up (the container is left running; see
+[Named Claude sessions](agents.md#named-claude-sessions-sandysessions)).
+`--attach`: `0` = the session ended while you were attached,
 `3` = you detached cleanly and the session is still running, `4` = no such
 session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = stopped, `4` = no such session,
 `5` = teardown failed. `--stop` returns only after the session's supervisor has finished its teardown (proxy, networks, lock), so `--stop` or `--stop-all` followed straight away by `--start` is safe. So is starting several workspaces at once: a launch never removes another launch's proxy while that launch is still starting (#498).
@@ -128,10 +135,10 @@ sandy --exec --dry-run        # print the docker exec command, run nothing
 **Do not hand-roll this.** The obvious form is wrong in a way that does not announce itself:
 
 ```sh
-docker exec -it -u claude <container> /bin/bash     # -> "I have no name!"
+docker exec -it -u sandy <container> /bin/bash      # -> "I have no name!"
 ```
 
-The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u sandy` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
+The image creates the user with `useradd -u 1001 sandy`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u sandy` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
 
 `--exec` uses the numeric `-u $(id -u):$(id -g)`, sets `-w` to the container-side workspace path, and sets `HOME` explicitly (as root, `HOME=/root` sits on the read-only rootfs — which is why an in-container `codex logout` fails with `Read-only file system`). It finds a daemon container by label and a foreground one by exact name, exits `4` when the workspace has no running container, and otherwise passes the command's own exit status through.
 
