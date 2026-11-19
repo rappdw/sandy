@@ -16590,6 +16590,37 @@ _sandy_build_allowed() {
     exit 1
 }
 
+# _sandy_parent_image_id DOCKERFILE -- the image id this Dockerfile's FROM
+# resolves to right now, or "absent". #294: the skills images are built FROM the
+# agent image and rebuilt only when their OWN Dockerfile changes, so once
+# sandy-claude-code moves, a skill-pack sandbox keeps launching with whatever
+# user-setup.sh and entrypoint.sh were baked in at its last build. Measured in
+# the field: a gstack base from 2026-07-20 carried a user-setup.sh predating the
+# relay supervisor (1.10.0), so every launch mounted the relay slot, exported
+# SANDY_HANDOFF_RELAY, started the agent -- and never started the supervisor,
+# because the script that would start it was not in the image. --print-state
+# then reported relay.state=failed for a sandbox that had done nothing wrong.
+#
+# BUILD_HASH for the agent images folds in user-setup.sh and entrypoint.sh for
+# exactly this reason; the skills chain inherits those files through FROM and
+# so never sees them change. Folding the parent's id into the child's cache
+# key makes a rebuilt parent invalidate the chain the same way an edited
+# Dockerfile does. The agent images (and sandy-full) fold in sandy-base's id
+# the same way: a base rebuilt by one agent's launch rebuilds every OTHER
+# agent's image on its next launch, not only the agent that launched.
+#
+# The FROM is READ FROM THE FILE rather than reconstructed: Dockerfile.skills is
+# FROM the skills-base image when a pack needs one and FROM the agent image when
+# none does, so a second copy of that rule here would be a second place to get
+# it wrong. awk with a field compare, no regex, so it is BWK-safe.
+_sandy_parent_image_id() {
+    local _df="$1" _from
+    [ -f "$_df" ] || { printf 'absent'; return 0; }
+    _from="$(awk 'toupper($1)=="FROM"{print $2; exit}' "$_df")"
+    [ -n "$_from" ] || { printf 'absent'; return 0; }
+    docker image inspect -f '{{.Id}}' "$_from" 2>/dev/null || printf 'absent'
+}
+
 # Phase 1: Base image (language runtimes — rebuilds rarely)
 BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | sha256 | cut -d' ' -f1)"
 BASE_HASH_FILE="$SANDY_HOME/.base_build_hash"
@@ -16672,7 +16703,12 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
 fi
 
 # Phase 2: Final image (agent — rebuilds on agent updates or base change)
-BUILD_HASH="$(cat "$DOCKERFILE_PATH" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/user-setup.sh" "$SANDY_HOME/tmux.conf" | sha256 | cut -d' ' -f1)"
+# The key chains sandy-base's image id, read after Phase 1 so a base this
+# launch rebuilt is the one hashed: every agent image is FROM sandy-base, and
+# a base rebuilt by ANOTHER agent's launch leaves BASE_REBUILT false here.
+# The id is stable while the base is, and "absent" (also stable) when docker
+# cannot answer, so the key never moves from one launch to the next by itself.
+BUILD_HASH="$( { cat "$DOCKERFILE_PATH" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/user-setup.sh" "$SANDY_HOME/tmux.conf"; printf 'parent:%s\n' "$(_sandy_parent_image_id "$DOCKERFILE_PATH")"; } | sha256 | cut -d' ' -f1)"
 HASH_FILE="$SANDY_HOME/$BUILD_HASH_FILE_NAME"
 NEEDS_BUILD=false
 if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || [ "$BASE_REBUILT" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
@@ -16917,8 +16953,9 @@ if [ "$NEEDS_BUILD" = true ]; then
         elif [ -n "$_old_agent_id" ]; then
             warn "Agent image rebuild failed (docker build exit $_agent_build_rc) — continuing on the existing image."
             # Drop the build hash: the kept image no longer matches it when the
-            # trigger was not in BUILD_HASH (a rebuilt base, or a release that
-            # a later launch does not look up, as under SANDY_OFFLINE), and a
+            # trigger was not in BUILD_HASH (a release that a later launch does
+            # not look up, as under SANDY_OFFLINE; a rebuilt base moves
+            # BUILD_HASH through its id, unless docker reused the id), and a
             # stale match would report the image up to date forever. Without it the next launch needs the build,
             # and the record below decides whether that waits out the TTL.
             # rm -f on a link removes the link; $SANDY_HOME is host-only.
@@ -17269,35 +17306,6 @@ start_proxy_sidecar() {
 # down on exit. It is called *after* the cleanup trap is installed, below, so a
 # failure during network/proxy setup can't leak networks (which would exhaust
 # Docker's address pool across repeated failed launches).
-
-# _sandy_parent_image_id DOCKERFILE -- the image id this Dockerfile's FROM
-# resolves to right now, or "absent". #294: the skills images are built FROM the
-# agent image and rebuilt only when their OWN Dockerfile changes, so once
-# sandy-claude-code moves, a skill-pack sandbox keeps launching with whatever
-# user-setup.sh and entrypoint.sh were baked in at its last build. Measured in
-# the field: a gstack base from 2026-07-20 carried a user-setup.sh predating the
-# relay supervisor (1.10.0), so every launch mounted the relay slot, exported
-# SANDY_HANDOFF_RELAY, started the agent -- and never started the supervisor,
-# because the script that would start it was not in the image. --print-state
-# then reported relay.state=failed for a sandbox that had done nothing wrong.
-#
-# BUILD_HASH for the agent images already folds in user-setup.sh and
-# entrypoint.sh for exactly this reason; the skills chain inherits those files
-# through FROM and so never sees them change. Folding the parent's id into the
-# child's cache key makes a rebuilt parent invalidate the chain the same way an
-# edited Dockerfile does.
-#
-# The FROM is READ FROM THE FILE rather than reconstructed: Dockerfile.skills is
-# FROM the skills-base image when a pack needs one and FROM the agent image when
-# none does, so a second copy of that rule here would be a second place to get
-# it wrong. awk with a field compare, no regex, so it is BWK-safe.
-_sandy_parent_image_id() {
-    local _df="$1" _from
-    [ -f "$_df" ] || { printf 'absent'; return 0; }
-    _from="$(awk 'toupper($1)=="FROM"{print $2; exit}' "$_df")"
-    [ -n "$_from" ] || { printf 'absent'; return 0; }
-    docker image inspect -f '{{.Id}}' "$_from" 2>/dev/null || printf 'absent'
-}
 
 # --- Phase 2.5: Skill pack image (after config so SANDY_SKILL_PACKS is available) ---
 if [ -n "${SANDY_SKILL_PACKS:-}" ]; then

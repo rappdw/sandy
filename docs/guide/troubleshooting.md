@@ -79,14 +79,15 @@ the existing image. So that every launch on a bad network does not repeat the
 whole failed build, the same rebuild is not tried again for 30 minutes. A
 different agent, changed image inputs, or a newer agent release that sandy's
 update check can see are not held back, an image that does not exist yet
-is always built, and a launch that rebuilds the base image always rebuilds the
-agent image on top of it. A release the check cannot see (its registry unreachable, or
+is always built, and a rebuilt base image is never held back: the agent
+image is rebuilt on top of it at its next launch, whichever agent's launch
+rebuilt the base. A release the check cannot see (its registry unreachable, or
 `SANDY_OFFLINE=1`) waits out the 30 minutes too. If the failed rebuild was for a
 new release, a launch that cannot see that release rebuilds at once with what
 it does see, and a failure of that build is held back for 30 minutes in turn.
 
 **Fix.** Nothing, if you are happy on the existing image: the rebuild is tried
-again automatically once the 30 minutes are up, or sooner when a launch
-rebuilds the base image (for example after a sandy upgrade that changes it).
+again automatically once the 30 minutes are up, or sooner once the base image
+is rebuilt (for example after a sandy upgrade that changes it).
 A successful rebuild clears the hold. To retry at once (say, after
 fixing the network), run `sandy --rebuild`.
