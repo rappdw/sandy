@@ -28222,7 +28222,10 @@ _s233_run() {
                 SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
             esac
         done
-        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" \
+        # Session C's codex comes from its workspace config, a value wider than
+        # the host's default claude, so since the ordered passive gate (§240) it
+        # needs the approval a real session got when it was first started.
+        cd "$_S233_D" && env PATH="$_S233_D/bin:$PATH" HOME="$_S233_D" SANDY_HOME="$_S233_D/sh" S233_D="$_S233_D" SANDY_AUTO_APPROVE_PRIVILEGED=1 \
             SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$SANDY_SCRIPT" --update-sessions --dry-run "$@" </dev/null >"$_S233_D/out" 2>&1
     ) || _S233_RC=$?
 }
