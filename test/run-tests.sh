@@ -12381,7 +12381,7 @@ check "§127(8) ...and a combo round-trips through the marker intact" \
 check "§127(9) a sandbox with NO marker reports null, never \"claude\" — filling in the default would rebuild the guess this field retires, and would be invisible because most sandboxes really are claude" \
     bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s127_field a-never)"
 check "§127(10) agents is emitted in LIGHT mode too — a fleet poller must not pay for a du walk to learn which agent a sandbox runs" \
-    bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"agents\":\[\"codex\"\]"' -- "$SANDY_SCRIPT" "$_S127_PSH"
+    bash -c 'SANDY_HOME="$2" "$1" --print-state light 2>/dev/null | tr -d " \n" | grep -q "\"agents\":\[\"codex\"\]"' -- "$SANDY_SCRIPT" "$_S127_PSH"
 check "§127(11) the stream contract holds with the new field (0 bytes on stderr)" \
     bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S127_PSH"
 # Anti-drift: the composer's key and the reader's key must be the same one.
@@ -20338,7 +20338,7 @@ for k,v in fe.items():
     printf '{\n  "schema": 1,\n  "feature_entries": {\n    "alpha": {"path": "/opt/sandy/features/alpha/r"}\n  },\n  "cred_mode": "full"\n}\n' \
         > "$_S176B_H2/sandboxes/new-11112222/sandy-session.json"
     _S176B_PSFULL="$(SANDY_HOME="$_S176B_H2" bash "$SANDY_SCRIPT" --print-state 2>/dev/null)"
-    _S176B_PSLIGHT="$(SANDY_HOME="$_S176B_H2" bash "$SANDY_SCRIPT" --print-state --light 2>/dev/null)"
+    _S176B_PSLIGHT="$(SANDY_HOME="$_S176B_H2" bash "$SANDY_SCRIPT" --print-state light 2>/dev/null)"
     check "§176(b2) a new-shape sandbox reports no 'relay' key and feature_entries.alpha has the full live-state key set with no relay_alias/disabled_by, in FULL mode (mutation M1: re-adding relay_alias to the emitted entry reddens this)" \
         bash -c 'printf "%s" "$1" | python3 -c "
 import json,sys
@@ -21378,7 +21378,7 @@ check "§180(5) the image value is ONE line in the marker, so a host reader take
 
 # --- --print-state reads it back, from the composer's REAL output ----------
 # One $SANDY_HOME per fixture, so the document is unambiguous without carving.
-_s180_ps() {   # _s180_ps <fixture> <marker-file-or-empty> [--light] -> sandboxes[0].image, or PARSE-FAIL
+_s180_ps() {   # _s180_ps <fixture> <marker-file-or-empty> [light] -> sandboxes[0].image, or PARSE-FAIL
     local h="$_S180_DIR/home-$1"
     rm -rf "$h"; mkdir -p "$h/sandboxes/$1"
     printf '{"workspace_path":"/nonexistent/%s"}\n' "$1" > "$h/sandboxes/$1/WORKSPACE.json"
@@ -21403,7 +21403,7 @@ check "§180(9) no marker at all reads null" \
 check "§180(10) an image line of a foreign shape reads null and the document still parses (stream contract)" \
     bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-bad "$_S180_DIR/bad.json")"
 check "§180(11) emitted in LIGHT mode too (a marker read, no docker spawn)" \
-    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-light "$_S180_DIR/sb-yes/sandy-session.json" --light)" "$_S180_YES"
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-light "$_S180_DIR/sb-yes/sandy-session.json" light)" "$_S180_YES"
 check "§180(12) 0 bytes on stderr with a foreign image line (stream contract, §92/§93)" \
     bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S180_DIR/home-rt-bad"
 check "§180(13) the marker WRITES the key --print-state READS (mutation: rename either side and every sandbox reports null)" \
@@ -21472,7 +21472,7 @@ check "§181(pre) the REAL gate, answered y on a pty, wrote the approval this se
     test "$(head -n1 "$_S181_H/approvals/dockerfile-$_S181_H16.list" 2>/dev/null)" = "$_S181_CTX"
 # A passive-key approval beside it, to prove the two arrays stay separate.
 printf '%s\n# workspace: %s\n# approved:  2026-01-01T00:00:00Z\n' "$(printf 'k%.0s' 1 2 3)" "/elsewhere" > "$_S181_H/approvals/passive-1234567890abcdef.list"
-# _s181_q <home> <python expr over d> [--light] -> the expression's JSON, or PARSE-FAIL
+# _s181_q <home> <python expr over d> [light] -> the expression's JSON, or PARSE-FAIL
 _s181_q() {
     SANDY_HOME="$1" "$SANDY_SCRIPT" --print-state ${3:-} 2>/dev/null \
         | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(eval(sys.argv[1]), sort_keys=True))' "$2" 2>/dev/null \
@@ -21496,7 +21496,7 @@ assert re.match(r\"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$\", e
 " "$1"' _ "$_S181_ENTRY"
 check "§181(3) the two gates stay in separate arrays: approvals holds only the passive list, unchanged in shape (mutation: globbing *.list into either array mixes them)" \
     bash -c '[ "$1" = "[\"1234567890abcdef\"]" ]' _ "$(_s181_q "$_S181_H" '[a["workspace_hash"] for a in d["approvals"]]')"
-# `light` is POSITIONAL: `--print-state --light` is read as full mode, so the
+# `light` is POSITIONAL: `--print-state --light` was read as full mode (since 2.9.0 it is refused), so the
 # first draft of this check never exercised light mode. (4b) proves the mode
 # (light reports dangling_images as null; full counts them).
 check "§181(4) emitted in LIGHT mode too (a directory glob, no docker)" \
@@ -29811,6 +29811,7 @@ _s241_run lf      A --print-state light full
 _s241_run eq      A --print-state --sizes=1
 _s241_run typo    A --print-state light --size
 _s241_run unk     A --print-state --frobnicate
+_s241_run dl      A --print-state --light
 _S241_RUN_PATH="$_S241/nodu" _s241_run nodu A --print-state --sizes
 
 # One checker: NAME, expected sizes_computed (true|false), expected size_bytes
@@ -29860,8 +29861,8 @@ check "§241(10) --sizes with no du on PATH: sizes_computed true, size_bytes nul
     bash -c '[ ! -e "$2/nodu/du" ] && [ -x "$2/nodu/bash" ] && python3 "$1" "$2" nodu true null 1' _ "$_S241_PY" "$_S241"
 check "§241(11) the FIRST argument that is not --sizes is the mode: full light --sizes is full mode with sizes, light full is light (mutation: last argument wins)" \
     bash -c 'python3 "$1" "$2" fl true 7168 1 && python3 "$1" "$2" lf false null 1 && grep -q "\"not_computed\"" "$2/lf.out" && ! grep -q "\"not_computed\"" "$2/fl.out" && [ "$3" = 1 ] && [ "$4" = 0 ]' _ "$_S241_PY" "$_S241" "$(_s241_ndu fl)" "$(_s241_ndu lf)"
-check "§241(12) any other --option after --print-state is a usage error naming it (--sizes=1, a --size typo, an unknown one): exit 1, 0 bytes of stdout, no du call" \
-    bash -c 'for n in eq:--sizes=1 typo:--size unk:--frobnicate; do c="${n%%:*}"; a="${n#*:}"; [ "$(cat "$1/$c.rc")" = 1 ] && [ ! -s "$1/$c.out" ] && grep -qF -- "[sandy] ERROR: --print-state: unknown option $a " "$1/$c.err" && [ ! -s "$1/$c.du" ] || { echo "case $c"; cat "$1/$c.rc" "$1/$c.out" "$1/$c.err"; exit 1; }; done' _ "$_S241"
+check "§241(12) any other --option after --print-state is a usage error naming it (--sizes=1, a --size typo, --light for light, an unknown one): exit 1, 0 bytes of stdout, no du call" \
+    bash -c 'for n in eq:--sizes=1 typo:--size unk:--frobnicate dl:--light; do c="${n%%:*}"; a="${n#*:}"; [ "$(cat "$1/$c.rc")" = 1 ] && [ ! -s "$1/$c.out" ] && grep -qF -- "[sandy] ERROR: --print-state: unknown option $a " "$1/$c.err" && [ ! -s "$1/$c.du" ] || { echo "case $c"; cat "$1/$c.rc" "$1/$c.out" "$1/$c.err"; exit 1; }; done' _ "$_S241"
 check "§241(8) --print-schema advertises --sizes in cli_flags" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any(f[\"name\"]==\"--sizes\" for f in d[\"cli_flags\"])" "$1"' _ "$_SCHEMA_CACHE"
 unset -f _s241_run _s241_ndu

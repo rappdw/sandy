@@ -469,9 +469,11 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > --sizes`, `--print-state --sizes full`). With `light` it is a usage error
 > (see "Stream contract" above: 0 bytes of stdout, a `[sandy] ERROR:` line on
 > stderr, exit 1). So is any other argument after `--print-state` that
-> starts with `--` (`--sizes=1`, a typo such as `--size`): none ever had a
-> meaning there, and reading one as the mode would quietly give full mode
-> without sizes. The mode is the FIRST argument that is not `--sizes`
+> starts with `--` (`--sizes=1`, a typo such as `--size`, or `--light` for
+> `light`): none ever had a meaning there, and reading one as the mode would
+> quietly give full mode without sizes. Before 2.9.0 such an argument gave a
+> full-mode document; `--light` in particular did, which two of sandy's own
+> tests had relied on without noticing. The mode is the FIRST argument that is not `--sizes`
 > (`--print-state full light --sizes` is full mode with sizes, as `$2` was
 > before 2.9.0); a later one is ignored, as before. As a launcher argument
 > (`sandy --sizes`, `sandy -p … --sizes`) the launcher's parser refuses it
