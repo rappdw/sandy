@@ -51,9 +51,11 @@ starts a fresh session (with a supervisor still alive, it exits `6` instead).
 See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
-**Exit codes** — `--start`: `0` = ready, `6` = refused before launch (an approval
-couldn't be granted; answer it once interactively) or a feature entry started
-and then exited inside its startup window, `7` = the container is crash-looping
+**Exit codes** — `--start`: `0` = ready, `6` = refused before launch (something needs a
+person at a terminal: an approval to answer, a missing or expired credential the
+agent would prompt for, a sandbox that needs migrating; the error names which),
+or (2.9.0; `7` before) a feature entry started and then exited inside its
+startup window, `7` = the container is crash-looping
 (including a feature entry that cannot start at all), `8` = timed out waiting
 for the session, `9` = a named Claude session (`.sandy/sessions/`) did not come
 up (the container is left running; see

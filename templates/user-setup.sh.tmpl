@@ -1592,7 +1592,7 @@ build_grok_cmd() {
     # not a subcommand like codex/opencode). Interactive: `grok` (TUI).
     # --no-auto-update: the rootfs is read-only so grok can't self-update anyway;
     # this skips its background update check (docs.x.ai headless-scripting). Model
-    # via -m (default grok-4.5); auth from XAI_API_KEY (forwarded by the launcher).
+    # via -m when GROK_MODEL is set (no default pinned); auth from XAI_API_KEY (forwarded by the launcher).
     local cmd="grok --no-auto-update"
     if [ -n "${GROK_MODEL:-}" ]; then
         cmd+=" -m $(printf "%q" "$GROK_MODEL")"

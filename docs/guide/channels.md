@@ -61,7 +61,7 @@ Set both tokens in `.sandy/.secrets` and list both channels, comma-separated, in
 SANDY_CHANNELS=telegram,discord
 ```
 
-The same bare names work for every agent: single-agent `claude` passes each one to `claude --channels` as `plugin:<name>@claude-plugins-official`, and the host relay (below) matches them as they are. The older `plugin:<name>@<marketplace>` spelling still works for single-agent `claude` but prints a deprecation warning, and the relay does not recognize it.
+The same bare names work for every agent that supports the channel (Discord needs single-agent `claude`; the relay is Telegram-only): single-agent `claude` passes each one to `claude --channels` as `plugin:<name>@claude-plugins-official`, and the host relay (below) matches them as they are. The older `plugin:<name>@<marketplace>` spelling still works for single-agent `claude` but prints a deprecation warning, and the relay does not recognize it.
 
 With [named Claude sessions](agents.md#named-claude-sessions-sandysessions), channels go to the session whose file declares `receives: [channels]`: `SANDY_CHANNELS` set with no such session refuses the launch, and the host-side relay does not run.
 

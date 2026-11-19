@@ -2229,7 +2229,7 @@ CODEX_MODEL|string|||0.10.0|stable|Codex model override, passed as codex -m. Uns
 SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||0.10.0|stable|Codex credential probe strategy. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
 OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
-GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m; default grok-4.5).
+GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m). Unset: sandy passes no -m and grok uses its own default model.
 SANDY_GROK_AUTH|enum:auto,api_key,oauth|auto||1.5.0|stable|Grok Build credential probe strategy. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
 MIRROR_MODEL|string|||2.9.0|experimental|Mirror CLI model override (passed as --model for that launch only; Mirror's own saved /model choice otherwise applies; default Beam-1.0-501B-A23B).
 SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth,profile|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key or a long-lived CLAUDE_CODE_OAUTH_TOKEN (2.8.0, #437): the account login is the only Claude credential in the box, which is also what claude.ai connectors need; with no account login on the host it falls back to the token, with a warning. profile (1.11.0): use an Anthropic Console profile written by `ant auth login` (the Claude Platform CLI) -- the ONLY way to reach a workspace-bound entitlement such as Claude Mythos. Sandy copies just the selected profile (ANTHROPIC_PROFILE, else the host active_config, else default) from $ANTHROPIC_CONFIG_DIR (default ~/.config/anthropic) into an ephemeral rw mount at ~/.config/anthropic and withholds the OAuth credentials file, CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, because Claude Code ranks a user_oauth profile BELOW a /login credential and below every env credential -- measured on 2.1.263. Never probed by auto. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value, including profile, is approval-gated, because it brings in an account credential the host did not choose (before 2.9.0 only oauth was gated, so a workspace auto silently replaced a host api_key with the account refresh token). api_key narrows only when there is a key: with no ANTHROPIC_API_KEY it falls back to the mode the environment or host config resolved when that is oauth or profile, and to auto otherwise, so a free workspace api_key can never end up wider than the host's choice.
@@ -11928,7 +11928,7 @@ build_grok_cmd() {
     # not a subcommand like codex/opencode). Interactive: `grok` (TUI).
     # --no-auto-update: the rootfs is read-only so grok can't self-update anyway;
     # this skips its background update check (docs.x.ai headless-scripting). Model
-    # via -m (default grok-4.5); auth from XAI_API_KEY (forwarded by the launcher).
+    # via -m when GROK_MODEL is set (no default pinned); auth from XAI_API_KEY (forwarded by the launcher).
     local cmd="grok --no-auto-update"
     if [ -n "${GROK_MODEL:-}" ]; then
         cmd+=" -m $(printf "%q" "$GROK_MODEL")"
@@ -22930,7 +22930,7 @@ if _sandy_agent_has grok; then
     # resolution is model.api_key > model.env_key > session token > XAI_API_KEY),
     # so — unlike codex — there's no auth.json to materialize; just forward the
     # env var. An interactive `grok login` OAuth session persists in the ~/.grok
-    # sandbox mount (below). GROK_MODEL feeds the `-m` flag; default is grok-4.5.
+    # sandbox mount (below). GROK_MODEL feeds the `-m` flag; unset, no `-m` is passed (grok picks its own default).
     if [ -n "${XAI_API_KEY:-}" ]; then
         _sandy_add_secret_env XAI_API_KEY "$XAI_API_KEY"
     fi
