@@ -2065,7 +2065,8 @@ _sandy_overlay_detect_agent() {
 }
 # One line that changes when anything in tree $1 is added, removed, renamed,
 # re-linked, re-moded or rewritten: the SHA-256 of a sorted listing of every
-# entry's `ls -ldn` line (mode, owner, size, mtime, name), every regular
+# entry's `ls -ldn` line minus its date (mode, links, owner, size, name; the
+# date drops HH:MM for the year at six months, which is no change), every regular
 # file's SHA-256 (one hashing process per batch, via find -exec +) and every
 # link's target (hex, so a target cannot inject a line). Follows $1
 # itself, never links inside it. A CRC (cksum) is forgeable by the agent this
@@ -2077,23 +2078,42 @@ _sandy_overlay_detect_agent() {
 # A link's target as lowercase hex (empty when unreadable): one token that a
 # target holding a tab, newline or escape cannot break out of.
 _sandy_link_hex() { readlink "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true; }
-# Which object a watched path is, as hex (empty when absent): its inode
-# (`ls -diL`, POSIX) and the canonical path it resolves to (`pwd -P`). The
-# launch snapshot records it for every watched path that exists (#id lines);
-# a path the session replaced -- a retargeted link on the way (`.claude ->
-# other`), or a directory renamed aside and recreated, which carries any
-# overlay or :ro mount on it away -- resolves elsewhere or to a new inode.
+# Which object a watched path is, as hex (empty when absent): the canonical
+# path it resolves to (`pwd -P`) and the inode (`ls -diL`, POSIX) of each
+# directory ABOVE it inside the workspace. The launch snapshot records it for
+# every watched path that exists (#id lines). What a session can do to an
+# existing entry shows here: re-point a link on the way (`.claude -> other`:
+# a new canonical path) or rename a parent aside and recreate it (`mv .claude
+# .claude-x`, which carries any overlay or :ro mount below it away: a new
+# parent inode). The entry's own inode is deliberately left out: an existing
+# entry is itself a :ro or overlay mount point the container cannot move or
+# replace, so a change there comes from the host -- an editor, `mise use` or
+# Claude Code saving atomically (write a temp file, rename it over), or a git
+# checkout -- and reporting it would offer to delete the user's own file.
 _sandy_path_identity() {
-    local _c _i
+    local _c _a _rest _i _out
+    [ -e "$1" ] || [ -L "$1" ] || return 0
     if [ -d "$1" ]; then
         _c="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
-    elif [ -e "$1" ] || [ -L "$1" ]; then
-        _c="$(cd "${1%/*}" 2>/dev/null && pwd -P)/${1##*/}" || return 0
     else
-        return 0
+        _c="$(cd "${1%/*}" 2>/dev/null && pwd -P)/${1##*/}" || return 0
     fi
-    _i="$(ls -diL "$1" 2>/dev/null | awk '{print $1}')" || _i=""
-    printf '%s %s' "$_i" "$_c" | od -An -tx1 | tr -d ' \n' || true
+    _out="$_c"
+    _rest="${1#"$WORK_DIR"/}"; _a="$WORK_DIR"
+    while :; do
+        case "$_rest" in */*) ;; *) break ;; esac
+        _a="$_a/${_rest%%/*}"; _rest="${_rest#*/}"
+        _i="$(ls -diL "$_a" 2>/dev/null | awk '{print $1}')" || _i=""
+        _out="$_out $_i"
+    done
+    printf '%s' "$_out" | od -An -tx1 | tr -d ' \n' || true
+}
+# True when an entry the snapshot $2 lists as existing at launch was REPLACED
+# in-session (_sandy_path_identity: a re-pointed link on the way, or a parent
+# renamed aside and recreated), and something is there now.
+_sandy_replaced_since_launch() {
+    _sandy_same_object "$1" "$2" && return 1
+    [ -e "$WORK_DIR/$1" ] || [ -L "$WORK_DIR/$1" ]
 }
 # True when workspace-relative $1 is the same object the snapshot $2 recorded
 # for it. No #id record means not the same: an entry recorded as existing
@@ -2112,7 +2132,7 @@ _sandy_tree_fingerprint() {
     else echo unhashable; return 0; fi
     _out="$(cd "$1" 2>/dev/null || exit 1
         [ -z "$(find . -name "*${_nl}*" -print 2>/dev/null)" ] || exit 1
-        _l="$(find . -exec ls -ldn {} + \
+        _l="$(LC_ALL=C find . -exec ls -ldn {} + | awk '{ $6 = ""; $7 = ""; $8 = ""; print }' \
               && find . -type f -exec $_h {} + \
               && find . -type l -exec sh -c 'for l; do printf "%s -> " "$l"; readlink "$l" | od -An -tx1 | tr -d " \n"; echo; done' _ {} +)" \
             || exit 1
@@ -19992,13 +20012,16 @@ cleanup() {
             && [ -n "${WORK_DIR:-}" ]; then
         _new_protected=()
         _changed_protected=()
+        _replaced_protected=()
         while IFS= read -r _pd; do
             [ -z "$_pd" ] && continue
             # Only flag dirs that DIDN'T exist at launch but DO now (with content).
-            # An entry that existed at launch is skipped only while it is still the
-            # same object; one replaced in-session is judged as if absent at launch.
-            if grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null \
-                    && _sandy_same_object "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+            # One that existed at launch is reported only if the session REPLACED
+            # it (a separate list: it was the user's, so no removal is offered).
+            if grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+                if _sandy_replaced_since_launch "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                    _replaced_protected+=("$_pd")
+                fi
                 continue
             fi
             # ...or that existed with no overlay (a #content fingerprint) and changed.
@@ -20025,8 +20048,10 @@ cleanup() {
         # persists to the host workspace and otherwise goes unreported.
         while IFS= read -r _pf; do
             [ -z "$_pf" ] && continue
-            if grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null \
-                    && _sandy_same_object "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+            if grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+                if _sandy_replaced_since_launch "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                    _replaced_protected+=("$_pf")
+                fi
                 continue
             fi
             if [ -f "$WORK_DIR/$_pf" ]; then
@@ -20039,9 +20064,11 @@ cleanup() {
         # flag it if it now exists with content. git hooks fire on the user's next
         # host git operation, so this belongs in the same warning.
         _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
-        if [ -n "$_cfg_hooks" ] \
-                && ! { grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null \
-                       && _sandy_same_object "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; } \
+        if [ -n "$_cfg_hooks" ] && grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            if _sandy_replaced_since_launch "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                _replaced_protected+=("$_cfg_hooks")
+            fi
+        elif [ -n "$_cfg_hooks" ] \
                 && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
             _new_protected+=("$_cfg_hooks")
         fi
@@ -20079,10 +20106,14 @@ cleanup() {
                         case "$_seen_links" in
                             *" $_lnk "*) ;;
                             *)  _seen_links="$_seen_links$_lnk "
-                                if [ -n "$_lhex0" ]; then _lnote="a link that existed at launch, RETARGETED during this session"
-                                else _lnote="a symbolic link"; fi
-                                printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (%s)\n" "$WORK_DIR" "$_lnk" "$_tgt" "$_lnote" >&2
-                                _rm_links="$_rm_links $(printf '%q' "$_lnk")" ;;
+                                if [ -n "$_lhex0" ]; then
+                                    # The user's link, re-pointed: review it, no removal offered.
+                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a link that existed at launch, RETARGETED during this session: review it)\n" \
+                                        "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                else
+                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a symbolic link)\n" "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                    _rm_links="$_rm_links $(printf '%q' "$_lnk")"
+                                fi ;;
                         esac
                     fi
                 elif [ "$_e" != "$_p" ]; then
@@ -20114,6 +20145,21 @@ cleanup() {
                 printf "${YELLOW}[sandy]${NC} Review the content before any of those operations.\n" >&2
             fi
             printf "\n" >&2
+        fi
+        if [ ${#_replaced_protected[@]} -gt 0 ]; then
+            printf "\n${YELLOW}[sandy]${NC} Protected paths REPLACED during this session (they existed at launch):\n" >&2
+            for _p in "${_replaced_protected[@]}"; do
+                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
+                    printf "${YELLOW}[sandy]${NC}   %s/%q (through %q, now -> %q)\n" "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
+                else
+                    printf "${YELLOW}[sandy]${NC}   %s/%q (a different object now sits at this path)\n" "$WORK_DIR" "$_p" >&2
+                fi
+            done
+            printf "${YELLOW}[sandy]${NC} A link on the way was re-pointed, or a parent directory was renamed aside and the\n" >&2
+            printf "${YELLOW}[sandy]${NC} path recreated, so what is there now is not what sandy protected or overlaid. It was\n" >&2
+            printf "${YELLOW}[sandy]${NC} yours before the session, so sandy offers no removal: review it, and any renamed-aside\n" >&2
+            printf "${YELLOW}[sandy]${NC} sibling, before your next git, IDE or agent operation in this workspace.\n\n" >&2
         fi
         if [ "$_sandy_df_flagged" = true ]; then
             printf "${YELLOW}[sandy]${NC} .sandy/ was CREATED during this session. Sandy runs a .sandy/Dockerfile's RUN\n" >&2

