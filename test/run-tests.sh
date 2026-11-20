@@ -2101,8 +2101,8 @@ check "submodule-hooks loop does NOT use .empty-ro-dir fallback (hybrid model)" 
 # Protected-path snapshot + detection are the replacement defense.
 check "protected-paths launch snapshot file declared" \
     grep -q '\.protected-existed-at-launch' "$SANDY_SCRIPT_PATH"
-check "cleanup compares launch snapshot to detect new appearances" \
-    bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "\\.protected-existed-at-launch"' \
+check "cleanup runs the session-end report, which compares the launch snapshot to detect new appearances" \
+    bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "_sandy_session_end_report " && awk "/^_sandy_session_end_protected_report\\(\\) \\{/,/^}/" "$1" | grep -q "\\.protected-existed-at-launch"' \
     -- "$SANDY_SCRIPT_PATH"
 # "cleanup() reads session-created-stubs and rmdirs entries": run, not grepped,
 # in §219.
@@ -21744,7 +21744,9 @@ names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
-         '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
+         '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved',
+         '_sandy_session_end_protected_report', '_sandy_session_report_path',
+         '_sandy_session_report_add', '_sandy_session_end_report']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
 b = src.index('done < <(_sandy_protected_files; _sandy_watched_git_files)\n', a) + len('done < <(_sandy_protected_files; _sandy_watched_git_files)\n')
@@ -28454,6 +28456,190 @@ unset -f _s248_wt
 unset _S248_L _S248_B _S248_PATH _S248_C_S248_W _S248_H0 _S248_O _S248_CP _S248_R _S248_E _S248_F _S248_S _S248_RD _S248_ED _S248_RL _S248_EL
 unset -f _s248_repo _s248_sha _s248_rec _s248_block _s248_gate
 
+section "§249: a daemon session's session-end report is recorded in its sandbox, printed by the next --start, --attach, --stop and terminal launch, and cleared by --ack-report (#554)"
+# ============================================================
+# WHY. The stderr of a daemon session is $SANDY_HOME/sandboxes/.daemon-start-<pid>.log,
+# which nobody reads, so the session-end report (protected paths that appeared,
+# changed or were replaced in the workspace) reached nobody, and --stop of a
+# supervisor-less daemon ran only the content check. Now the cleanup of the
+# supervisor and that direct teardown record the report in the sandbox (outside
+# the workspace and every container mount), and it is printed until
+# `sandy --ack-report` removes it. A terminal session prints it as before and
+# records nothing.
+#
+# Driven through the real launcher with the A6 stubs. The supervisor is run
+# for real (SANDY_DAEMON_SUPERVISOR=1, the argv the client re-execs; the A6
+# docker stub SIGTERMs it at its detached run, as --stop would). The stub in
+# front of it plays the agent: at the agent run, S249_PLANT=<dir> creates
+# <dir>/planted in the workspace. With S249_CTR set it also answers for a
+# daemon container: `ps -q` (only while S249_UP names an existing file, when
+# set), its labels, and an entry-window probe that reads as ready.
+_S249_B="$_A6_DIR/s249bin"; mkdir -p "$_S249_B"
+{ printf '#!/bin/sh\n'
+  printf 'if [ -n "${S249_CTR:-}" ]; then case "$*" in\n'
+  printf '    "ps -q "*) if [ -z "${S249_UP:-}" ] || [ -e "$S249_UP" ]; then echo "$S249_CTR"; fi; exit 0 ;;\n'
+  printf '    *sandy.daemon_pid*) echo "${S249_DPID:-}"; exit 0 ;;\n'
+  printf '    *sandy.session*) echo "${S249_SESS:-}"; exit 0 ;;\n'
+  printf '    *Mounts*) exit 0 ;;\n'
+  printf '    *State.Running*) echo true; exit 0 ;;\n'
+  printf '    "exec "*) echo none; exit 0 ;;\n'
+  printf '    stop*|"rm -f "*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf 'esac; fi\n'
+  printf 'case " $* " in *" --name sandy-ws-"*)\n'
+  printf '    if [ -n "${S249_PLANT:-}" ]; then mkdir -p "$A6_WS/$S249_PLANT"; printf "x\\n" > "$A6_WS/$S249_PLANT/planted"; fi ;;\n'
+  printf 'esac\n'
+  printf 'exec %q "$@"\n' "$_A6_DIR/bin/docker"; } > "$_S249_B/docker"
+chmod +x "$_S249_B/docker"
+_S249_PATH="$_S249_B:$_A6_DIR/bin:$PATH"
+_S249_ENV=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 PATH="$_S249_PATH")
+_s249_n() { grep -c "$2" "$1" 2>/dev/null || true; }   # $1 = file  $2 = pattern -> count
+
+# (a) the supervisor records the report; a link planted at the record path is
+# replaced, never written through.
+_S249_C=s249; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W"
+_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"
+_S249_REC="$_S249_S/.session-end-report"
+printf 'victim\n' > "$_A6_DIR/$_S249_C/victim"
+ln -s "$_A6_DIR/$_S249_C/victim" "$_S249_REC"
+_a6_launch "$_S249_C" "${_S249_ENV[@]}" SANDY_DAEMON_SUPERVISOR=1 A6_TERM_ON_DETACH=1 S249_PLANT=.vscode \
+    -- --start --workspace "$_S249_W"
+_S249_R="$( { [ -f "$_S249_W/.vscode/planted" ] || echo "the agent run never happened (rc $_A6_RC)"
+    grep -q "Protected paths appeared during this session" "$_A6_DIR/$_S249_C/out" || echo "not printed to the supervisor log"
+    [ -f "$_S249_REC" ] && [ ! -L "$_S249_REC" ] || echo "no record (or still the link)"
+    grep -qF "$_S249_W/.vscode/" "$_S249_REC" 2>/dev/null || echo "the record does not name .vscode/"
+    grep -qE '^\[sandy\] ==== Daemon session ended [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z \(reported by its supervisor' "$_S249_REC" 2>/dev/null || echo "no UTC header"
+    if LC_ALL=C grep -q "$(printf '\033')" "$_S249_REC" 2>/dev/null; then echo "ANSI escapes in the record"; fi
+    [ "$(cat "$_A6_DIR/$_S249_C/victim")" = victim ] || echo "written through the planted link"
+    case "$(ls -l "$_S249_REC" 2>/dev/null)" in -rw-------*) ;; *) echo "not 0600: $(ls -l "$_S249_REC" 2>/dev/null)" ;; esac
+    if ls "$_S249_S"/.session-report.* "$_S249_S"/.session-end-report.* >/dev/null 2>&1; then echo "temp files left"; fi; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(a)" "$_S249_C"
+check "§249(a) a daemon supervisor whose session planted .vscode/ prints the report to its log as before AND records it in the sandbox: plain text, 0600, headed by the UTC end time; a link planted at the record path is replaced, its target untouched (mutation: record only when not the supervisor; write with >> through the path; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (b) the next --stop (no session left: exit 4), --attach (exit 4) and --start
+# (an already running session) each print it, once.
+_S249_D="$_A6_DIR/$_S249_C/out"
+_a6_launch "$_S249_C" PATH="$_S249_PATH" -- --stop --workspace "$_S249_W"
+_S249_R="$( { [ "$_A6_RC" = 4 ] || echo "--stop rc $_A6_RC"
+    [ "$(_s249_n "$_S249_D" "not been acknowledged")" = 1 ] || echo "--stop: shown $(_s249_n "$_S249_D" "not been acknowledged") times"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "--stop: no .vscode/"; } 2>&1)" || true
+_a6_launch "$_S249_C" PATH="$_S249_PATH" -- --attach --workspace "$_S249_W"
+_S249_R="$_S249_R$( { [ "$_A6_RC" = 4 ] || echo "--attach rc $_A6_RC"
+    [ "$(_s249_n "$_S249_D" "not been acknowledged")" = 1 ] || echo "--attach: shown $(_s249_n "$_S249_D" "not been acknowledged") times"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "--attach: no .vscode/"; } 2>&1)" || true
+bash -c 'while :; do sleep 1; done' sandy-supervisor --start --workspace "$_S249_W" </dev/null >/dev/null 2>&1 &
+_S249_SUP=$!
+_a6_launch "$_S249_C" PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID="$_S249_SUP" S249_SESS="$(basename "$_S249_S")" \
+    -- --start --workspace "$_S249_W"
+kill "$_S249_SUP" 2>/dev/null || true; wait "$_S249_SUP" 2>/dev/null || true
+_S249_R="$_S249_R$( { [ "$_A6_RC" = 0 ] || echo "--start rc $_A6_RC"
+    grep -q "already running" "$_S249_D" || echo "--start: not the already-running path"
+    [ "$(_s249_n "$_S249_D" "not been acknowledged")" = 1 ] || echo "--start: shown $(_s249_n "$_S249_D" "not been acknowledged") times"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "--start: no .vscode/"; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(b)" "$_S249_C"
+check "§249(b) the next --stop, --attach and --start of the workspace each print the recorded report once, with the acknowledgement command (mutation: drop the call in any one of them; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (c) a terminal launch prints it: stderr on a pty (stdin stays /dev/null, so
+# the launch is still non-interactive), through a wrapper in place of sandy.
+_S249_PTY="$_A6_DIR/s249pty.py"
+cat > "$_S249_PTY" <<'S249PY'
+import os, pty, sys
+pid, fd = pty.fork()
+if pid == 0:
+    n = os.open('/dev/null', os.O_RDONLY)
+    os.dup2(n, 0)
+    os.execvp('bash', ['bash'] + sys.argv[1:])
+buf = b''
+while True:
+    try:
+        d = os.read(fd, 65536)
+    except OSError:
+        break
+    if not d:
+        break
+    buf += d
+_, st = os.waitpid(pid, 0)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+sys.exit(os.waitstatus_to_exitcode(st) if hasattr(os, 'waitstatus_to_exitcode') else (st >> 8))
+S249PY
+printf '#!/bin/sh\nexec python3 %q %q "$@"\n' "$_S249_PTY" "$_A6_SCRIPT" > "$_A6_DIR/s249-tty-sandy"
+_S249_KEEP="$_A6_SCRIPT"; _A6_SCRIPT="$_A6_DIR/s249-tty-sandy"
+_a6_launch "$_S249_C" "${_S249_ENV[@]}"
+_A6_SCRIPT="$_S249_KEEP"
+_S249_R="$( { [ "$(_s249_n "$_S249_D" "not been acknowledged")" = 1 ] || echo "shown $(_s249_n "$_S249_D" "not been acknowledged") times (rc $_A6_RC)"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "no .vscode/"
+    [ -n "$(_a6_agent_args "$_S249_C")" ] || echo "the launch never reached the agent run"; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(c)" "$_S249_C"
+check "§249(c) a launch whose stderr is a terminal prints the recorded report before it runs the agent (mutation: drop the call at the launch; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (d) --ack-report prints what it acknowledges and removes the record; after
+# it nothing is shown, and a second --ack-report has nothing to do.
+_a6_launch "$_S249_C" -- --ack-report --workspace "$_S249_W"
+_S249_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "did not print what it acknowledged"
+    [ ! -e "$_S249_REC" ] || echo "record left"; } 2>&1)" || true
+_a6_launch "$_S249_C" PATH="$_S249_PATH" -- --stop --workspace "$_S249_W"
+_S249_R="$_S249_R$( { [ "$_A6_RC" = 4 ] || echo "--stop rc $_A6_RC"
+    if grep -q "not been acknowledged" "$_S249_D"; then echo "still shown after the acknowledgement"; fi; } 2>&1)" || true
+_a6_launch "$_S249_C" -- --ack-report --workspace "$_S249_W"
+_S249_R="$_S249_R$( { [ "$_A6_RC" = 0 ] || echo "second ack rc $_A6_RC"
+    grep -q "Nothing to do" "$_S249_D" || echo "second ack: not a no-op"; } 2>&1)" || true
+check "§249(d) --ack-report prints the report and removes it, nothing is shown afterwards, and a second one is a no-op with exit 0 (mutation: do not remove the record; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (e) a terminal (non-daemon) session prints its report as before and records
+# nothing, so it is never shown twice.
+_S249_C=s249t; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W"; _S249_S="$(_a6_sandbox "$_S249_C")"
+_a6_launch "$_S249_C" "${_S249_ENV[@]}" S249_PLANT=.idea
+_S249_R="$( { grep -q "Protected paths appeared during this session" "$_A6_DIR/$_S249_C/out" || echo "not printed (rc $_A6_RC)"
+    grep -qF "$_S249_W/.idea/" "$_A6_DIR/$_S249_C/out" || echo "no .idea/"
+    [ ! -e "$_S249_S/.session-end-report" ] || echo "recorded"; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(e)" "$_S249_C"
+check "§249(e) a non-daemon session prints its report and records nothing (mutation: record in every session; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (f) --stop of a daemon container with no live supervisor runs the WHOLE
+# report (it used to run only the content check), records it, and prints it
+# once, at the end. The launch snapshot here records nothing as existing, so
+# .vscode/ (created since) is an appearance.
+_S249_C=s249u; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.vscode"; printf 'x\n' > "$_S249_W/.vscode/tasks.json"
+_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"; : > "$_S249_S/.protected-existed-at-launch"
+printf '[sandy] ==== Daemon session ended earlier ====\n[sandy]   S249-EARLIER-BLOCK\n' > "$_S249_S/.session-end-report"
+_a6_launch "$_S249_C" PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID=2147480000 S249_SESS="$(basename "$_S249_S")" \
+    -- --stop --workspace "$_S249_W"
+_S249_D="$_A6_DIR/$_S249_C/out"
+_S249_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    grep -q "has no live supervisor" "$_S249_D" || echo "not the supervisor-less path"
+    [ "$(_s249_n "$_S249_D" "Protected paths appeared during this session")" = 1 ] || echo "report shown $(_s249_n "$_S249_D" "Protected paths appeared during this session") times"
+    [ "$(_s249_n "$_S249_D" "not been acknowledged")" = 1 ] || echo "not shown as the record"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "no .vscode/"
+    grep -q "torn down by --stop" "$_S249_S/.session-end-report" 2>/dev/null || echo "not recorded"
+    grep -q "S249-EARLIER-BLOCK" "$_S249_S/.session-end-report" 2>/dev/null || echo "the earlier unacknowledged block was dropped"
+    [ ! -e "$_S249_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(f)" "$_S249_C"
+check "§249(f) --stop of a supervisor-less daemon reports a protected dir created since launch, records it after the earlier unacknowledged block, and prints it once (mutation: the content check alone, as before; print it as well as record it; replace the record instead of appending; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (g) --stop that waits for a live supervisor prints the report that
+# supervisor records as it exits. A stand-in supervisor (its command line is a
+# --start for the workspace) writes the record on TERM, as cleanup does, and
+# the container "goes" when it exits.
+_S249_C=s249s; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W"; _S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"
+: > "$_A6_DIR/$_S249_C/up"
+bash -c 'trap "printf \"[sandy] ==== Daemon session ended X ====\\n[sandy]   S249-SUPERVISOR-REPORT\\n\" > \"\$1\"; rm -f \"\$2\"; exit 0" TERM; while :; do sleep 0.2; done' \
+    sandy-supervisor "$_S249_S/.session-end-report" "$_A6_DIR/$_S249_C/up" --start --workspace "$_S249_W" </dev/null >/dev/null 2>&1 &
+_S249_SUP=$!
+_a6_launch "$_S249_C" PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID="$_S249_SUP" S249_SESS="$(basename "$_S249_S")" \
+    S249_UP="$_A6_DIR/$_S249_C/up" -- --stop --workspace "$_S249_W"
+kill "$_S249_SUP" 2>/dev/null || true; wait "$_S249_SUP" 2>/dev/null || true
+check "§249(g) --stop that signals a live supervisor prints the report it recorded on the way out (mutation: drop the call after the wait; rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && grep -q "S249-SUPERVISOR-REPORT" "$2" && grep -q "not been acknowledged" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S249_C/out"
+
+unset _S249_B _S249_PATH _S249_ENV _S249_C _S249_W _S249_S _S249_REC _S249_R _S249_D _S249_SUP _S249_PTY _S249_KEEP
+unset -f _s249_n
+
 # Every background launch was joined by the check that reads it: a .pid left
 # under .bg is a case started whose check never ran.
 _A6_UNJOINED="$(cd "$_A6_DIR/.bg" 2>/dev/null && ls -- *.pid 2>/dev/null || true)"
@@ -30790,7 +30976,9 @@ names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs'
          '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
-         '_sandy_slug_for', '_sandy_note_session_created_sandy_dir']
+         '_sandy_slug_for', '_sandy_note_session_created_sandy_dir',
+         '_sandy_session_end_protected_report', '_sandy_session_report_path',
+         '_sandy_session_report_add', '_sandy_session_end_report']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
 b = src.index('unset _lnk_snap _id_snap\n', a) + len('unset _lnk_snap _id_snap\n')
@@ -30798,6 +30986,7 @@ open(out + '/snap.sh', 'w').write(src[a:b])
 a = src.index('    # Detect protected-path appearances')
 b = src.index('    # #80: .git/HEAD is rw in-container', a)
 open(out + '/end.sh', 'w').write(src[a:b])
+open(out + '/endfn.sh', 'w').write(fn('_sandy_session_end_protected_report'))
 S245_EXTRACT
 cat > "$_S245_D/drive.sh" <<'S245_DRIVE'
 set -euo pipefail
@@ -30825,7 +31014,7 @@ _s245_fix() {   # $1 = session-end output: run every remediation line it printed
 }
 
 check "§245(pre) sliced the launch snapshot and the session-end block out of sandy, and both use the detection list (mutation: a rename empties a slice and must fail HERE)" \
-    bash -c 'grep -q "_sandy_overlay_detect_dirs" "$1/snap.sh" && grep -q "_sandy_overlay_detect_dirs" "$1/end.sh" && grep -q "Protected paths appeared" "$1/end.sh"' _ "$_S245_D"
+    bash -c 'grep -q "_sandy_overlay_detect_dirs" "$1/snap.sh" && grep -q "_sandy_session_end_report " "$1/end.sh" && grep -q "_sandy_overlay_detect_dirs" "$1/endfn.sh" && grep -q "Protected paths appeared" "$1/endfn.sh"' _ "$_S245_D"
 
 # A: absent at launch, a slash command written in-session -> reported.
 _S245_L="$(_s245_run A launch)"

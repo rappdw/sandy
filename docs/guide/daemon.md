@@ -52,9 +52,36 @@ A container that comes back this way and keeps running has no supervisor, so
 sandy's end-of-session checks never run for it, and on macOS its file locks may
 have lapsed. Since 2.9.0 the next `sandy --attach` or `sandy --start` of that
 workspace says so, re-applies the macOS locks and records the protected files'
-contents (if no record exists); `sandy --stop` says so too and reports any
-protected file that changed. For a fully protected session, `--stop` it and
-`--start` again.
+contents (if no record exists); `sandy --stop` says so too and runs the
+session-end checks the supervisor would have run (below). For a fully
+protected session, `--stop` it and `--start` again.
+
+### The session-end report of a daemon session
+
+When a session ends, sandy reports protected paths that appeared, changed or
+were replaced in the workspace during it (a new `.git/hooks/` hook,
+`.github/workflows/` file, `.vscode/` task, `.claude/commands/` command, and so
+on; see [Security](security.md)). A terminal session prints that report as it
+exits. A daemon session has no terminal: its supervisor's output goes to a log
+file under `~/.sandy/sandboxes/` that nobody reads. So a daemon
+session also **records** the report in its sandbox
+(`~/.sandy/sandboxes/<name>/.session-end-report`, outside the workspace and
+never visible to a container), one block per session headed by the UTC time it
+ended. `--stop` of a session with no live supervisor runs the same checks and
+records them too.
+
+The next `sandy --start`, `--attach`, `--stop` (at its end, so it includes the
+report of the session it just stopped) and terminal launch of that workspace
+prints the record, and keeps printing it until you acknowledge it:
+
+```sh
+sandy --ack-report --workspace /path/to/project   # prints it once more, then removes it
+```
+
+Acknowledging is explicit rather than automatic because a reported path may be
+yours and kept on purpose (a `.vscode/` you asked the agent to set up); sandy
+cannot tell. A terminal session records nothing, so its report is printed
+once, as before.
 See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
