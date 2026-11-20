@@ -15016,6 +15016,10 @@ if [ "$SANDY_STOP" = "true" ]; then
         # and (maybe) a now-stale #14 lock.
         info "Stopping daemon session (no live supervisor — direct teardown)..."
         _sandy_unsupervised_daemon_protect "$_sandy_stop_container" stop
+        # Read the session label while the container still exists: after
+        # `docker rm -f` an inspect finds nothing, and the lock reap, the macOS
+        # unlock and the commondir cleanup below all need it.
+        _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
         _sandy_stop_ok=true
         # docker stop (not just rm -f) first: it marks the container
         # intentionally-stopped, which is what defeats `--restart
@@ -15033,7 +15037,6 @@ if [ "$SANDY_STOP" = "true" ]; then
         # #14: that means the lock is corrupt, not provably stale, and is left
         # for the user to inspect manually) — this is best-effort, so leaving a
         # residual lock here doesn't fail the --stop itself.
-        _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
         if [ -n "$_sandy_stop_session" ]; then
             _sandy_stop_lock="$SANDY_HOME/sandboxes/.${_sandy_stop_session}.lock"
             # Same predicate and same check-rename-recheck removal as the

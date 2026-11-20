@@ -28186,10 +28186,11 @@ _S248_DB="$_A6_DIR/s248dbin"; mkdir -p "$_S248_DB"
   printf 'case "$*" in\n'
   printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
   printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
-  printf '    *sandy.session*) echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *sandy.session*) if [ -n "${S248_GONE:-}" ] && [ -e "$S248_GONE" ]; then echo "Error: No such object" >&2; exit 1; fi; echo "$S248_SESS"; exit 0 ;;\n'
   printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
   printf '    *State.Running*) echo true; exit 0 ;;\n'
-  printf '    exec*|stop*|"rm -f c0ffee"*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf '    "rm -f c0ffee"*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; if [ -n "${S248_GONE:-}" ]; then : > "$S248_GONE"; fi; exit 0 ;;\n'
+  printf '    exec*|stop*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
   printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S248_DB/docker"
 chmod +x "$_S248_DB/docker"
 _S248_C=s248-dae; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
@@ -28204,13 +28205,15 @@ check "§248(q1) --attach to a daemon container with no live supervisor warns, r
     test -z "$_S248_R"
 chflags_stub_unlock() { grep -vxF "$1" "$_A6_DIR/$_S248_C/flags" > "$_A6_DIR/$_S248_C/flags.t" || true; mv "$_A6_DIR/$_S248_C/flags.t" "$_A6_DIR/$_S248_C/flags"; }
 chflags_stub_unlock "$_S248_W/.envrc"; printf 'tampered\n' >> "$_S248_W/.envrc"
-_a6_launch "$_S248_C" "${_S248_DENV[@]}" -- --stop --workspace "$_S248_W"
+# S248_GONE: like real Docker, the container (and so its labels) is gone once
+# `docker rm -f` has run, so --stop must read sandy.session before removing it.
+_a6_launch "$_S248_C" "${_S248_DENV[@]}" S248_GONE="$_A6_DIR/$_S248_C/gone" -- --stop --workspace "$_S248_W"
 _S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
     grep -qF "has no live supervisor" "$_A6_DIR/$_S248_C/out" || echo "no warning"
     [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .envrc ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"
     [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"
     [ ! -e "$_S248_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
-check "§248(q2) --stop of it warns, reports the file changed since the snapshot, and clears the locks (mutation: no call in --stop; ${_S248_R:-ok})" \
+check "§248(q2) --stop of it warns, reports the file changed since the snapshot, and clears the locks, reading the session label before the container is removed (mutation: no call in --stop; label read after docker rm; ${_S248_R:-ok})" \
     test -z "$_S248_R"
 _S248_C=s248-daelive; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
 # A stand-in supervisor: a live process whose command line is a --start for
