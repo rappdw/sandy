@@ -420,9 +420,15 @@ warn_lit()  { warn "$@"; }
 # 0xC2 0x9B and 0xC2 0x9D), which a UTF-8 terminal honours like ESC [ and ESC ].
 # The em dash sandy itself writes into the lines a child logs becomes `-`
 # first, so they stay readable. _sandy_term_text takes its arguments (one
-# line); _sandy_term_lines filters a stream and keeps its newlines.
+# line); _sandy_term_lines filters a stream (a log tail), keeps its newlines
+# and tabs, and first drops SGR colour sequences (ESC [ digits ; m), which a
+# sandy log written with colours on carries on every line.
 _sandy_term_text() { local _t="$*"; printf '%s' "${_t//—/-}" | LC_ALL=C tr -c '\040-\176' '?'; }
-_sandy_term_lines() { LC_ALL=C sed 's/—/-/g' | LC_ALL=C tr -c '\040-\176\n' '?'; }
+_sandy_term_lines() {
+    local _esc
+    _esc="$(printf '\033')"
+    LC_ALL=C sed -e "s/${_esc}\\[[0-9;]*m//g" -e 's/—/-/g' | LC_ALL=C tr -c '\011\012\040-\176' '?'
+}
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 # #493: give the terminal back in a usable state after an interactive client
@@ -598,8 +604,17 @@ sandy_self_update() {
         exit 1
     fi
     new_ver="$(grep -m1 '^SANDY_VERSION=' "$tmp" | cut -d'"' -f2)" || new_ver=""
-    if [ -z "$new_ver" ] || { [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; }; then
-        error "Downloaded file does not look like sandy ${tag:-from main} (SANDY_VERSION=${new_ver:-none})."
+    # The version is printed below, so it must be a version string first
+    # (X.Y.Z, X.Y.Z-rcN or X.Y.Z-dev); anything else is refused without
+    # echoing it (#547).
+    local _ver_re='^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+|-dev)?$'
+    if ! [[ $new_ver =~ $_ver_re ]]; then
+        error "Downloaded file does not look like sandy ${tag:-from main} (no valid SANDY_VERSION in it)."
+        rm -f "$tmp"
+        exit 1
+    fi
+    if [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; then
+        error "Downloaded file does not look like sandy $tag (SANDY_VERSION=$new_ver)."
         rm -f "$tmp"
         exit 1
     fi
@@ -15577,10 +15592,10 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # tmux session never appeared) — dump it alongside the supervisor log.
         if [ -n "$_sandy_daemon_container" ]; then
             error "Container log tail (docker logs $_sandy_daemon_container):"
-            docker logs --tail 30 "$_sandy_daemon_container" 2>&1 | sed 's/^/[sandy]   /' >&2 || true
+            docker logs --tail 30 "$_sandy_daemon_container" 2>&1 | _sandy_term_lines | sed 's/^/[sandy]   /' >&2 || true
         fi
         error "Supervisor log tail ($_sandy_daemon_log):"
-        tail -n 20 "$_sandy_daemon_log" >&2 2>/dev/null || true
+        { tail -n 20 "$_sandy_daemon_log" 2>/dev/null || true; } | _sandy_term_lines >&2 || true
         # A failed start must not leave the wreckage running: under
         # --restart unless-stopped a crash-looping container restarts FOREVER
         # (observed post-1.1.0: a stale project image looped "open terminal
@@ -16015,7 +16030,9 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         # TERM or HUP still writes a (failing) marker. The marker is written to
         # a temp name and renamed, so the poll never reads a half-written one.
         { _upd_rc=0
-          trap '_upd_rc=143; printf "%s\n" "$_upd_rc" > "$_upd_done.tmp"; mv -f "$_upd_done.tmp" "$_upd_done"; exit "$_upd_rc"' TERM HUP
+          _upd_sigmark() { _upd_rc="$1"; printf '%s\n' "$_upd_rc" > "$_upd_done.tmp"; mv -f "$_upd_done.tmp" "$_upd_done"; exit "$_upd_rc"; }
+          trap '_upd_sigmark 143' TERM
+          trap '_upd_sigmark 129' HUP
           ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1 || _upd_rc=$?
           printf '%s\n' "$_upd_rc" > "$_upd_done.tmp"
           mv -f "$_upd_done.tmp" "$_upd_done"; } &
@@ -16030,7 +16047,11 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             # so time is not capped. What is caught is the group ending without
             # a marker (killed with SIGKILL, or a regression of the capture
             # above): bash's own job table, never `kill -0`, says it is no
-            # longer running, and 3s later there is still no marker.
+            # longer running, and 3s later there is still no marker. `jobs -pr`
+            # and not `jobs -p`: a non-interactive bash never reports a done
+            # job to -p, so -p would list it for ever. A SIGSTOPped child stays
+            # in -r (without job control bash does not see the stop), so it
+            # is waited for like a slow build, never counted as gone.
             jobs -pr > "$_upd_build_log.jobs" 2>/dev/null || true
             if grep -qx "$_upd_build_pid" "$_upd_build_log.jobs" 2>/dev/null; then
                 _upd_gone=0
@@ -19643,7 +19664,7 @@ start_proxy_sidecar() {
     if ! docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null; then
         error "Could not attach the egress proxy to its sidecar network. Proxy state: $(docker inspect -f '{{.State.Status}} (exit {{.State.ExitCode}}, restarts {{.RestartCount}})' "$PROXY_CONTAINER" 2>/dev/null || echo unknown)"
         error "Proxy logs:"
-        docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
         exit 1
     fi
 
@@ -19692,7 +19713,7 @@ start_proxy_sidecar() {
     done
     if [ "$_proxy_up" != true ]; then
         error "Egress proxy failed to become ready. Logs:"
-        docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
         exit 1
     fi
     # Running but already restarted ⇒ it crashed at least once and the restart
@@ -19700,7 +19721,7 @@ start_proxy_sidecar() {
     # signal worth surfacing — a clean proxy never exits (it blocks forever).
     if [ "$(docker inspect -f '{{.RestartCount}}' "$PROXY_CONTAINER" 2>/dev/null)" != "0" ]; then
         warn "Egress proxy restarted during startup (crash-loop?) — recent logs:"
-        docker logs --tail 20 "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs --tail 20 "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
     fi
 
     # Persist the proxy's logs to a host file so a post-mortem survives cleanup's
@@ -21992,6 +22013,8 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # (a TeX or CUDA toolchain) can take many minutes, and a silent build
         # reads as a hung launch. Progress is forced plain there, since tee
         # would otherwise hand buildkit a pipe and the log its cursor moves.
+        # The live copy is reduced to printable ASCII (tab, newline kept) by
+        # ONE tr: a second filter stage would block-buffer the progress.
         _sandy_proj_log="$(mktemp "${TMPDIR:-/tmp}/sandy-project-build.XXXXXX" 2>/dev/null)" || _sandy_proj_log=/dev/null
         if [ -t 2 ]; then
             BUILDKIT_PROGRESS=plain docker build --no-cache \
@@ -22000,7 +22023,7 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
                 -t "$PROJECT_IMAGE_NAME" \
                 -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" 2>&1 \
                 | tee "$_sandy_proj_log" \
-                | LC_ALL=C tr -d '\000-\010\013-\037\177' >&2 || _sandy_proj_build_rc=$?
+                | LC_ALL=C tr -c '\011\012\040-\176' '?' >&2 || _sandy_proj_build_rc=$?
         else
             { docker build --no-cache \
                 --label sandy.managed=1 \
@@ -22012,9 +22035,10 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         rm -rf "$_sandy_proj_ctx"
         if [ "$_sandy_proj_build_rc" -ne 0 ]; then
             error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc). Last lines of the build output:"
-            # Control characters stripped (tab and newline kept): the output
-            # includes whatever the Dockerfile's RUN steps fetched and printed.
-            tail -n 40 "$_sandy_proj_log" | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed 's/^/    /' >&2
+            # Printable ASCII only, tab and newline kept (#547; deleting only
+            # C0 let C1 CSI/OSC through): the output includes whatever the
+            # Dockerfile's RUN steps fetched and printed.
+            tail -n 40 "$_sandy_proj_log" | _sandy_term_lines | sed 's/^/    /' >&2
             [ "$_sandy_proj_log" = /dev/null ] || error "Full build log: $_sandy_proj_log"
             error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
             error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
@@ -22382,7 +22406,7 @@ cleanup() {
         # window. Dump it on demand before teardown.
         if [ "${SANDY_DEBUG_PROXY:-0}" = "1" ]; then
             echo "sandy: [debug] egress proxy logs ($PROXY_CONTAINER):" >&2
-            docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+            docker logs "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
         fi
         docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
     fi

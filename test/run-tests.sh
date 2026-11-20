@@ -25167,6 +25167,7 @@ _hardening_unmet() {
         }'
 }
 _S207_FN="$(sed -n '/^_sandy_launch_dir()/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_term_lines() {/,/^}$/p' "$SANDY_SCRIPT")
 $(sed -n '/^start_proxy_sidecar() {/,/^}$/p' "$SANDY_SCRIPT")"
 _S207_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S207_D/bin"
@@ -32891,6 +32892,7 @@ case "$1" in
     ps) printf 'cid254|s254-session|%s|sandy-claude-code\n' "$S254_WS"; exit 0 ;;
     info) exit 0 ;;
     build)
+        printf '[sandy] Skipping the agent image rebuild: note \033]0;NOTE\007 c1:\302\235 end\n' >&2
         printf 'step 1/9 \033]0;PWNED\007 c1:\302\233 lit:\\033]0;X\\007\n' >&2
         "$S254_SLEEP" "${S254_BUILD_SECS:-0}"
         exit 1 ;;
@@ -32928,6 +32930,8 @@ check "§254(1) a failing refresh child ends the run: it exits 0 (the documented
     bash -c '[ ! -e "$1.timeout" ] && [ "$(cat "$1.rc")" = 0 ] && grep -q "Build failed for s254-session" "$1.out" && grep "^s254-session " "$1.out" | grep -q "skip (build failed)" && ! grep -q "ended without reporting" "$1.out" || { ls "$1".*; cat "$1.rc" "$1.out" 2>/dev/null; exit 1; }' _ "$_S254_D/fixed"
 check "§254(2) the heartbeat prints the build-log line it read, reduced to printable ASCII: the output has no ESC or C1 byte, and the payload text is there with its literal backslash sequence intact (mutation: print the phase without _sandy_term_text)" \
     bash -c 'grep -q "still refreshing s254-session (.*PWNED" "$1.out" && grep -qF "lit:\\033]0;X\\007" "$1.out" && [ "$(LC_ALL=C tr -dc "\\033\\233" < "$1.out" | wc -c | tr -d " ")" = 0 ] || { cat -v "$1.out"; exit 1; }' _ "$_S254_D/fixed"
+check "§254(6) the repeated \"Skipping the agent image rebuild\" note (B8 G7) is printed with the session name and reduced to printable ASCII: no ESC or C1 byte on that line (mutation: print it without _sandy_term_text)" \
+    bash -c 'l="$(grep "s254-session: Skipping the agent image rebuild: note" "$1.out")" && [ -n "$l" ] && case "$l" in *"?]0;NOTE? c1:?? end"*) : ;; *) false ;; esac && [ "$(printf "%s" "$l" | LC_ALL=C tr -dc "\\033\\235" | wc -c | tr -d " ")" = 0 ] || { cat -v "$1.out"; exit 1; }' _ "$_S254_D/fixed"
 # (3) The bound on its own: a copy with the rc capture removed (the #546 bug
 # restored) must still end, and say why.
 sed 's# </dev/null >"\$_upd_build_log" 2>&1 || _upd_rc=\$?$# </dev/null >"$_upd_build_log" 2>\&1#' "$_S254_SANDY" > "$_S254_D/sandy-nocap"
@@ -32938,27 +32942,78 @@ check "§254(3) with the rc capture removed (the copy differs by exactly one lin
     bash -c '[ "$2" = 1 ] && [ ! -e "$1.timeout" ] && [ "$(cat "$1.rc")" = 0 ] && grep -q "The image refresh for s254-session ended without reporting a result" "$1.out" && grep -q "Build failed for s254-session" "$1.out" || { ls "$1".*; cat "$1.out" 2>/dev/null; exit 1; }' _ "$_S254_D/nocap" "$_S254_CAPDIFF"
 # (4)/(5) The helpers themselves, cut out of sandy (info() through
 # _sandy_term_lines), with the colours on and off.
-awk '/^info\(\)  \{/{on=1} on{print} /^_sandy_term_lines\(\)/{exit}' "$_S254_SANDY" > "$_S254_D/helpers.sh"
+awk '/^info\(\)  \{/{on=1} on{print} /^_sandy_term_lines\(\)/{t=1} t&&/^}$/{exit}' "$_S254_SANDY" > "$_S254_D/helpers.sh"
+# install.sh carries its own three (the curl | bash installer cannot source sandy).
+grep -E '^(info|warn|error)\(\) ' "$(dirname "$_S254_SANDY")/install.sh" > "$_S254_D/helpers-install.sh" || true
 _s254_helpers() {
-    # $1 = on|off. Prints every helper's output for the payload on stdout.
+    # $1 = on|off, $2 = helper file, $3 = also the _lit pair (yes|no).
+    # Prints every helper's output for the payload on stdout.
     bash -c '
         set -euo pipefail
         if [ "$1" = on ]; then RED="\033[0;31m" GREEN="\033[0;32m" YELLOW="\033[1;33m" NC="\033[0m"; else RED="" GREEN="" YELLOW="" NC=""; fi
         . "$2"
         p="x \\033]0;PWNED\\007 \\e[31m \\n \\c y"
-        { info "$p"; warn "$p"; error "$p"; warn_lit "$p"; error_lit "$p"; } 2>&1
-    ' _ "$1" "$_S254_D/helpers.sh"
+        { info "$p"; warn "$p"; error "$p"; [ "$3" = no ] || { warn_lit "$p"; error_lit "$p"; }; } 2>&1
+    ' _ "$1" "$2" "$3"
 }
-_s254_helpers on > "$_S254_D/h.on" 2>&1 || true
-_s254_helpers off > "$_S254_D/h.off" 2>&1 || true
+_s254_helpers on "$_S254_D/helpers.sh" yes > "$_S254_D/h.on" 2>&1 || true
+_s254_helpers off "$_S254_D/helpers.sh" yes > "$_S254_D/h.off" 2>&1 || true
+_s254_helpers on "$_S254_D/helpers-install.sh" no > "$_S254_D/i.on" 2>&1 || true
+_s254_helpers off "$_S254_D/helpers-install.sh" no > "$_S254_D/i.off" 2>&1 || true
 # With colours on, only the colour codes may carry ESC: remove those exact
 # sequences and nothing escape-like may be left.
-LC_ALL=C sed -e "s/$(printf '\033')\[0;3[12]m//g; s/$(printf '\033')\[1;33m//g; s/$(printf '\033')\[0m//g" "$_S254_D/h.on" > "$_S254_D/h.on.msg"
-check "§254(4) info, warn, error, warn_lit and error_lit print a message with backslash-033, -e, -n and -c sequences as typed, with no ESC byte from the message, colours on and off ($(grep -c . "$_S254_D/helpers.sh" || true) helper lines cut out; mutation: restore echo -e)" \
-    bash -c 'for f in "$1/h.off" "$1/h.on.msg"; do [ "$(grep -cxF "[sandy] x \\033]0;PWNED\\007 \\e[31m \\n \\c y" "$f")" = 5 ] && [ "$(LC_ALL=C tr -dc "\\033" < "$f" | wc -c | tr -d " ")" = 0 ] || { cat -v "$f"; exit 1; }; done; [ "$(LC_ALL=C tr -dc "\\033" < "$1/h.on" | wc -c | tr -d " ")" -ge 10 ] || { echo "colours were not on"; cat -v "$1/h.on"; exit 1; }' _ "$_S254_D"
-check "§254(5) _sandy_term_text turns ESC, BEL, C1 and newline bytes into ? and the em dash into -, and _sandy_term_lines keeps the line breaks (mutation: delete only C0 controls)" \
-    bash -c '. "$1"; a="$(_sandy_term_text "$(printf "a\033]0;X\007b\302\233c\nd — e")")"; b="$(printf "l1 \033[31m\nl2 —\n" | _sandy_term_lines)"; [ "$a" = "a?]0;X?b??c?d - e" ] && [ "$b" = "$(printf "l1 ?[31m\nl2 -")" ] || { printf "%s\n%s\n" "$a" "$b" | cat -v; exit 1; }' _ "$_S254_D/helpers.sh"
-unset -f _s254_run _s254_helpers
+for _s254_f in h i; do
+    LC_ALL=C sed -e "s/$(printf '\033')\[0;3[12]m//g; s/$(printf '\033')\[1;33m//g; s/$(printf '\033')\[0m//g" "$_S254_D/$_s254_f.on" > "$_S254_D/$_s254_f.on.msg"
+done
+_s254_lit_lines() {  # DIR PREFIX COUNT: both colour variants print the payload as typed, COUNT times, and no ESC from it
+    local f
+    for f in "$1/$2.off" "$1/$2.on.msg"; do
+        [ "$(grep -cxF '[sandy] x \033]0;PWNED\007 \e[31m \n \c y' "$f")" = "$3" ] \
+            && [ "$(LC_ALL=C tr -dc '\033' < "$f" | wc -c | tr -d ' ')" = 0 ] || { cat -v "$f"; return 1; }
+    done
+    [ "$(LC_ALL=C tr -dc '\033' < "$1/$2.on" | wc -c | tr -d ' ')" -ge $(($3 * 2)) ] || { echo "colours were not on"; cat -v "$1/$2.on"; return 1; }
+}
+check "§254(4) sandy's info, warn, error, warn_lit and error_lit print a message with backslash-033, -e, -n and -c sequences as typed, with no ESC byte from the message, colours on and off ($(grep -c . "$_S254_D/helpers.sh" || true) helper lines cut out; mutation: restore echo -e)" \
+    _s254_lit_lines "$_S254_D" h 5
+check "§254(4b) ...and so do install.sh's info, warn and error ($(grep -c . "$_S254_D/helpers-install.sh" || true) helper lines cut out; mutation: restore echo -e there)" \
+    _s254_lit_lines "$_S254_D" i 3
+check "§254(5) _sandy_term_text turns ESC, BEL, C1 and newline bytes into ? and the em dash into -; _sandy_term_lines drops SGR colour codes, keeps line breaks and tabs, and turns any other escape into ? (mutation: delete only C0 controls)" \
+    bash -c '. "$1"; a="$(_sandy_term_text "$(printf "a\033]0;X\007b\302\233c\nd — e")")"; b="$(printf "l1 \033[0;31m[sandy]\033[0m \033]0;X\007\tT\nl2 —\n" | _sandy_term_lines)"; [ "$a" = "a?]0;X?b??c?d - e" ] && [ "$b" = "$(printf "l1 [sandy] ?]0;X?\tT\nl2 -")" ] || { printf "%s\n%s\n" "$a" "$b" | cat -v; exit 1; }' _ "$_S254_D/helpers.sh"
+# (7) install.sh validates the downloaded file's SANDY_VERSION before it
+# prints it: a version carrying an escape is refused and never echoed; a
+# well-formed -dev version installs (the control, so the refusal is not just
+# a broken fixture). sandy --upgrade uses the same pattern.
+mkdir -p "$_S254_D/ibin" "$_S254_D/idir"
+printf '#!/usr/bin/env bash\ncat "$S254_FILE"\n' > "$_S254_D/ibin/curl"
+chmod +x "$_S254_D/ibin/curl"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="2.10.1\033]0;PWNED\007"\nSANDY_COMMIT=""\n' > "$_S254_D/bad.sandy"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="2.10.1-dev"\nSANDY_COMMIT=""\n' > "$_S254_D/good.sandy"
+_s254_install() {  # TAG FILE
+    local _rc=0
+    rm -rf "$_S254_D/idir"; mkdir -p "$_S254_D/idir"
+    env -i HOME="$_S254_D/home" PATH="$_S254_D/ibin:/usr/bin:/bin" INSTALL_DIR="$_S254_D/idir" \
+        SANDY_URL="https://example.invalid/sandy" S254_FILE="$2" \
+        bash "$(dirname "$_S254_SANDY")/install.sh" </dev/null >"$_S254_D/$1.out" 2>&1 || _rc=$?
+    echo "$_rc" > "$_S254_D/$1.rc"
+    [ -f "$_S254_D/idir/sandy" ] && echo yes > "$_S254_D/$1.installed" || echo no > "$_S254_D/$1.installed"
+}
+_s254_install ibad "$_S254_D/bad.sandy"
+_s254_install igood "$_S254_D/good.sandy"
+check "§254(7) install.sh refuses a downloaded file whose SANDY_VERSION is not a version string, installs nothing and never echoes it (no ESC beyond its own colour codes, which are always on); a well-formed X.Y.Z-dev installs (mutation: drop the version-string check)" \
+    bash -c 'e="$(printf "\\033")"; [ "$(cat "$1/ibad.rc")" = 1 ] && [ "$(cat "$1/ibad.installed")" = no ] && grep -q "no valid SANDY_VERSION" "$1/ibad.out" && ! grep -q PWNED "$1/ibad.out" && [ "$(LC_ALL=C sed "s/${e}\\[[0-9;]*m//g" "$1/ibad.out" | LC_ALL=C tr -dc "\\033" | wc -c | tr -d " ")" = 0 ] && [ "$(cat "$1/igood.rc")" = 0 ] && [ "$(cat "$1/igood.installed")" = yes ] || { cat -v "$1/ibad.out" "$1/igood.out"; cat "$1/ibad.rc" "$1/igood.rc"; exit 1; }' _ "$_S254_D"
+# (8) Ratchet: every dump of a container's or a build's log onto the terminal
+# goes through _sandy_term_lines (or _sandy_term_text). The behaviour of the
+# filter is (5); this only keeps a new dump from skipping it.
+_s254_dumps() {
+    local _all _bad
+    _all="$(grep -cE 'docker logs (--tail [0-9]+ )?"\$[A-Za-z_]+" 2>&1 \||tail -n [0-9]+ "\$_(sandy_daemon_log|sandy_proj_log|upd_build_log)"' "$1" || true)"
+    _bad="$(grep -nE 'docker logs (--tail [0-9]+ )?"\$[A-Za-z_]+" 2>&1 \||tail -n [0-9]+ "\$_(sandy_daemon_log|sandy_proj_log|upd_build_log)"' "$1" | grep -v '_sandy_term_lines\|_sandy_term_text' || true)"
+    [ "$_all" -ge 9 ] && [ -z "$_bad" ] || { echo "dumps: $_all"; printf '%s\n' "$_bad"; return 1; }
+}
+check "§254(8) all nine log dumps onto the terminal (failed --start container and supervisor logs, proxy logs, the project-build tail, the update-sessions tail and heartbeat) go through the term filter (mutation: drop it from one)" \
+    _s254_dumps "$_S254_SANDY"
+unset -f _s254_run _s254_helpers _s254_lit_lines _s254_install _s254_dumps
+unset _s254_f
 rm -rf "$_S254_D"
 unset _S254_SANDY _S254_D _S254_REALSLEEP _S254_CAPDIFF
 

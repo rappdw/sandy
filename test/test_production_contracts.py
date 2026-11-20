@@ -283,7 +283,7 @@ class ProductionContracts(unittest.TestCase):
             '  esac\n'
             '}\n'
             'SANDBOX_NAME=Ws-deadbeef; IMAGE_NAME=sandy-claude-code; NEEDS_BUILD=false; SKILLS_REBUILT=false\n'
-            + start + span(start, end) + '\necho "IMAGE=$IMAGE_NAME"\n')
+            + function("_sandy_term_lines") + start + span(start, end) + '\necho "IMAGE=$IMAGE_NAME"\n')
         if not tty:
             run = self.run_source(code, TMPDIR=str(tmp), DOCKER_RC=str(docker_rc))
             return run, sorted(tmp.glob("sandy-project-build.*"))
@@ -318,7 +318,8 @@ class ProductionContracts(unittest.TestCase):
     def test_failed_project_build_shows_its_output_and_keeps_the_log(self):
         run, logs = self.project_build(17)
         self.assertEqual(run.returncode, 17, run.stderr)
-        self.assertIn("E: [31mThe repository is not signed.[0m", run.stderr)
+        # The failure tail drops SGR colour codes and keeps the text (#547).
+        self.assertIn("E: The repository is not signed.", run.stderr)
         self.assertNotIn("\x1b", run.stderr)
         self.assertIn("exit code: 100", run.stderr)
         self.assertEqual(len(logs), 1, run.stderr)
@@ -332,7 +333,9 @@ class ProductionContracts(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("IMAGE=sandy-project-ws-deadbeef", run.stdout)
         self.assertIn("progress=plain", run.stderr)
-        self.assertIn("E: [31mThe repository is not signed.[0m", run.stderr)
+        # The live copy is one tr stage: every byte outside printable ASCII,
+        # tab and newline becomes ? (#547).
+        self.assertIn("E: ?[31mThe repository is not signed.?[0m", run.stderr)
         self.assertNotIn("\x1b", run.stderr)
         self.assertEqual(logs, [])
 
