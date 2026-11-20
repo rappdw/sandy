@@ -2873,13 +2873,23 @@ _sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
 
 # True when pid $1 is a live sandy supervisor for $WORK_DIR: alive, and its
 # command line is a `sandy --start` for this workspace (a pid reused after a
-# reboot is someone else's). `ps -o command=` is POSIX (GNU and BSD alike);
-# without ps, kill -0 alone decides.
+# reboot is someone else's). Linux reads /proc/<pid>/cmdline; elsewhere
+# `ps -ww -o command=` (GNU and BSD alike); with neither, kill -0 alone decides.
 _sandy_supervisor_alive() {
     local _c
     kill -0 "$1" 2>/dev/null || return 1
-    command -v ps >/dev/null 2>&1 || return 0
-    _c="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+    # The exact argv where the kernel exposes it (Linux /proc: NUL-separated,
+    # unaffected by locale); otherwise ps -ww, because ps honours an exported
+    # COLUMNS and would cut a long workspace path off, making a live
+    # supervisor look dead (and --stop then tears down underneath it).
+    if [ -r "/proc/$1/cmdline" ]; then
+        _c="$(tr '\000' ' ' < "/proc/$1/cmdline" 2>/dev/null)" || return 1
+        _c="${_c% }"
+    elif command -v ps >/dev/null 2>&1; then
+        _c="$(ps -ww -o command= -p "$1" 2>/dev/null)" || return 1
+    else
+        return 0
+    fi
     case "$_c" in *" --start"*) ;; *) return 1 ;; esac
     # The workspace as a whole argument (followed by a space or the end), so
     # /x/ws is not taken for /x/ws2.
@@ -14593,7 +14603,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
                     # a zombie, so a fixed entry actually gets relaunched.
                     _sandy_d6_sup="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_existing" 2>/dev/null)" || _sandy_d6_sup=""
                     case "$_sandy_d6_sup" in ''|*[!0-9]*) _sandy_d6_sup="" ;; esac
-                    if [ -n "$_sandy_d6_sup" ] && kill -0 "$_sandy_d6_sup" 2>/dev/null; then
+                    if [ -n "$_sandy_d6_sup" ] && _sandy_supervisor_alive "$_sandy_d6_sup"; then
                         _sandy_ew_report "$_sandy_d6_out"
                         error "The daemon session for $WORK_DIR is being torn down; run 'sandy --start' again once the entry is fixed."
                         exit 6
@@ -14883,7 +14893,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         if [ -n "$_sandy_daemon_container" ]; then
             _sandy_fail_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_container" 2>/dev/null)" || _sandy_fail_pid=""
             error "Tearing down the failed session..."
-            if [ -n "$_sandy_fail_pid" ] && kill -0 "$_sandy_fail_pid" 2>/dev/null; then
+            if [ -n "$_sandy_fail_pid" ] && _sandy_supervisor_alive "$_sandy_fail_pid"; then
                 kill -TERM "$_sandy_fail_pid" 2>/dev/null || true
             else
                 docker rm -f "$_sandy_daemon_container" >/dev/null 2>&1 || true

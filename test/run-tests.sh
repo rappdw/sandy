@@ -28219,7 +28219,9 @@ check "§248(q2) --stop of it warns, reports the file changed since the snapshot
 # workspace's supervisor (a pid reused after a reboot): --stop must not signal
 # it, and must take the direct teardown instead.
 _S248_C=s248-daereuse; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
-bash -c 'trap "echo TERM > \"$1\"; exit 0" TERM; while :; do sleep 1; done' unrelated-proc "$_A6_DIR/$_S248_C/termed" </dev/null >/dev/null 2>&1 &
+# Its argv even has --start and a --workspace, for ANOTHER workspace, so both
+# halves of the match are exercised.
+bash -c 'trap "echo TERM > \"$1\"; exit 0" TERM; while :; do sleep 1; done' unrelated-proc "$_A6_DIR/$_S248_C/termed" --start --workspace "$_S248_W-other" </dev/null >/dev/null 2>&1 &
 _S248_OTHER=$!
 _a6_launch "$_S248_C" A6_OS=Darwin S248_DPID="$_S248_OTHER" S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" S248_GONE="$_A6_DIR/$_S248_C/gone" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S248_W"
 sleep 1
@@ -28230,6 +28232,16 @@ _S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
 kill "$_S248_OTHER" 2>/dev/null || true; wait "$_S248_OTHER" 2>/dev/null || true
 check "§248(q2b) --stop whose daemon_pid label names a live but unrelated process does not signal it and tears down directly (mutation: bare kill -0 picks the supervisor branch; ${_S248_R:-ok})" \
     test -z "$_S248_R"
+# (q2c) a live supervisor with a long workspace path is still recognised when
+# COLUMNS is exported (ps truncates to it unless -ww; Linux reads /proc, so
+# the ps half of this is exercised on macOS).
+_S248_LONG="$_A6_DIR/s248-long/$(printf 'd%.0s' $(seq 1 120))/ws"; mkdir -p "$_S248_LONG"
+bash -c 'while :; do sleep 1; done' sandy --start --workspace "$_S248_LONG" </dev/null >/dev/null 2>&1 &
+_S248_SUP=$!
+_S248_R="$(COLUMNS=40 WORK_DIR="$_S248_LONG" bash -c 'export COLUMNS; eval "$(sed -n "/^_sandy_supervisor_alive()/,/^}$/p" "$1")"; if _sandy_supervisor_alive "$2"; then echo alive; else echo dead; fi; WORK_DIR="$WORK_DIR-x"; if _sandy_supervisor_alive "$2"; then echo alive; else echo dead; fi' _ "$SCRIPT" "$_S248_SUP" 2>&1 | tr '\n' ' ')" || true
+kill "$_S248_SUP" 2>/dev/null || true; wait "$_S248_SUP" 2>/dev/null || true
+check "§248(q2c) a live supervisor with a 120+ character workspace path is recognised under an exported COLUMNS=40, and not for another workspace (mutation: ps without -ww; got: $_S248_R)" \
+    test "$_S248_R" = "alive dead "
 _S248_C=s248-daelive; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
 # A stand-in supervisor: a live process whose command line is a --start for
 # this workspace (what _sandy_supervisor_alive looks for).
@@ -30131,7 +30143,9 @@ check "§235(W10a) a second --start while the running session is still in its wi
     bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] && grep -q "already running" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S235_D/w10a"
 # A stand-in live supervisor: its own process, never this suite's shell, since
 # a regression that reaps would --stop (TERM) whatever pid the label names.
-sleep 60 & _S235_SUP=$!
+# Its argv is a real supervisor's (sandy --start --workspace WS): a live pid
+# counts as the supervisor only then (_sandy_supervisor_alive).
+bash -c 'while :; do sleep 1; done' sandy --start --workspace "$_S235_D/w10b/ws" </dev/null >/dev/null 2>&1 & _S235_SUP=$!
 S226_C_SUP_PID=$_S235_SUP _s235_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
 kill "$_S235_SUP" 2>/dev/null || true; wait "$_S235_SUP" 2>/dev/null || true; unset _S235_SUP
 check "§235(W10b) a second --start while the running session's window has failed: exit 6 with the message, and starts nothing" \
