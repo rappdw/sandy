@@ -15506,8 +15506,10 @@ if [ "$SANDY_STOP" = "true" ]; then
         docker stop "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
         docker rm -f "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
         # The session-end report, now that the container can write nothing
-        # more (#554); recorded, and printed with the record below.
-        if [ -n "$_SANDY_UNSUP_STOP_SB" ]; then
+        # more (#554); recorded, and printed with the record below. Not when
+        # the teardown failed: the container may still be writing, and the
+        # snapshot stays for the next --stop to judge against.
+        if [ -n "$_SANDY_UNSUP_STOP_SB" ] && [ "$_sandy_stop_ok" = true ]; then
             _sandy_unsupervised_stop_report "$_SANDY_UNSUP_STOP_SB"
         fi
         # Best-effort: reaps this session's now-orphaned sandy_{net,sidecar,egress}_*

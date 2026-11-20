@@ -28485,7 +28485,7 @@ _S249_B="$_A6_DIR/s249bin"; mkdir -p "$_S249_B"
   printf '    "exec "*) echo none; exit 0 ;;\n'
   printf '    stop*) if [ -n "${S249_AT_STOP:-}" ]; then mkdir -p "$A6_WS/$S249_AT_STOP"; printf "x\\n" > "$A6_WS/$S249_AT_STOP/planted"; fi\n'
   printf '           printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
-  printf '    "rm -f "*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf '    "rm -f "*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; [ -z "${S249_RM_FAIL:-}" ] || exit 1; exit 0 ;;\n'
   printf 'esac; fi\n'
   printf 'case " $* " in *" --name sandy-ws-"*)\n'
   printf '    if [ -n "${S249_PLANT:-}" ]; then mkdir -p "$A6_WS/$S249_PLANT"; printf "x\\n" > "$A6_WS/$S249_PLANT/planted"; fi\n'
@@ -28676,6 +28676,23 @@ _a6_launch "$_S249_C" "${_S249_ENV[@]}" S249_SNAPCOPY=1
 _S249_R="$_S249_R$( { [ -s "$_A6_DIR/$_S249_C/snapcopy" ] || echo "control: no snapshot copied (rc $_A6_RC)"
     if grep -qx '#workflow-edit-allowed' "$_A6_DIR/$_S249_C/snapcopy" 2>/dev/null; then echo "recorded without the setting"; fi; } 2>&1)" || true
 check "§249(f3) a launch records SANDY_ALLOW_WORKFLOW_EDIT=1 in its snapshot (and only then), and the supervisor-less --stop honours it: no workflow line, no removal of it (mutation: drop the marker write; ignore it at stop; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (f4) when that teardown fails (docker rm -f fails here), the container may
+# still be writing: no report is run or recorded, and the launch snapshot is
+# kept for the next --stop to judge against.
+_S249_C=s249f; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.vscode"; printf 'x\n' > "$_S249_W/.vscode/tasks.json"
+_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"; printf '#gitdirs-recorded\n' > "$_S249_S/.protected-existed-at-launch"
+_S249_DENV=(PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID=2147480000 S249_SESS="$(basename "$_S249_S")")
+_a6_launch "$_S249_C" "${_S249_DENV[@]}" S249_RM_FAIL=1 -- --stop --workspace "$_S249_W"
+_S249_D="$_A6_DIR/$_S249_C/out"
+_S249_R="$( { [ "$_A6_RC" = 5 ] || echo "rc $_A6_RC, not the teardown failure"
+    grep -q "has no live supervisor" "$_S249_D" || echo "not the supervisor-less path"
+    if grep -q "Protected paths appeared during this session" "$_S249_D"; then echo "the report ran"; fi
+    [ ! -e "$_S249_S/.session-end-report" ] || echo "a report was recorded"
+    [ -f "$_S249_S/.protected-existed-at-launch" ] || echo "the snapshot was deleted"; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(f4)" "$_S249_C"
+check "§249(f4) a supervisor-less --stop whose teardown fails runs and records no report and keeps the launch snapshot (mutation: run the report whatever the teardown outcome; ${_S249_R:-ok})" \
     test -z "$_S249_R"
 
 # (g) --stop that waits for a live supervisor prints the report that
