@@ -12718,7 +12718,7 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 : > "$_S130_DIR/scan.sh"
 for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_is_copied_rel _sandy_symlink_inside _sandy_symlink_resolve \
           _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_symlink_byname_rels _sandy_symlink_canon _sandy_symlink_target_judged _sandy_symlink_walk \
-          _sandy_symlink_protected_sweep _sandy_symlink_scan; do
+          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
 done
 unset _f
@@ -12742,7 +12742,7 @@ _s130_git() {   # _s130_git <gitdir-line> [missing-marker]
              "$d/home/dev/super/.git/modules/vendor/lib/refs" \
              "$d/home/dev/super/vendor/lib" "$d/home/.ssh"
     printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
-    printf '[core]\n'               > "$d/home/dev/super/.git/modules/vendor/lib/config"
+    printf '[core]\n'               > "$d/home/dev/super/.git/modules/vendor/lib/config"; mkdir -p "$d/home/dev/super/.git/modules/vendor/lib/objects" "$d/home/dev/super/.git/modules/vendor/lib/refs"; printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
     printf 'PRIVATE-KEY\n'          > "$d/home/.ssh/id_ed25519"
     [ -n "${2:-}" ] && rm -rf "$d/home/dev/super/.git/modules/vendor/lib/$2"
     printf '%s\n' "$1" > "$d/home/dev/super/vendor/lib/.git"
@@ -21741,12 +21741,13 @@ def fn(name):
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_overlay_detect_dirs', '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint',
          '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
+         '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
          '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
-b = src.index('done < <(_sandy_protected_files)\n', a) + len('done < <(_sandy_protected_files)\n')
+b = src.index('done < <(_sandy_protected_files; _sandy_watched_git_files)\n', a) + len('done < <(_sandy_protected_files; _sandy_watched_git_files)\n')
 open(out + '/snap.sh', 'w').write(src[a:b])
 a = src.index('    # Detect protected-path appearances')
 b = src.index('    # #80: .git/HEAD is rw in-container', a)
@@ -27038,7 +27039,7 @@ _s238_s1h() { local w="$_A6_DIR/s238-s1h/ws"; _s238_fakegit "$w/vendor/fakegit";
 _a6_bg s238-s1h _s238_sa s238-s1h _s238_s1h
 _s238_s3() { ln -s "$_A6_DIR/s238-s3/otherrepo/.git" "$_A6_DIR/s238-s3/ws/lnk"; printf 'gitdir: lnk\n' > "$_A6_DIR/s238-s3/ws/.git"; }
 _a6_bg s238-s3 _s238_sa s238-s3 _s238_s3
-_s238_m1() { local w="$_A6_DIR/s238-m1/ws"; mkdir -p "$w/vendor/fakegit/modules/sub"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"
+_s238_m1() { local w="$_A6_DIR/s238-m1/ws"; mkdir -p "$w/vendor/fakegit/modules/sub"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; mkdir -p "$w/vendor/fakegit/modules/sub/objects" "$w/vendor/fakegit/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$w/vendor/fakegit/modules/sub/HEAD"
     ln -s "$_A6_DIR/s238-m1/hooksdir" "$w/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$w/.git"; }
 _a6_bg s238-m1 _s238_sa s238-m1 _s238_m1
 _S238_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_SYMLINK_SCAN_SKIP=vendor)
@@ -27050,7 +27051,7 @@ _S238_C=s238-s3k; _s238_home "$_S238_C"; _S238_W="$_A6_DIR/$_S238_C/ws"
 mkdir -p "$_S238_W/vendor"; ln -s "$_A6_DIR/$_S238_C/otherrepo/.git" "$_S238_W/vendor/lnk"; printf 'gitdir: vendor/lnk\n' > "$_S238_W/.git"; _s238_seed "$_S238_C"
 _a6_bg "$_S238_C" _a6_launch "$_S238_C" "${_S238_K[@]}"
 _S238_C=s238-m1k; _s238_home "$_S238_C"; _S238_W="$_A6_DIR/$_S238_C/ws"
-mkdir -p "$_S238_W/vendor/fakegit/modules/sub"; printf '[core]\n' > "$_S238_W/vendor/fakegit/config"; printf '[core]\n' > "$_S238_W/vendor/fakegit/modules/sub/config"
+mkdir -p "$_S238_W/vendor/fakegit/modules/sub"; printf '[core]\n' > "$_S238_W/vendor/fakegit/config"; printf '[core]\n' > "$_S238_W/vendor/fakegit/modules/sub/config"; mkdir -p "$_S238_W/vendor/fakegit/modules/sub/objects" "$_S238_W/vendor/fakegit/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$_S238_W/vendor/fakegit/modules/sub/HEAD"
 ln -s "$_A6_DIR/$_S238_C/hooksdir" "$_S238_W/vendor/fakegit/modules/sub/hooks"; ln -s vendor/fakegit "$_S238_W/.git"; _s238_seed "$_S238_C"
 _a6_bg "$_S238_C" _a6_launch "$_S238_C" "${_S238_K[@]}"
 _S238_C=s238-sib; _s238_home "$_S238_C"; mkdir -p "$_A6_DIR/$_S238_C/ws-secrets" "$_A6_DIR/$_S238_C/ws/.claude"
@@ -27059,18 +27060,22 @@ ln -s ../../ws-secrets/settings.json "$_A6_DIR/$_S238_C/ws/.claude/settings.json
 _a6_bg "$_S238_C" _a6_launch "$_S238_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 _S238_C=s238-ok; _s238_home "$_S238_C"; _S238_W="$_A6_DIR/$_S238_C/ws"
 _s238_fakegit "$_S238_W/vendor/fakegit"; mkdir -p "$_S238_W/vendor/fakegit/hooks" "$_S238_W/vendor/fakegit/modules/sub/hooks"
-printf '[core]\n' > "$_S238_W/vendor/fakegit/config"; printf '[core]\n' > "$_S238_W/vendor/fakegit/modules/sub/config"
+printf '[core]\n' > "$_S238_W/vendor/fakegit/config"; printf '[core]\n' > "$_S238_W/vendor/fakegit/modules/sub/config"; mkdir -p "$_S238_W/vendor/fakegit/modules/sub/objects" "$_S238_W/vendor/fakegit/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$_S238_W/vendor/fakegit/modules/sub/HEAD"
 printf 'gitdir: vendor/fakegit\n' > "$_S238_W/.git"
 _a6_bg "$_S238_C" _a6_launch "$_S238_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_s238_okstart() { local w="$_A6_DIR/s238-oks/ws"; _s238_fakegit "$w/vendor/fakegit"; mkdir -p "$w/vendor/fakegit/modules/sub/hooks"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
+_s238_okstart() { local w="$_A6_DIR/s238-oks/ws"; _s238_fakegit "$w/vendor/fakegit"; mkdir -p "$w/vendor/fakegit/modules/sub/hooks"; printf '[core]\n' > "$w/vendor/fakegit/config"; printf '[core]\n' > "$w/vendor/fakegit/modules/sub/config"; mkdir -p "$w/vendor/fakegit/modules/sub/objects" "$w/vendor/fakegit/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$w/vendor/fakegit/modules/sub/HEAD"; printf 'gitdir: vendor/fakegit\n' > "$w/.git"; }
 _a6_bg s238-oks _s238_sa s238-oks _s238_okstart
 _S238_C=s238-dslash; _s238_home "$_S238_C"; _S238_W="$_A6_DIR/$_S238_C/ws"
 mkdir -p "$_S238_W/sub" "$_S238_W/.git/hooks"; printf '[core]\n' > "$_S238_W/.git/config"; ln -s sub "$_S238_W/lnk"
 _a6_bg "$_S238_C" _a6_launch "$_S238_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 -- --workspace "/$_S238_W" -p fixture
 _S238_C=s238-late; _s238_home "$_S238_C"; _S238_W="$_A6_DIR/$_S238_C/ws"; _S238_G="$_A6_DIR/$_S238_C/gitbin"
-mkdir -p "$_S238_W/.git/modules/sub" "$_S238_G"; printf '[core]\n' > "$_S238_W/.git/modules/sub/config"
+mkdir -p "$_S238_W/.git/modules/sub" "$_S238_G"; printf '[core]\n' > "$_S238_W/.git/modules/sub/config"; mkdir -p "$_S238_W/.git/modules/sub/objects" "$_S238_W/.git/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$_S238_W/.git/modules/sub/HEAD"
+# Planted at the SECOND core.hooksPath read: since 2.9.0 the scan reads it
+# first (_SANDY_BYNAME_HOOKSPATH), before the gate; the next is the mount's.
 { printf '#!/bin/sh\n'
-  printf 'case "$*" in *core.hooksPath*) [ -e %q ] || { ln -s %q %q; : > %q; } ;; esac\n' \
+  printf 'case "$*" in *core.hooksPath*) n=$(cat %q 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > %q
+    [ "$n" -lt 2 ] || [ -e %q ] || { ln -s %q %q; : > %q; } ;; esac\n' \
+      "$_A6_DIR/$_S238_C/hp-reads" "$_A6_DIR/$_S238_C/hp-reads" \
       "$_A6_DIR/$_S238_C/planted" "$_A6_DIR/$_S238_C/hooksdir" "$_S238_W/.git/modules/sub/hooks" "$_A6_DIR/$_S238_C/planted"
   printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S238_G/git"
 chmod +x "$_S238_G/git"
@@ -27087,7 +27092,7 @@ _a6_bg "$_S238_C" _a6_launch "$_S238_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-
 _s238_fg() { _s238_fakegit "$1"; printf '[core]\n' > "$1/config"; mkdir -p "$1/hooks"; }
 _s238_p() { local w="$_A6_DIR/s238-p/ws"; _s238_fg "$w/vendor/fg"; rm -f "$w/vendor/fg/config"; ln -s "$_A6_DIR/s238-p/.aws/credentials" "$w/vendor/fg/config"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
 _s238_p2() { local w="$_A6_DIR/s238-p2/ws"; _s238_fg "$w/vendor/fg"; rmdir "$w/vendor/fg/hooks"; ln -s "$_A6_DIR/s238-p2/hooksdir" "$w/vendor/fg/hooks"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
-_s238_p3() { local w="$_A6_DIR/s238-p3/ws"; _s238_fg "$w/vendor/fg"; mkdir -p "$w/vendor/fg/modules/sub"; printf '[core]\n' > "$w/vendor/fg/modules/sub/config"; ln -s "$_A6_DIR/s238-p3/hooksdir" "$w/vendor/fg/modules/sub/hooks"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
+_s238_p3() { local w="$_A6_DIR/s238-p3/ws"; _s238_fg "$w/vendor/fg"; mkdir -p "$w/vendor/fg/modules/sub"; printf '[core]\n' > "$w/vendor/fg/modules/sub/config"; mkdir -p "$w/vendor/fg/modules/sub/objects" "$w/vendor/fg/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$w/vendor/fg/modules/sub/HEAD"; ln -s "$_A6_DIR/s238-p3/hooksdir" "$w/vendor/fg/modules/sub/hooks"; printf 'gitdir: /%s\n' "$w/vendor/fg" > "$w/.git"; }
 _s238_pd() { local w="$_A6_DIR/s238-pd/ws"; _s238_fg "$w/vendor/fg"; rm -f "$w/vendor/fg/config"; ln -s "$_A6_DIR/s238-pd/.aws/credentials" "$w/vendor/fg/config"; printf 'gitdir: /%s/./vendor/fg\n' "$w" > "$w/.git"; }
 _s238_pu() { local w="$_A6_DIR/s238-pu/ws"; _s238_fg "$w/vendor/fg"; mkdir -p "$w/sub"; rm -f "$w/vendor/fg/config"; ln -s "$_A6_DIR/s238-pu/.aws/credentials" "$w/vendor/fg/config"; printf 'gitdir: /%s/sub/../vendor/fg\n' "$w" > "$w/.git"; }
 for _S238_N in p p2 p3 pd pu; do _a6_bg "s238-$_S238_N" _s238_sa "s238-$_S238_N" "_s238_$_S238_N"; done
@@ -27407,6 +27412,7 @@ printf 'c\n' > "$_A6_DIR/$_S239_C/ws/.claude/commands/c.md"; ln -s ../../shared 
 _a6_bg "$_S239_C" _a6_launch "$_S239_C" "${_S239_KC[@]}"
 _S239_C=s239-int; mkdir -p "$_A6_DIR/$_S239_C/ws/.claude" "$_A6_DIR/$_S239_C/ws/shared"
 printf 'c\n' > "$_A6_DIR/$_S239_C/ws/shared/c.md"; ln -s ../shared "$_A6_DIR/$_S239_C/ws/.claude/commands"
+_s236_seed "$_S239_C" ".claude/commands -> $_A6_DIR/$_S239_C/ws/shared"   # 2.9.0: a link inside the workspace at a copied tree needs the approval (§248)
 _a6_bg "$_S239_C" _a6_launch "$_S239_C" "${_S239_KC[@]}"
 _S239_C=s239-ghr; mkdir -p "$_A6_DIR/$_S239_C/ws/.github/workflows"; printf 'y\n' > "$_A6_DIR/$_S239_C/ws/.github/workflows/ci.yml"
 _a6_bg "$_S239_C" _a6_launch "$_S239_C" "${_S239_KC[@]}"
@@ -27523,8 +27529,9 @@ _S239_OK=0
 [ "$_S239_OK" = 0 ] || _a6_diag "§239(g1)" "$_S239_C"
 check "§239(g1) control: a real .claude/commands launches; the copy is a real directory with the mode a mkdir gives, its file copied and its inner link still a link (rc ${_A6_RC:-none})" \
     test "$_S239_OK" = 0
-# (g2) .claude/commands -> ../shared, a link inside the workspace: no prompt,
-# and the copy holds shared's contents (before: a relative link resolved
+# (g2) .claude/commands -> ../shared, a link inside the workspace, approved
+# (since 2.9.0 it needs the approval, §248): no prompt, and the copy holds
+# shared's contents (before: a relative link resolved
 # beside the sandbox, in $SANDY_HOME/sandboxes).
 _S239_C=s239-int; _a6_join "$_S239_C"
 _S239_M="$(_s239_src "$_S239_C" .claude/commands)"
@@ -27532,7 +27539,7 @@ _S239_OK=0
 { [ "$_A6_RC" = 0 ] && ! grep -q "Symlinks that point" "$_A6_DIR/$_S239_C/out" \
   && [ -n "$_S239_M" ] && [ ! -L "$_S239_M" ] && [ -f "$_S239_M/c.md" ]; } || _S239_OK=$?
 [ "$_S239_OK" = 0 ] || _a6_diag "§239(g2)" "$_S239_C"
-check "§239(g2) control: .claude/commands -> ../shared (inside the workspace) launches with no prompt, and the copy is a real directory holding shared's contents (rc ${_A6_RC:-none})" \
+check "§239(g2) control: .claude/commands -> ../shared (inside the workspace), approved, launches with no prompt, and the copy is a real directory holding shared's contents (rc ${_A6_RC:-none})" \
     test "$_S239_OK" = 0
 # (g3) a real .github/workflows is mounted :ro from the workspace; a real
 # empty one, and a real empty .claude/commands stub, are still cleaned up.
@@ -27574,6 +27581,776 @@ unset -f _s239_snap _s239_src _s239_noescape _s239_pu _s239_case _s239_cp _s239_
 
 unset _S229_LOG _S236_ETC
 unset -f _s236_tree _s236_expect _s236_expect_mounts _s236_mounts _s236_unmet _s236_seed _s227_tree _s228_ws _s228_pass _s228_sup
+
+section "§246: every directory between the workspace root and a path mounted inside it is pinned as a mount point of its own, read-write, before the deeper mounts"
+# ============================================================
+# WHY. A bind mount cannot be renamed or removed, but renaming a directory
+# ABOVE one carries it along: an ancestor rename could move protected mounts
+# aside. Sandy binds every in-workspace ancestor of a mount onto itself
+# (_sandy_pin_mount_ancestors), so the ancestor is a mount point too. Asserted
+# on the agent's docker run argv (the A6 stubs record it): each existing
+# ancestor gets exactly one read-write self-bind, after the workspace mount
+# and before every mount beneath it; a missing ancestor gets none and is not
+# created; an ancestor reached through a link gets none; the workspace root
+# is not bound twice. A .git FILE gets a :ro mount of its own.
+_S246_CWS=/home/sandy/ws
+# _s246_pinned ARGS CASE REL: one "-v <ws>/REL:<cws>/REL" (no :ro), after the
+# workspace mount, before every -v whose destination lies under it. Prints the
+# first unmet condition.
+_s246_pinned() {
+    awk -v src="$_A6_DIR/$2/ws/$3" -v w="$_A6_DIR/$2/ws" -v c="$_S246_CWS" -v r="$3" '
+        p == "-v" { n++; v[n] = $0 }
+        { p = $0 }
+        END {
+            pin = src ":" c "/" r; ws = w ":" c; k = 0; wi = 0; pi = 0
+            for (i = 1; i <= n; i++) { if (v[i] == pin) { k++; pi = i } if (v[i] == ws) wi = i }
+            if (k != 1) { print "pin count " k " for " r; exit 1 }
+            if (wi == 0 || wi > pi) { print "pin " r " not after the workspace mount"; exit 1 }
+            for (i = 1; i <= n; i++) {
+                d = v[i]; sub(/^[^:]*:/, "", d); sub(/:ro$/, "", d)
+                if (index(d, c "/" r "/") == 1 && i < pi) { print "deeper mount " v[i] " before pin " r; exit 1 }
+            }
+        }' "$1"
+}
+# _s246_nopin ARGS CASE REL: no -v has the destination <cws>/REL, rw or :ro.
+_s246_nopin() {
+    awk -v d1="$_S246_CWS/$3" 'p == "-v" { d = $0; sub(/^[^:]*:/, "", d); sub(/:ro$/, "", d); if (d == d1) { print "mounted: " $0; bad = 1 } } { p = $0 } END { exit bad }' "$1"
+}
+# (a) a typical repo: .git with config, hooks, info and a submodule gitdir;
+# .github/workflows; .claude with settings.json, hooks and commands; a nested
+# core.hooksPath. Each protected dir holds a file, or the launch would remove
+# it as empty debris.
+_S246_C=s246-typ; _S246_W="$_A6_DIR/$_S246_C/ws"
+mkdir -p "$_S246_W/.git/hooks" "$_S246_W/.git/info" "$_S246_W/.git/objects" "$_S246_W/.git/refs" \
+    "$_S246_W/.git/modules/lib/a/hooks" "$_S246_W/.github/workflows" "$_S246_W/.claude/hooks" \
+    "$_S246_W/.claude/commands" "$_S246_W/tools/githooks"
+printf 'ref: refs/heads/main\n' > "$_S246_W/.git/HEAD"
+printf '[core]\n\thooksPath = tools/githooks\n' > "$_S246_W/.git/config"
+printf '[core]\n' > "$_S246_W/.git/modules/lib/a/config"; mkdir -p "$_S246_W/.git/modules/lib/a/objects" "$_S246_W/.git/modules/lib/a/refs"; printf 'ref: refs/heads/main\n' > "$_S246_W/.git/modules/lib/a/HEAD"
+for _S246_F in .git/hooks .git/info .github/workflows .claude/hooks tools/githooks; do printf 'x\n' > "$_S246_W/$_S246_F/f"; done
+printf '{}\n' > "$_S246_W/.claude/settings.json"; printf 'x\n' > "$_S246_W/.claude/commands/x.md"
+_a6_launch "$_S246_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S246_A="$(_a6_agent_args "$_S246_C")"
+_S246_ERR=""
+if [ "$_A6_RC" != 0 ] || [ -z "$_S246_A" ]; then _S246_ERR="launch rc $_A6_RC, no agent argv"; fi
+if [ -z "$_S246_ERR" ]; then
+    # The probe ran: the deeper mounts the pins exist for are on the argv.
+    for _S246_F in .git/config:ro .git/hooks:ro .git/modules/lib/a/config:ro .github/workflows:ro .claude/settings.json:ro .claude/hooks:ro tools/githooks:ro; do
+        grep -qxF "$_S246_W/${_S246_F%:ro}:$_S246_CWS/$_S246_F" "$_S246_A" || _S246_ERR="$_S246_ERR missing $_S246_F;"
+    done
+    grep -qxF "$(_a6_sandbox "$_S246_C")/workspace-commands:$_S246_CWS/.claude/commands" "$_S246_A" || _S246_ERR="$_S246_ERR missing the .claude/commands overlay;"
+fi
+if [ -n "$_S246_ERR" ]; then _a6_diag "§246(a)" "$_S246_C"; fi
+check "§246(a0) control: the fixture launch ran and its argv carries the protected :ro mounts and the overlay the pins exist for (${_S246_ERR:-ok})" \
+    test -z "$_S246_ERR"
+for _S246_P in .git .git/modules .git/modules/lib .git/modules/lib/a .github .claude tools; do
+    _S246_R="$(_s246_pinned "$_S246_A" "$_S246_C" "$_S246_P" 2>&1)" || true
+    check "§246(a) $_S246_P is bound onto itself read-write, once, after the workspace mount and before every mount beneath it (mutation: drop its pin, or put the pins after the deeper mounts; ${_S246_R:-ok})" \
+        test -z "$_S246_R"
+done
+_S246_R="$(awk -v ws="$_S246_W:$_S246_CWS" 'p == "-v" && $0 == ws { k++ } { p = $0 } END { print k + 0 }' "$_S246_A" 2>/dev/null)" || true
+check "§246(a2) the workspace root is mounted once and never pinned again (got ${_S246_R:-none})" test "$_S246_R" = 1
+_S246_R="$( { _s246_nopin "$_S246_A" "$_S246_C" .git/hooks/f; _s246_nopin "$_S246_A" "$_S246_C" .claude/commands/x.md; } 2>&1)" || true
+check "§246(a3) nothing below a mounted path is bound: no pin inside .git/hooks or the .claude/commands overlay (${_S246_R:-ok})" test -z "$_S246_R"
+# (b) missing ancestors: no .github, no .claude, no submodules. Nothing is
+# pinned for them and nothing is created on the host.
+_S246_C=s246-miss; _S246_W="$_A6_DIR/$_S246_C/ws"
+mkdir -p "$_S246_W/.git/objects" "$_S246_W/.git/refs"
+printf 'ref: refs/heads/main\n' > "$_S246_W/.git/HEAD"; printf '[core]\n' > "$_S246_W/.git/config"
+_a6_launch "$_S246_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S246_A="$(_a6_agent_args "$_S246_C")"
+_S246_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S246_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s246_pinned "$_S246_A" "$_S246_C" .git
+    for _S246_P in .github .claude .git/modules .gemini; do
+        _s246_nopin "$_S246_A" "$_S246_C" "$_S246_P"; if [ -e "$_S246_W/$_S246_P" ]; then echo "created $_S246_P"; fi
+    done; } 2>&1)" || true
+if [ -n "$_S246_R" ]; then _a6_diag "§246(b)" "$_S246_C"; fi
+check "§246(b) an ancestor absent on the host gets no pin and is not created (.github, .claude, .gemini, .git/modules), while .git, present, is pinned (${_S246_R:-ok})" \
+    test -z "$_S246_R"
+# (c) an ancestor reached through a link is never a mount source: .claude and
+# .github are links to directories inside the workspace. Such a link needs the
+# one-time symlink approval (§248), so the approved list is seeded here.
+_S246_C=s246-lnk; _S246_W="$_A6_DIR/$_S246_C/ws"
+mkdir -p "$_S246_W/real-claude/hooks" "$_S246_W/real-gh/workflows" "$_S246_W/.git/objects" "$_S246_W/.git/refs"
+printf 'ref: refs/heads/main\n' > "$_S246_W/.git/HEAD"; printf '[core]\n' > "$_S246_W/.git/config"
+printf '{}\n' > "$_S246_W/real-claude/settings.json"; printf 'x\n' > "$_S246_W/real-claude/hooks/f"; printf 'x\n' > "$_S246_W/real-gh/workflows/f"
+ln -s real-claude "$_S246_W/.claude"; ln -s real-gh "$_S246_W/.github"
+mkdir -p "$(_a6_sandbox "$_S246_C")"
+printf '%s\n' ".claude -> $_S246_W/real-claude" ".github -> $_S246_W/real-gh" > "$(_a6_sandbox "$_S246_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S246_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S246_A="$(_a6_agent_args "$_S246_C")"
+_S246_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S246_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S246_W/.claude/settings.json:$_S246_CWS/.claude/settings.json:ro" "$_S246_A" || echo "control: no .claude/settings.json mount"
+    for _S246_P in .claude .github real-claude real-gh; do _s246_nopin "$_S246_A" "$_S246_C" "$_S246_P"; done
+    _s246_pinned "$_S246_A" "$_S246_C" .git; } 2>&1)" || true
+if [ -n "$_S246_R" ]; then _a6_diag "§246(c)" "$_S246_C"; fi
+check "§246(c) an ancestor that is a link (.claude -> real-claude, .github -> real-gh) is not pinned, nor is its target, while the protected paths through it are still mounted :ro (mutation: drop the link test in the walk; ${_S246_R:-ok})" \
+    test -z "$_S246_R"
+# (d) a .git FILE naming a gitdir inside the workspace: the file is mounted
+# :ro, the gitdir is its own mount, and its parent is pinned before it.
+_S246_C=s246-gf; _S246_W="$_A6_DIR/$_S246_C/ws"
+mkdir -p "$_S246_W/vendor/fg/objects" "$_S246_W/vendor/fg/refs" "$_S246_W/vendor/fg/hooks"
+printf 'ref: refs/heads/main\n' > "$_S246_W/vendor/fg/HEAD"; printf '[core]\n' > "$_S246_W/vendor/fg/config"; printf 'x\n' > "$_S246_W/vendor/fg/hooks/f"
+printf 'gitdir: vendor/fg\n' > "$_S246_W/.git"
+_a6_launch "$_S246_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S246_A="$(_a6_agent_args "$_S246_C")"
+_S246_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S246_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S246_W/.git:$_S246_CWS/.git:ro" "$_S246_A" || echo "no :ro mount of the .git file"
+    grep -qxF "$_S246_W/vendor/fg:$_S246_CWS/vendor/fg" "$_S246_A" || echo "control: no gitdir mount"
+    _s246_pinned "$_S246_A" "$_S246_C" vendor
+    [ "$(grep -cxF "$_S246_W/vendor/fg:$_S246_CWS/vendor/fg" "$_S246_A")" = 1 ] || echo "the gitdir is mounted twice"; } 2>&1)" || true
+if [ -n "$_S246_R" ]; then _a6_diag "§246(d)" "$_S246_C"; fi
+check "§246(d) a .git FILE is mounted :ro, and the in-workspace gitdir it names gets its parent pinned before it and no second mount (mutation: drop the .git file mount; ${_S246_R:-ok})" \
+    test -z "$_S246_R"
+# (e) a mount whose ancestor is absent on the host: the .gemini/commands
+# overlay comes from the sandbox (an earlier launch copied it) while the
+# workspace no longer has .gemini. The overlay is mounted, .gemini is not
+# pinned (Docker would create a missing source on the host).
+_S246_C=s246-gone; _S246_W="$_A6_DIR/$_S246_C/ws"
+mkdir -p "$_S246_W/.gemini/commands"; printf 'x\n' > "$_S246_W/.gemini/commands/x.md"
+_a6_launch "$_S246_C" SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6
+rm -rf "$_S246_W/.gemini"
+_a6_launch "$_S246_C" SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6
+_S246_A="$(_a6_agent_args "$_S246_C")"
+_S246_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S246_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$(_a6_sandbox "$_S246_C")/workspace-gemini-commands:$_S246_CWS/.gemini/commands" "$_S246_A" || echo "control: no .gemini/commands overlay"
+    _s246_nopin "$_S246_A" "$_S246_C" .gemini; } 2>&1)" || true
+if [ -n "$_S246_R" ]; then _a6_diag "§246(e)" "$_S246_C"; fi
+check "§246(e) the .gemini/commands overlay with no .gemini on the host pins nothing for .gemini, so no -v source is missing (mutation: drop the existence test in the walk; ${_S246_R:-ok})" \
+    test -z "$_S246_R"
+# (f) a relative core.hooksPath spelled with `..` (tools/x/../githooks): Docker
+# mounts it where the cleaned spelling says (tools/githooks), so tools is
+# pinned, and tools/x, which only the spelling passes through, is not.
+_S246_C=s246-dotdot; _S246_W="$_A6_DIR/$_S246_C/ws"
+mkdir -p "$_S246_W/.git/objects" "$_S246_W/.git/refs" "$_S246_W/tools/x" "$_S246_W/tools/githooks"
+printf 'ref: refs/heads/main\n' > "$_S246_W/.git/HEAD"; printf '[core]\n\thooksPath = tools/x/../githooks\n' > "$_S246_W/.git/config"
+printf 'x\n' > "$_S246_W/tools/githooks/f"
+_a6_launch "$_S246_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S246_A="$(_a6_agent_args "$_S246_C")"
+_S246_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S246_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S246_W/tools/x/../githooks:$_S246_CWS/tools/x/../githooks:ro" "$_S246_A" || echo "control: no hooksPath mount"
+    _s246_pinned "$_S246_A" "$_S246_C" tools
+    _s246_nopin "$_S246_A" "$_S246_C" tools/x; } 2>&1)" || true
+if [ -n "$_S246_R" ]; then _a6_diag "§246(f)" "$_S246_C"; fi
+check "§246(f) a core.hooksPath spelled tools/x/../githooks pins tools (where Docker mounts it), not tools/x (mutation: skip a destination with a .. component; ${_S246_R:-ok})" \
+    test -z "$_S246_R"
+unset _S246_CWS _S246_C _S246_W _S246_A _S246_ERR _S246_F _S246_P _S246_R
+unset -f _s246_pinned _s246_nopin
+
+section "§248: protected FILE contents are recorded at launch and a change is reported at session end; macOS locks them for the session; a link inside the workspace above a protected path needs the symlink approval"
+# ============================================================
+# WHY. A :ro bind holds a path, not the file behind it: on a case-insensitive
+# host file system another spelling of a protected file's name, looked up
+# through the read-write workspace mount, reaches the same file. So (1) the
+# launch hashes every :ro FILE mount and keeps a copy, and the session-end
+# sweep reports a change with a printed compare/restore suggestion, never
+# restoring anything itself; (2) on macOS the most sensitive files get
+# chflags uchg for the session, and exactly what sandy set is cleared again
+# (cleanup, the next launch, --unlock), never a flag the user set; (3) a link
+# inside the workspace at or above a protected path goes through the
+# dangerous-symlink approval: refused headless or without a terminal, and not
+# covered by SANDY_AUTO_APPROVE_PRIVILEGED.
+#
+# Stubs (in front of the A6 ones): chflags keeps the flag set in
+# CASE/flags and logs each call; stat answers `-f %Sf` from that set (and
+# runs the real stat otherwise); docker copies the flag set aside while the
+# agent "runs" and, with S248_WRITE=<rel>, rewrites that workspace file the
+# way a write through another spelling would, or, with S248_LINK=<rel>,
+# replaces it with a link.
+_S248_B="$_A6_DIR/s248bin"; mkdir -p "$_S248_B"
+cat > "$_S248_B/chflags" <<'S248EOF'
+#!/bin/sh
+printf 'chflags %s\n' "$*" >> "$A6_LOG/events.log"
+st="$A6_LOG/flags"; touch "$st"
+[ "$1" != -h ] || shift
+# S248_SWAP=<path>: another file is moved over that path just as it is locked
+# (the race the inode re-check is for); the flag lands on the file moved away.
+if [ "$1" = uchg ] && [ -n "${S248_SWAP:-}" ] && [ "$2" = "$S248_SWAP" ] && [ -f "$2.swap" ]; then
+    mv "$2" "$2.locked-away"; mv "$2.swap" "$2"
+    printf '%s\n' "$2.locked-away" >> "$st"; exit 0
+fi
+case "$1" in
+    uchg) grep -qxF "$2" "$st" || printf '%s\n' "$2" >> "$st" ;;
+    nouchg) grep -vxF "$2" "$st" > "$st.t" || true; mv "$st.t" "$st" ;;
+    *) exit 1 ;;
+esac
+S248EOF
+{ printf '#!/bin/sh\n'
+  printf 'if [ "$1" = -f ] && [ "$2" = %%Sf ]; then\n'
+  printf '    if grep -qxF "$3" "$A6_LOG/flags" 2>/dev/null; then echo uchg; else echo -; fi; exit 0\n'
+  printf 'fi\n'
+  printf 'if [ "$1" = -f ] && [ "$2" = %%c ]; then %q -c %%Z "$3" 2>/dev/null || %q -f %%c "$3"; exit 0; fi\n' "$(command -v stat)" "$(command -v stat)"
+  printf 'exec %q "$@"\n' "$(command -v stat)"; } > "$_S248_B/stat"
+{ printf '#!/bin/sh\n'
+  printf 'case " $* " in *" --name sandy-ws-"*)\n'
+  printf '    cp "$A6_LOG/flags" "$A6_LOG/flags-during-run" 2>/dev/null || : > "$A6_LOG/flags-during-run"\n'
+  printf '    if [ -n "${S248_WRITE:-}" ]; then printf "tampered\\n" >> "$A6_WS/$S248_WRITE"; fi\n'
+  printf '    if [ -n "${S248_WRITE_ABS:-}" ]; then printf "tampered\\n" >> "$S248_WRITE_ABS"; fi\n'
+  printf '    if [ -n "${S248_RUN:-}" ]; then (cd "$A6_WS" && sh -c "$S248_RUN"); fi\n'
+  printf '    if [ -n "${S248_LINK:-}" ]; then rm -f "$A6_WS/$S248_LINK"; ln -s elsewhere "$A6_WS/$S248_LINK"; fi ;;\n'
+  printf 'esac\n'
+  # S248_SURVIVE=1: the agent container is still there after its rm (a teardown
+  # interrupted by a reboot or a Docker restart).
+  # S248_SURVIVE=down: the daemon cannot be reached, so whether it is gone is unknown.
+  printf 'case "$*" in "inspect -f {{.Id}} "*) if [ "${S248_SURVIVE:-}" = down ]; then echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; fi; if [ -n "${S248_SURVIVE:-}" ]; then echo deadbeef; fi; exit 0 ;; esac\n'
+  printf 'exec %q "$@"\n' "$_A6_DIR/bin/docker"; } > "$_S248_B/docker"
+chmod +x "$_S248_B/chflags" "$_S248_B/stat" "$_S248_B/docker"
+_S248_PATH="$_S248_B:$_A6_DIR/bin:$PATH"
+_s248_repo() {   # $1 = workspace: a git dir, .envrc, .mcp.json
+    mkdir -p "$1/.git/objects" "$1/.git/refs"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+    printf 'export S248=1\n' > "$1/.envrc"; printf '{"mcpServers":{}}\n' > "$1/.mcp.json"
+}
+_s248_sha() { { shasum -a 256 2>/dev/null || sha256sum; } < "$1" | awk '{print $1}'; }
+# One lock-record line: $1 = locked|preset  $2 = absolute path  [$3 = inode (default:
+# the file's own)  $4 = ctime (default "-")].
+_s248_rec() {
+    local h
+    h="$(printf '%s' "$2" | od -An -tx1 | tr -d ' \n')"
+    if [ "$1" = preset ]; then printf 'preset\t%s\n' "$h"; return 0; fi
+    printf 'locked\t%s\t%s\t%s\n' "$h" "${3:-$(ls -di "$2" | awk '{print $1}')}" "${4:--}"
+}
+# The CHANGED block of output file $1, one line per entry, prefix stripped.
+_s248_block() { awk '/Protected files CHANGED during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+# (a) Linux: .envrc rewritten during the session is reported, with the copy
+# and a printed diff/cp; nothing is restored; the unchanged ones are not
+# listed; nothing is locked.
+_S248_C=s248-hash; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_S248_H0="$(_s248_sha "$_S248_W/.envrc")"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.envrc PATH="$_S248_PATH"
+_S248_O="$_A6_DIR/$_S248_C/out"; _S248_CP="$(_a6_sandbox "$_S248_C")/.protected-copies"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S248_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ "$(_s248_block "$_S248_O")" = .envrc ] || echo "block: $(_s248_block "$_S248_O" | tr '\n' ' ')"
+    grep -qF "cp $_S248_CP/$_S248_H0 $_S248_W/.envrc" "$_S248_O" || echo "no cp suggestion"
+    grep -qF "diff -u $_S248_CP/$_S248_H0 $_S248_W/.envrc" "$_S248_O" || echo "no diff suggestion"
+    [ "$(cat "$_S248_CP/$_S248_H0" 2>/dev/null)" = 'export S248=1' ] || echo "the copy is not the launch content"
+    grep -q tampered "$_S248_W/.envrc" || echo "the workspace file was restored"
+    [ "$(ls -ld "$_S248_CP" | cut -c1-10)" = drwx------ ] || echo "copy dir mode $(ls -ld "$_S248_CP" | cut -c1-10)"
+    if grep -q '^chflags' "$_A6_DIR/$_S248_C/events.log"; then echo "chflags ran on Linux"; fi
+    if grep -q 'Locked until this session ends' "$_S248_O"; then echo "lock notice on Linux"; fi; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(a)" "$_S248_C"; fi
+check "§248(a) a protected file rewritten during the session is reported (only it), with the launch copy and a printed diff/cp, and is not restored; on Linux nothing is locked (mutation: drop the #hash snapshot, or the report; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-hash0; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_R="$(grep -c 'Protected files CHANGED' "$_A6_DIR/$_S248_C/out" || true)"
+check "§248(a0) control: the same launch with no write reports nothing (rc $_A6_RC, blocks ${_S248_R:-?})" \
+    test "$_A6_RC" = 0 -a "$_S248_R" = 0
+# (b) a file replaced by a link is reported, with no cp: it would write
+# wherever the link points.
+_S248_C=s248-hlink; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_LINK=.envrc PATH="$_S248_PATH"
+_S248_O="$_A6_DIR/$_S248_C/out"
+_S248_R="$( { [ "$(_s248_block "$_S248_O")" = '.envrc (now missing)' ] || [ "$(_s248_block "$_S248_O")" = .envrc ] || echo "block: $(_s248_block "$_S248_O" | tr '\n' ' ')"
+    if grep -qF "/.envrc" "$_S248_O" && grep -E '^\[sandy\]   (cp|diff) ' "$_S248_O" | grep -qF ".envrc"; then echo "a cp/diff through the link was printed"; fi; } 2>&1)" || true
+check "§248(b) a protected file replaced by a link is reported with no cp or diff suggestion (mutation: drop the link test in the report; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (c) macOS: the six-file list is locked while the agent runs, a flag the user
+# had set (.mcp.json) is recorded and never cleared, and cleanup clears
+# exactly what sandy set.
+_S248_C=s248-mac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+mkdir -p "$_S248_W/.claude"; printf '{}\n' > "$_S248_W/.claude/settings.json"
+printf '%s\n' "$_S248_W/.mcp.json" > "$_A6_DIR/$_S248_C/flags"
+_a6_launch "$_S248_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_O="$_A6_DIR/$_S248_C/out"; _S248_E="$_A6_DIR/$_S248_C/events.log"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S248_C")" ]; then echo "launch rc $_A6_RC"; fi
+    for _S248_F in .claude/settings.json .claude/settings.local.json .envrc .git/config .mcp.json; do
+        grep -qxF "$_S248_W/$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked during the run: $_S248_F"
+    done
+    grep -qF "Locked until this session ends (macOS chflags uchg): .claude/settings.json .claude/settings.local.json .envrc .git/config .git/commondir." "$_S248_O" || echo "no (or wrong) lock notice"
+    [ "$(cat "$_A6_DIR/$_S248_C/flags")" = "$_S248_W/.mcp.json" ] || echo "after: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"
+    if grep -qF "nouchg $_S248_W/.mcp.json" "$_S248_E" || grep -qF "uchg $_S248_W/.mcp.json" "$_S248_E"; then echo "the user's flag was touched"; fi
+    [ ! -e "$(_a6_sandbox "$_S248_C")/.uchg-locked" ] || echo "record left behind"
+    # Locked after sandy's own write of settings.local.json, before the run.
+    awk '/^chflags -h uchg .*settings.local.json/ { l = NR } /^docker run/ && / --name sandy-ws-/ { r = NR } END { exit !(l && r && l < r) }' "$_S248_E" || echo "lock not before docker run"; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(c)" "$_S248_C"; fi
+check "§248(c) macOS: .claude/settings.json, .claude/settings.local.json, .envrc and .git/config are locked before docker run and unlocked by cleanup; a flag the user set is recorded and never touched (mutation: no lock call; unlock everything in the list; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (d) a record a session left behind is cleared at the next launch's start,
+# before docker run (a Linux launch: the unlock needs chflags only).
+_S248_C=s248-stale; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+mkdir -p "$(_a6_sandbox "$_S248_C")"
+_s248_rec locked "$_S248_W/.envrc" > "$(_a6_sandbox "$_S248_C")/.uchg-locked"
+printf '%s\n' "$_S248_W/.envrc" > "$_A6_DIR/$_S248_C/flags"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_E="$_A6_DIR/$_S248_C/events.log"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    awk -v f="chflags -h nouchg $_S248_W/.envrc" '$0 == f { l = NR } /^docker run/ && / --name sandy-ws-/ { r = NR } END { exit !(l && r && l < r) }' "$_S248_E" || echo "not unlocked before docker run"
+    [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "still locked"
+    grep -qF "Unlocked the files an earlier session" "$_A6_DIR/$_S248_C/out" || echo "no notice"; } 2>&1)" || true
+check "§248(d) a lock record left by a session that never cleaned up is cleared at the next launch, before docker run (mutation: drop the launch-start unlock; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (e) sandy --unlock: clears what the record says sandy set (same inode),
+# drops a record for a file that is no longer the one sandy locked, never
+# touches a preset flag; then there is nothing to do; a path now under a link
+# is not unlocked (exit 1); a running session refuses it; --dry-run changes
+# nothing.
+_S248_C=s248-unl; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
+{ _s248_rec locked "$_S248_W/.envrc"; _s248_rec locked "$_S248_W/.git/config" 1; _s248_rec preset "$_S248_W/.mcp.json"; } > "$_S248_S/.uchg-locked"
+printf '%s\n' "$_S248_W/.envrc" "$_S248_W/.git/config" "$_S248_W/.mcp.json" > "$_A6_DIR/$_S248_C/flags"
+cp "$_S248_S/.uchg-locked" "$_A6_DIR/$_S248_C/record0"
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W" --dry-run
+_S248_RD="$_A6_RC"; _S248_ED="$(grep -c '^chflags' "$_A6_DIR/$_S248_C/events.log" || true)"
+cmp -s "$_S248_S/.uchg-locked" "$_A6_DIR/$_S248_C/record0" || _S248_ED="record-changed"
+check "§248(e1) --unlock --dry-run lists and changes nothing (rc $_S248_RD, chflags calls $_S248_ED)" \
+    test "$_S248_RD" = 0 -a "$_S248_ED" = 0
+_S248_L="$_A6_DIR/$_S248_C/sh/sandboxes/.$(basename "$_S248_S").lock"
+mkdir -p "$_S248_L"; printf '%s\n' "$$" > "$_S248_L/pid"   # this shell: alive
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W"
+_S248_RL="$_A6_RC"; _S248_EL="$(grep -c '^chflags' "$_A6_DIR/$_S248_C/events.log" || true)"
+rm -rf "$_S248_L"
+check "§248(e2) --unlock refuses while a session of the workspace holds its lock (rc $_S248_RL, chflags calls $_S248_EL)" \
+    test "$_S248_RL" = 1 -a "$_S248_EL" = 0
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W"
+_S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    [ "$(cat "$_A6_DIR/$_S248_C/flags")" = "$(printf '%s\n' "$_S248_W/.git/config" "$_S248_W/.mcp.json")" ] || echo "flags now: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"
+    grep -qF "not the file sandy locked" "$_A6_DIR/$_S248_C/out" || echo "no warning for the replaced file"
+    [ ! -e "$_S248_S/.uchg-locked" ] || echo "record left: $(tr '\t\n' ' ;' < "$_S248_S/.uchg-locked")"; } 2>&1)" || true
+check "§248(e3) --unlock clears .envrc (sandy's, same inode), leaves .git/config (another inode) and .mcp.json (preset) alone, exit 0 (mutation: no inode check; unlock preset lines; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W"
+check "§248(e4) ...and a second --unlock has nothing to do, exit 0 (rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && grep -qF "Nothing to do" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
+_S248_C=s248-unl2; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_W/cfg" "$_S248_S"
+printf '{}\n' > "$_S248_W/cfg/settings.json"; ln -s cfg "$_S248_W/.claude"
+_s248_rec locked "$_S248_W/.claude/settings.json" "$(ls -di "$_S248_W/cfg/settings.json" | awk '{print $1}')" > "$_S248_S/.uchg-locked"
+printf '%s\n' "$_S248_W/.claude/settings.json" "$_S248_W/cfg/settings.json" > "$_A6_DIR/$_S248_C/flags"
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W"
+_S248_R="$( { [ "$_A6_RC" = 1 ] || echo "rc $_A6_RC"
+    if grep -q nouchg "$_A6_DIR/$_S248_C/events.log"; then echo "unlocked through the link"; fi
+    grep -q '^locked' "$_S248_S/.uchg-locked" 2>/dev/null || echo "record dropped"; } 2>&1)" || true
+check "§248(e5) --unlock never unlocks through a link (.claude -> cfg): exit 1, the record kept (mutation: drop the link test in the unlock; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (f) the symlink gate for a link inside the workspace above a protected path.
+_s248_gate() {   # $1 = CASE: .claude -> cfg holding settings.json
+    local w="$_A6_DIR/$1/ws"; _s248_repo "$w"; mkdir -p "$w/cfg"; printf '{}\n' > "$w/cfg/settings.json"; ln -s cfg "$w/.claude"
+}
+_S248_C=s248-gate; _s248_gate "$_S248_C"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_O="$_A6_DIR/$_S248_C/out"
+_S248_R="$( { [ "$_A6_RC" = 1 ] || echo "rc $_A6_RC"
+    [ -z "$(_a6_agent_args "$_S248_C")" ] || echo "the agent ran"
+    grep -qF "Symlinks inside the workspace at or above a path sandy protects" "$_S248_O" || echo "no header"
+    grep -qF ".claude -> $_A6_DIR/$_S248_C/ws/cfg" "$_S248_O" || echo "link not named"
+    grep -qF "cannot protect a path while it sits under a link" "$_S248_O" || echo "no explanation"
+    grep -qF "need interactive approval" "$_S248_O" || echo "no non-TTY refusal"; } 2>&1)" || true
+check "§248(f1) a headless, non-TTY launch with .claude -> cfg (inside the workspace) is refused at the symlink gate, which names the link and why (mutation: drop the internal sweep; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-gauto; _s248_gate "$_S248_C"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1 PATH="$_S248_PATH"
+check "§248(f2) ...and SANDY_AUTO_APPROVE_PRIVILEGED=1 does not approve it (rc $_A6_RC)" \
+    bash -c '[ "$1" = 1 ] && grep -qF "need interactive approval" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
+_S248_C=s248-gok; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")"
+printf '%s\n' ".claude -> $_A6_DIR/$_S248_C/ws/cfg" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(f3) ...once approved, the launch proceeds (rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && [ -n "$2" ]' _ "$_A6_RC" "$(_a6_agent_args "$_S248_C")"
+_S248_C=s248-gnew; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")" "$_A6_DIR/$_S248_C/t0"
+ln -s "$_A6_DIR/$_S248_C/t0" "$_A6_DIR/$_S248_C/ws/keep"
+printf '%s\n' "keep -> $_A6_DIR/$_S248_C/t0" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(f4) a new such link beside an existing approval is a hard error that says why (rc $_A6_RC)" \
+    bash -c '[ "$1" = 1 ] && grep -qF "cannot be protected while it sits under a link" "$2" && grep -qF ".claude -> " "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
+_S248_C=s248-genv; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/conf"
+mv "$_S248_W/.envrc" "$_S248_W/conf/envrc"; ln -s conf/envrc "$_S248_W/.envrc"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(f5) a link AT a protected file (.envrc -> conf/envrc) is gated the same way (rc $_A6_RC)" \
+    bash -c '[ "$1" = 1 ] && grep -qF ".envrc -> $3/conf/envrc" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
+_S248_C=s248-gfree; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/src"; ln -s src "$_S248_W/docs"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(f6) control: a link inside the workspace that is not on the way to a protected path (docs -> src) needs no approval (rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && ! grep -qF "at or above a path sandy protects" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
+# (g) .git/commondir and .git/config.worktree: :ro when present, and one
+# created during the session is reported like any protected file. (The
+# commondir is seeded at launch since 2.9.0, so it is config.worktree that is
+# created here; a write to the seeded commondir is (p)'s.)
+_S248_C=s248-cdir; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; printf '../..\n' > "$_S248_W/.git/commondir"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/config.worktree PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S248_W/.git/commondir:/home/sandy/ws/.git/commondir:ro" "$_S248_A" || echo "commondir not :ro"
+    awk '/Protected paths appeared during this session/ { on = 1; next } on && /\.git\/config\.worktree$/ { f = 1 } END { exit !f }' "$_A6_DIR/$_S248_C/out" || echo "created config.worktree not reported"
+    [ "$(cat "$_S248_W/.git/commondir")" = ../.. ] || echo "the user's commondir was changed or removed"; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(g)" "$_S248_C"; fi
+check "§248(g) an existing .git/commondir is mounted :ro and left as it was, and a .git/config.worktree created during the session is reported (mutation: leave them off _sandy_protected_git_files; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (h) a .git FILE naming a gitdir outside the workspace (a linked worktree):
+# the gitdir's commondir is :ro, its config is hashed and a change reported;
+# on macOS the .git file, the gitdir's config and commondir, and a submodule
+# config under it are locked during the run and unlocked after.
+_s248_wt() {   # $1 = CASE: ws/.git -> ../realgit, with commondir and a submodule gitdir
+    local g="$_A6_DIR/$1/realgit"
+    mkdir -p "$_A6_DIR/$1/ws" "$g/objects" "$g/refs" "$g/modules/sub"
+    printf 'ref: refs/heads/main\n' > "$g/HEAD"; printf '[core]\n' > "$g/config"; printf '../main\n' > "$g/commondir"
+    printf '[core]\n' > "$g/modules/sub/config"; mkdir -p "$g/modules/sub/objects" "$g/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$g/modules/sub/HEAD"; printf 'gitdir: ../realgit\n' > "$_A6_DIR/$1/ws/.git"
+}
+_S248_C=s248-wt; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE_ABS="$_S248_G/config" PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S248_G/commondir:/home/sandy/realgit/commondir:ro" "$_S248_A" || echo "gitdir commondir not :ro"
+    [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = "$_S248_G/config" ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(h1)" "$_S248_C"; fi
+check "§248(h1) a gitdir outside the workspace: its commondir is :ro, and its config, rewritten during the session, is reported (mutation: hash only workspace destinations; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-wtmac; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    for _S248_F in "$_A6_DIR/$_S248_C/ws/.git" "$_S248_G/config" "$_S248_G/commondir" "$_S248_G/modules/sub/config"; do
+        grep -qxF "$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked during the run: $_S248_F"
+    done
+    [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "left locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"; } 2>&1)" || true
+check "§248(h2) macOS: the .git file, the gitdir's config and commondir, and its submodule config are locked during the run and unlocked after (mutation: lock only the fixed workspace list; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-submac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/modules/lib/a"
+printf '[core]\n' > "$_S248_W/.git/modules/lib/a/config"; mkdir -p "$_S248_W/.git/modules/lib/a/objects" "$_S248_W/.git/modules/lib/a/refs"; printf 'ref: refs/heads/main\n' > "$_S248_W/.git/modules/lib/a/HEAD"; printf '.\n' > "$_S248_W/.git/commondir"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_R="$( { for _S248_F in .git/modules/lib/a/config .git/commondir .git/config .envrc .mcp.json; do
+        grep -qxF "$_S248_W/$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked: $_S248_F"
+    done; } 2>&1)" || true
+check "§248(h3) macOS: a submodule config under .git/modules and .git/commondir are locked with the fixed list (rc $_A6_RC; ${_S248_R:-ok})" \
+    test "$_A6_RC" = 0 -a -z "$_S248_R"
+# (i) a link above the core.hooksPath directory needs the approval.
+_S248_C=s248-hpl; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/real-tools/githooks"
+printf 'x\n' > "$_S248_W/real-tools/githooks/pre-commit"; ln -s real-tools "$_S248_W/tools"
+printf '[core]\n\thooksPath = tools/githooks\n' > "$_S248_W/.git/config"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(i) core.hooksPath tools/githooks with tools -> real-tools is refused at the symlink gate, naming the link (mutation: leave the hooksPath out of _sandy_symlink_byname_rels; rc $_A6_RC)" \
+    bash -c '[ "$1" = 1 ] && grep -qF "tools -> $3/real-tools" "$2" && grep -qF "at or above a path sandy protects" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
+# (j) never through a link: an approved .claude -> cfg gets no lock on what it
+# leads to; and a file swapped in as it is locked is cleared again and named.
+_S248_C=s248-mlnk; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")"
+printf '%s\n' ".claude -> $_A6_DIR/$_S248_C/ws/cfg" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_A6_DIR/$_S248_C/ws/.envrc" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "control: .envrc not locked"
+    if grep -E 'chflags .*(\.claude/|cfg/)' "$_A6_DIR/$_S248_C/events.log"; then echo "locked through the link"; fi; } 2>&1)" || true
+check "§248(j1) macOS: nothing reached through an approved .claude -> cfg is locked (mutation: drop the no-link walk in the lock; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-swap; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; printf 'other\n' > "$_S248_W/.envrc.swap"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SWAP="$_S248_W/.envrc" PATH="$_S248_PATH"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qF "Not locking .envrc: it was replaced while sandy locked it" "$_A6_DIR/$_S248_C/out" || echo "no warning"
+    if grep -qxF "$_S248_W/.envrc" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null; then echo "the swapped-in file is locked"; fi
+    if grep -q 'Locked until this session ends.* \.envrc' "$_A6_DIR/$_S248_C/out"; then echo "named as locked"; fi; } 2>&1)" || true
+check "§248(j2) a file replaced while being locked is cleared again and named, not reported as locked (mutation: drop the inode re-check after chflags; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (k) a flag whose status changed after sandy set it (a ctime other than the
+# recorded one) is left alone and dropped from the record.
+_S248_C=s248-ct; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
+_s248_rec locked "$_S248_W/.envrc" "" 1 > "$_S248_S/.uchg-locked"
+printf '%s\n' "$_S248_W/.envrc" > "$_A6_DIR/$_S248_C/flags"
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W"
+_S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    if grep -q nouchg "$_A6_DIR/$_S248_C/events.log"; then echo "unlocked"; fi
+    grep -qF "its flags changed after sandy set them" "$_A6_DIR/$_S248_C/out" || echo "no warning"
+    [ ! -e "$_S248_S/.uchg-locked" ] || echo "record kept"; } 2>&1)" || true
+check "§248(k) --unlock leaves a flag whose ctime moved since sandy set it (the user re-set it), says so, and drops the record (mutation: drop the ctime check; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (l) submodule gitdirs found by structure with no depth limit: one nested
+# eight levels down gets its config :ro; a branch named `config` is not a
+# gitdir; a submodule gitdir's existing commondir is :ro.
+_S248_C=s248-deep; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_s248_gd() { mkdir -p "$1/objects" "$1/refs/heads"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
+_S248_D1="$_S248_W/.git/modules/research/hyperlight"; _s248_gd "$_S248_D1"
+_S248_D2="$_S248_D1/modules/src/hyperlight_libc/third_party/picolibc"; _s248_gd "$_S248_D2"
+printf '0000000000000000000000000000000000000000\n' > "$_S248_D1/refs/heads/config"
+printf '.\n' > "$_S248_D1/commondir"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
+    _S248_CD2="/home/sandy/ws/${_S248_D2#"$_S248_W"/}"
+    grep -qxF "$_S248_D2/config:$_S248_CD2/config:ro" "$_S248_A" || echo "the deep submodule config is not :ro"
+    grep -qxF "$_S248_D1/commondir:/home/sandy/ws/.git/modules/research/hyperlight/commondir:ro" "$_S248_A" || echo "the submodule commondir is not :ro"
+    if grep -qF "/refs/heads/config:" "$_S248_A" || grep -qF "/refs/heads/hooks" "$_S248_A"; then echo "refs/heads treated as a gitdir"; fi; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(l)" "$_S248_C"; fi
+check "§248(l) a submodule gitdir eight levels deep gets its config :ro, a submodule's commondir is :ro, and a branch named config is not taken for a gitdir (mutation: the old maxdepth-6 -name config walk; drop the submodule commondir mount; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (m) linked-worktree admin dirs: commondir and config.worktree :ro, their
+# ancestors pinned, a rewrite reported, locked on macOS; a link among them
+# needs the approval.
+_s248_wta() {   # $1 = workspace: .git/worktrees/wt1 (commondir) and wt2 (commondir, config.worktree)
+    local n
+    for n in wt1 wt2; do mkdir -p "$1/.git/worktrees/$n"; printf 'ref: refs/heads/%s\n' "$n" > "$1/.git/worktrees/$n/HEAD"; printf '../..\n' > "$1/.git/worktrees/$n/commondir"; done
+    printf '[core]\n' > "$1/.git/worktrees/wt2/config.worktree"
+}
+_S248_C=s248-wta; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_wta "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/worktrees/wt1/commondir PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
+    for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
+        grep -qxF "$_S248_W/.git/worktrees/$_S248_F:/home/sandy/ws/.git/worktrees/$_S248_F:ro" "$_S248_A" || echo "not :ro: $_S248_F"
+    done
+    for _S248_F in .git/worktrees .git/worktrees/wt1 .git/worktrees/wt2; do
+        grep -qxF "$_S248_W/$_S248_F:/home/sandy/ws/$_S248_F" "$_S248_A" || echo "not pinned: $_S248_F"
+    done
+    [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .git/worktrees/wt1/commondir ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(m1)" "$_S248_C"; fi
+check "§248(m1) each linked-worktree admin dir's commondir and config.worktree is :ro, its ancestors are pinned, and a rewrite is reported (mutation: no _protect_worktree_admin_dirs call; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-wtamac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_wta "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_R="$( { for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
+        grep -qxF "$_S248_W/.git/worktrees/$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked: $_S248_F"
+    done
+    [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "left locked"; } 2>&1)" || true
+check "§248(m2) macOS: the worktree admin files are locked during the run and unlocked after (mutation: no worktree targets in the lock; rc $_A6_RC; ${_S248_R:-ok})" \
+    test "$_A6_RC" = 0 -a -z "$_S248_R"
+_S248_C=s248-wtal; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/worktrees" "$_S248_W/adm/wt3"
+printf 'ref: refs/heads/wt3\n' > "$_S248_W/adm/wt3/HEAD"; printf '../..\n' > "$_S248_W/adm/wt3/commondir"
+ln -s ../../adm/wt3 "$_S248_W/.git/worktrees/wt3"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(m3) a worktree admin dir that is a link inside the workspace (.git/worktrees/wt3 -> adm/wt3) needs the symlink approval (mutation: leave the worktree entries out of _sandy_symlink_byname_rels; rc $_A6_RC)" \
+    bash -c '[ "$1" = 1 ] && grep -qF ".git/worktrees/wt3 -> $3/adm/wt3" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
+# (n) a lock record in the earlier workspace-relative format is still unlocked;
+# a line sandy cannot read is kept and named, and --unlock exits 1.
+_S248_C=s248-oldrec; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
+printf 'locked\t.envrc\t%s\nlocked\tzz-not-a-path\t\t\n' "$(ls -di "$_S248_W/.envrc" | awk '{print $1}')" > "$_S248_S/.uchg-locked"
+printf '%s\n' "$_S248_W/.envrc" > "$_A6_DIR/$_S248_C/flags"
+_a6_launch "$_S248_C" PATH="$_S248_PATH" -- --unlock --workspace "$_S248_W"
+_S248_R="$( { [ "$_A6_RC" = 1 ] || echo "rc $_A6_RC"
+    [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "the old-format entry was not unlocked"
+    grep -qF "Not unlocking an entry sandy cannot read" "$_A6_DIR/$_S248_C/out" || echo "no warning for the unreadable line"
+    grep -q 'zz-not-a-path' "$_S248_S/.uchg-locked" 2>/dev/null || echo "the unreadable line was dropped"; } 2>&1)" || true
+check "§248(n) --unlock reads the earlier record format, and keeps and names a line it cannot read (exit 1) (mutation: drop unparseable lines silently; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (o) a worktree admin dir (the `git worktree add` shape) and a submodule
+# gitdir (the .git/modules/<path> shape) created during the session got no
+# :ro mount, so they are reported at session end; the ones that existed at
+# launch are not, and nothing is offered for removal.
+_S248_C=s248-newgd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+mkdir -p "$_S248_W/.git/worktrees/old"; printf 'ref: refs/heads/old\n' > "$_S248_W/.git/worktrees/old/HEAD"; printf '../..\n' > "$_S248_W/.git/worktrees/old/commondir"
+_s248_gd "$_S248_W/.git/modules/oldsub"
+_S248_MK='mkdir -p .git/worktrees/new .git/modules/lib/newsub/objects .git/modules/lib/newsub/refs
+printf "ref: refs/heads/new\n" > .git/worktrees/new/HEAD; printf "../..\n" > .git/worktrees/new/commondir; printf "/x/.git\n" > .git/worktrees/new/gitdir
+printf "ref: refs/heads/main\n" > .git/modules/lib/newsub/HEAD; printf "[core]\n" > .git/modules/lib/newsub/config'
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_MK" PATH="$_S248_PATH"
+_S248_O="$_A6_DIR/$_S248_C/out"
+_S248_B2="$(awk '/A git worktree or submodule gitdir was created during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$_S248_O" | LC_ALL=C sort | tr '\n' ' ')"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ "$_S248_B2" = ".git/modules/lib/newsub .git/worktrees/new " ] || echo "block: $_S248_B2"
+    if grep -A4 'A git worktree or submodule gitdir was created' "$_S248_O" | grep -q 'rm '; then echo "a removal was offered"; fi; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(o)" "$_S248_C"; fi
+check "§248(o) a worktree admin dir and a submodule gitdir created during the session are reported, the ones from launch are not, no removal offered (mutation: drop the #gitdir snapshot, or the report; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-newgd0; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/oldsub"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(o0) control: with nothing created there is no such report (rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && ! grep -q "submodule gitdir was created" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
+# (p) commondir seeding: a gitdir with no commondir gets one (`.`) for the
+# session, :ro, and it is removed at the end only while it is exactly what
+# sandy wrote (same inode, content `.`).
+_S248_SEEN='for f in .git/commondir .git/modules/s/commondir .git/worktrees/w/commondir; do printf "%s=%s\n" "$f" "$(cat "$f" 2>/dev/null)"; done > "$A6_LOG/seen"'
+_S248_C=s248-seed; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/s"
+mkdir -p "$_S248_W/.git/worktrees/w"; printf 'ref: refs/heads/w\n' > "$_S248_W/.git/worktrees/w/HEAD"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_SEEN" PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
+    [ "$(tr '\n' ' ' < "$_A6_DIR/$_S248_C/seen" 2>/dev/null)" = ".git/commondir=. .git/modules/s/commondir=. .git/worktrees/w/commondir=. " ] || echo "seen: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/seen" 2>/dev/null)"
+    for _S248_F in .git/commondir .git/modules/s/commondir .git/worktrees/w/commondir; do
+        grep -qxF "$_S248_W/$_S248_F:/home/sandy/ws/$_S248_F:ro" "$_S248_A" || echo "not :ro: $_S248_F"
+        [ ! -e "$_S248_W/$_S248_F" ] || echo "left behind: $_S248_F"
+    done
+    [ ! -e "$(_a6_sandbox "$_S248_C")/.commondir-seeded" ] || echo "record left behind"
+    if grep -q 'Protected files CHANGED\|Protected paths appeared' "$_A6_DIR/$_S248_C/out"; then echo "a report for an untouched seed"; fi; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(p1)" "$_S248_C"; fi
+check "§248(p1) .git, a submodule gitdir and a worktree admin dir without commondir get one (.) for the session, :ro, removed at the end, with no report (mutation: seeding off; no removal; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-seedw; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/commondir PATH="$_S248_PATH"
+_S248_R="$( { [ "$(cat "$_S248_W/.git/commondir" 2>/dev/null | tr '\n' ' ')" = ". tampered " ] || echo "commondir now: $(cat "$_S248_W/.git/commondir" 2>/dev/null | tr '\n' ' ')"
+    [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .git/commondir ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"; } 2>&1)" || true
+check "§248(p2) a seeded commondir the session rewrote is kept and reported (mutation: drop the content check before removal; rc $_A6_RC; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-seedi; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='rm -f .git/commondir; printf ".\n" > .git/commondir' PATH="$_S248_PATH"
+check "§248(p3) a seeded commondir replaced by another file (even one holding .) is not removed (mutation: drop the inode check before removal; rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && [ "$(cat "$2" 2>/dev/null)" = . ]' _ "$_A6_RC" "$_S248_W/.git/commondir"
+_S248_C=s248-seedg; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"; rm -f "$_S248_G/commondir"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat '"$_S248_G"'/commondir > "$A6_LOG/seen" 2>/dev/null' PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { [ "$(cat "$_A6_DIR/$_S248_C/seen" 2>/dev/null)" = . ] || echo "not seeded in the gitdir"
+    grep -qxF "$_S248_G/commondir:/home/sandy/realgit/commondir:ro" "$_S248_A" || echo "not :ro"
+    [ ! -e "$_S248_G/commondir" ] || echo "left behind"; } 2>&1)" || true
+check "§248(p4) the gitdir a .git file names, outside the workspace, is seeded too, :ro, and cleaned up (mutation: no seeding after the gitdir is known; rc $_A6_RC; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (q) a daemon container running without its supervisor (Docker restarted
+# it): --attach warns, re-applies the macOS locks and takes the content
+# snapshot when none exists; --stop warns, reports changes against it and
+# tears down (locks cleared). A live supervisor gets none of it.
+_S248_DB="$_A6_DIR/s248dbin"; mkdir -p "$_S248_DB"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in\n'
+  printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
+  printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
+  printf '    *sandy.session*) echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
+  printf '    *State.Running*) echo true; exit 0 ;;\n'
+  printf '    exec*|stop*|"rm -f c0ffee"*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S248_DB/docker"
+chmod +x "$_S248_DB/docker"
+_S248_C=s248-dae; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
+printf '%s\t%s\n' "$_S248_W/.envrc" /home/sandy/ws/.envrc > "$_A6_DIR/$_S248_C/mounts"
+_S248_DENV=(A6_OS=Darwin S248_DPID=2147480000 S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH")
+_a6_launch "$_S248_C" "${_S248_DENV[@]}" -- --attach --workspace "$_S248_W"
+_S248_R="$( { [ "$_A6_RC" = 3 ] || echo "rc $_A6_RC"
+    grep -qF "has no live supervisor" "$_A6_DIR/$_S248_C/out" || echo "no warning"
+    grep -qxF "$_S248_W/.envrc" "$_A6_DIR/$_S248_C/flags" 2>/dev/null || echo ".envrc not re-locked"
+    grep -q '^#hash' "$_S248_S/.protected-existed-at-launch" 2>/dev/null || echo "no snapshot taken"; } 2>&1)" || true
+check "§248(q1) --attach to a daemon container with no live supervisor warns, re-applies the macOS locks, and takes the content snapshot when none exists (mutation: no call in --attach; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+chflags_stub_unlock() { grep -vxF "$1" "$_A6_DIR/$_S248_C/flags" > "$_A6_DIR/$_S248_C/flags.t" || true; mv "$_A6_DIR/$_S248_C/flags.t" "$_A6_DIR/$_S248_C/flags"; }
+chflags_stub_unlock "$_S248_W/.envrc"; printf 'tampered\n' >> "$_S248_W/.envrc"
+_a6_launch "$_S248_C" "${_S248_DENV[@]}" -- --stop --workspace "$_S248_W"
+_S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    grep -qF "has no live supervisor" "$_A6_DIR/$_S248_C/out" || echo "no warning"
+    [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .envrc ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"
+    [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"
+    [ ! -e "$_S248_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
+check "§248(q2) --stop of it warns, reports the file changed since the snapshot, and clears the locks (mutation: no call in --stop; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-daelive; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+# A stand-in supervisor: a live process whose command line is a --start for
+# this workspace (what _sandy_supervisor_alive looks for).
+bash -c 'while :; do sleep 1; done' sandy-supervisor --start --workspace "$_S248_W" </dev/null >/dev/null 2>&1 &
+_S248_SUP=$!
+_a6_launch "$_S248_C" A6_OS=Darwin S248_DPID="$_S248_SUP" S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --attach --workspace "$_S248_W"
+kill "$_S248_SUP" 2>/dev/null || true; wait "$_S248_SUP" 2>/dev/null || true
+check "§248(q3) control: with a live supervisor --attach warns of nothing and locks nothing (rc $_A6_RC)" \
+    bash -c '! grep -qF "has no live supervisor" "$1" && [ ! -s "$2" ]' _ "$_A6_DIR/$_S248_C/out" "$_A6_DIR/$_S248_C/flags"
+# (r) .pre-commit-config.yaml and .mise.toml are on the macOS lock list.
+_S248_C=s248-lk2; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+printf 'repos: []\n' > "$_S248_W/.pre-commit-config.yaml"; printf '[tools]\n' > "$_S248_W/.mise.toml"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+check "§248(r) macOS: .pre-commit-config.yaml and .mise.toml are locked during the run (rc $_A6_RC)" \
+    bash -c 'grep -qxF "$1/.pre-commit-config.yaml" "$2" && grep -qxF "$1/.mise.toml" "$2"' _ "$_S248_W" "$_A6_DIR/$_S248_C/flags-during-run"
+# (s) the locks and the seed outlive a container that outlives its session;
+# an empty directory left at commondir is removed at the next launch.
+_S248_C=s248-surv; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SURVIVE=1 PATH="$_S248_PATH"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ "$(cat "$_S248_W/.git/commondir" 2>/dev/null)" = . ] || echo "the seed was removed"
+    grep -qxF "$_S248_W/.envrc" "$_A6_DIR/$_S248_C/flags" 2>/dev/null || echo "unlocked under a surviving container"
+    grep -qF "may still exist, so the macOS file locks and the seeded commondir files are kept" "$_A6_DIR/$_S248_C/out" || echo "no warning"; } 2>&1)" || true
+check "§248(s1) when the container may still exist after its removal, the seed and the macOS locks are kept, and said so (mutation: unseed/unlock before or regardless of the removal; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ ! -e "$_S248_W/.git/commondir" ] || echo "the kept seed was not cleaned up by the next session"
+    [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"; } 2>&1)" || true
+check "§248(s2) ...and the next session, its container gone, clears both (${_S248_R:-ok})" \
+    test -z "$_S248_R"
+_S248_C=s248-cdd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat .git/commondir > "$A6_LOG/seen" 2>&1' PATH="$_S248_PATH"
+check "§248(s3) an empty directory at .git/commondir is removed (and said) at launch, and the seed takes its place (mutation: no _sandy_commondir_fix_dirs at launch; rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && grep -qF "Removed an empty directory at .git/commondir" "$2" && [ "$(cat "$3")" = . ] && [ ! -e "$4/.git/commondir" ]' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_A6_DIR/$_S248_C/seen" "$_S248_W"
+_S248_C=s248-cdda; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+_a6_launch "$_S248_C" S248_DPID=2147480000 S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --attach --workspace "$_S248_W"
+check "§248(s4) --attach to a supervisor-less container removes an empty directory at .git/commondir and says so (rc $_A6_RC)" \
+    bash -c '[ "$1" = 3 ] && grep -qF "Removed an empty directory at .git/commondir" "$2" && [ ! -e "$3/.git/commondir" ]' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
+# (q4) a live pid that is not a sandy supervisor for this workspace (reused
+# after a reboot) counts as no supervisor; (q5) re-locking outside the
+# workspace follows the launch record, not a re-pointed .git file.
+_S248_C=s248-reuse; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+_a6_launch "$_S248_C" A6_OS=Darwin S248_DPID=$$ S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --attach --workspace "$_S248_W"
+check "§248(q4) a live pid whose command is not a sandy --start for this workspace counts as no supervisor (mutation: kill -0 alone; rc $_A6_RC)" \
+    bash -c 'grep -qF "has no live supervisor" "$1"' _ "$_A6_DIR/$_S248_C/out"
+_S248_C=s248-repoint; _s248_wt "$_S248_C"; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_G="$_A6_DIR/$_S248_C/realgit"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+_s248_gd "$_A6_DIR/$_S248_C/other"; printf 'gitdir: ../other\n' > "$_A6_DIR/$_S248_C/ws/.git"
+_s248_rec locked "$_S248_G/config" > "$_S248_S/.uchg-locked"
+_a6_launch "$_S248_C" A6_OS=Darwin S248_DPID=2147480000 S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --attach --workspace "$_S248_W"
+_S248_R="$( { grep -qxF "$_S248_G/config" "$_A6_DIR/$_S248_C/flags" 2>/dev/null || echo "the recorded gitdir config was not re-locked"
+    if grep -qF "$_A6_DIR/$_S248_C/other" "$_A6_DIR/$_S248_C/flags" 2>/dev/null; then echo "locked the re-pointed gitdir"; fi; } 2>&1)" || true
+check "§248(q5) re-locking at --attach re-applies the recorded gitdir's lock and locks nothing in a gitdir the .git file now names (mutation: derive GITDIR_HOST from the .git file again; rc $_A6_RC; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (u) --unlock refuses while a daemon container of the workspace runs, with or
+# without its supervisor.
+_S248_C=s248-ulkd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
+_s248_rec locked "$_S248_W/.envrc" > "$_S248_S/.uchg-locked"; printf '%s\n' "$_S248_W/.envrc" > "$_A6_DIR/$_S248_C/flags"
+_a6_launch "$_S248_C" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --unlock --workspace "$_S248_W"
+check "§248(u) --unlock refuses while a daemon container of the workspace is running (mutation: check only the launch lock; rc $_A6_RC)" \
+    bash -c '[ "$1" = 1 ] && grep -qF "daemon container of this workspace is running" "$2" && grep -qxF "$3/.envrc" "$4"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W" "$_A6_DIR/$_S248_C/flags"
+# (v) the gitdir a .git file names outside the workspace (a submodule
+# checkout): the directories between it and the :ro mounts under it
+# (modules/<n>, worktrees/<w>) are pinned too, after the gitdir mount and
+# before the mounts beneath them.
+_S248_C=s248-gdpin; _s248_wt "$_S248_C"; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_G="$_A6_DIR/$_S248_C/realgit"
+mkdir -p "$_S248_G/worktrees/w"; printf 'ref: refs/heads/w\n' > "$_S248_G/worktrees/w/HEAD"; printf '../..\n' > "$_S248_G/worktrees/w/commondir"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_A="$(_a6_agent_args "$_S248_C")"
+_S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
+    awk -v g="$_S248_G" -v c=/home/sandy/realgit '
+        p == "-v" { n++; v[n] = $0 } { p = $0 }
+        END {
+            gm = 0; for (i = 1; i <= n; i++) if (v[i] == g ":" c) gm = i
+            if (!gm) { print "no gitdir mount"; exit }
+            split("modules modules/sub worktrees worktrees/w", R, " ")
+            for (k = 1; k <= 4; k++) {
+                r = R[k]; pin = g "/" r ":" c "/" r; pi = 0
+                for (i = 1; i <= n; i++) if (v[i] == pin) pi = i
+                if (!pi) { print "not pinned: " r; continue }
+                if (pi < gm) print "pin " r " before the gitdir mount"
+                for (i = 1; i <= n; i++) { d = v[i]; sub(/^[^:]*:/, "", d); sub(/:ro$/, "", d)
+                    if (index(d, c "/" r "/") == 1 && i < pi) print "deeper mount before pin " r }
+            }
+        }' "$_S248_A"; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(v)" "$_S248_C"; fi
+check "§248(v) a gitdir outside the workspace gets its modules/, modules/<n>, worktrees/ and worktrees/<w> pinned, after its own mount and before the mounts beneath them (mutation: pin only under the workspace; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (w) the daemon unreachable during teardown: whether the container is gone is
+# unknown, so the seed and the locks are kept.
+_S248_C=s248-down; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SURVIVE=down PATH="$_S248_PATH"
+check "§248(w) with the Docker daemon unreachable at teardown, the seed and the macOS locks are kept (mutation: an inspect error counts as gone; rc $_A6_RC)" \
+    bash -c '[ "$(cat "$1/.git/commondir" 2>/dev/null)" = . ] && grep -qxF "$1/.envrc" "$2" && grep -qF "may still exist" "$3"' _ "$_S248_W" "$_A6_DIR/$_S248_C/flags" "$_A6_DIR/$_S248_C/out"
+# (x) a commondir that is a directory with content is named and left alone.
+_S248_C=s248-cdfull; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"; printf 'x\n' > "$_S248_W/.git/commondir/keep"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+check "§248(x) a .git/commondir directory with content is named with why git will fail, and left as it is (rc $_A6_RC)" \
+    bash -c 'grep -qF ".git/commondir is a directory with content where git expects a commondir file" "$1" && [ -f "$2/.git/commondir/keep" ]' _ "$_A6_DIR/$_S248_C/out" "$_S248_W"
+# (q6) a supervisor for another workspace, whose path only begins with the path
+# of this one (ws2 vs ws), does not count as the supervisor of this one.
+_S248_C=s248-prefix; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+bash -c 'while :; do sleep 1; done' sandy-supervisor --start --workspace "${_S248_W}2" </dev/null >/dev/null 2>&1 &
+_S248_SUP=$!
+_a6_launch "$_S248_C" A6_OS=Darwin S248_DPID="$_S248_SUP" S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --attach --workspace "$_S248_W"
+kill "$_S248_SUP" 2>/dev/null || true; wait "$_S248_SUP" 2>/dev/null || true
+check "§248(q6) a live --start for <ws>2 does not count as the supervisor of <ws> (mutation: match the workspace as a bare substring; rc $_A6_RC)" \
+    bash -c 'grep -qF "has no live supervisor" "$1"' _ "$_A6_DIR/$_S248_C/out"
+# (y) links where git looks for a worktree admin dir or submodule gitdir,
+# planted or re-pointed during the session, are reported with their target:
+# D1 a link at .git/modules/<name>, D2 .git/modules itself (in a submodule
+# gitdir that had none), D3 a link at .git/worktrees/<x>, D4 an existing link
+# re-pointed; an existing link left alone is not reported.
+_S248_C=s248-glink; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/sub"
+mkdir -p "$_S248_W/.git/worktrees" "$_S248_W/adm/a" "$_S248_W/adm/b" "$_S248_W/adm/k"
+for _S248_F in a b k; do printf 'ref: refs/heads/x\n' > "$_S248_W/adm/$_S248_F/HEAD"; done
+ln -s ../../adm/a "$_S248_W/.git/worktrees/old"; ln -s ../../adm/k "$_S248_W/.git/worktrees/keep"
+mkdir -p "$(_a6_sandbox "$_S248_C")"
+printf '%s\n' ".git/worktrees/keep -> $_S248_W/adm/k" ".git/worktrees/old -> $_S248_W/adm/a" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_S248_MK='ln -s ../../adm/b .git/modules/evil; ln -s ../../../../adm .git/modules/sub/modules; ln -s ../../adm/b .git/worktrees/new; rm .git/worktrees/old; ln -s ../../adm/b .git/worktrees/old'
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_MK" PATH="$_S248_PATH"
+_S248_O="$_A6_DIR/$_S248_C/out"
+_S248_B2="$(awk '/A git worktree or submodule gitdir was created during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$_S248_O" | LC_ALL=C sort)"
+_S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    printf '%s\n' "$_S248_B2" | grep -qxF ".git/modules/evil -> ../../adm/b  (a symbolic link created during this session)" || echo "D1 missing"
+    printf '%s\n' "$_S248_B2" | grep -qxF ".git/modules/sub/modules -> ../../../../adm  (a symbolic link created during this session)" || echo "D2 missing"
+    printf '%s\n' "$_S248_B2" | grep -qxF ".git/worktrees/new -> ../../adm/b  (a symbolic link created during this session)" || echo "D3 missing"
+    printf '%s\n' "$_S248_B2" | grep -qxF ".git/worktrees/old -> ../../adm/b  (a link that existed at launch, RETARGETED during this session)" || echo "D4 missing"
+    if printf '%s\n' "$_S248_B2" | grep -q 'worktrees/keep'; then echo "the untouched link was reported"; fi
+    if grep -A8 'A git worktree or submodule gitdir was created' "$_S248_O" | grep -q 'rm '; then echo "a removal was offered"; fi; } 2>&1)" || true
+if [ -n "$_S248_R" ]; then _a6_diag "§248(y)" "$_S248_C"; printf '%s\n' "$_S248_B2" | sed 's/^/      block: /'; fi
+check "§248(y) links planted or re-pointed during the session at .git/modules/<n>, a submodule gitdir's modules/, and .git/worktrees/<x> are reported with their targets; an untouched link is not; no removal offered (mutation: drop the #gitlink snapshot, or the link report; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+unset _S248_SEEN _S248_DB _S248_DENV _S248_SUP
+unset -f chflags_stub_unlock
+unset _S248_MK _S248_B2
+unset _S248_D1 _S248_D2
+unset -f _s248_gd _s248_wta
+unset _S248_G _S248_A
+unset -f _s248_wt
+unset _S248_L _S248_B _S248_PATH _S248_C_S248_W _S248_H0 _S248_O _S248_CP _S248_R _S248_E _S248_F _S248_S _S248_RD _S248_ED _S248_RL _S248_EL
+unset -f _s248_repo _s248_sha _s248_rec _s248_block _s248_gate
 
 # Every background launch was joined by the check that reads it: a .pid left
 # under .bg is a case started whose check never ran.
@@ -29906,6 +30683,7 @@ def fn(name):
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
          '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint', '_sandy_agent_has',
          '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
+         '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
          '_sandy_slug_for', '_sandy_note_session_created_sandy_dir']

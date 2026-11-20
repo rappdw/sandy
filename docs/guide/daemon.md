@@ -48,6 +48,13 @@ Docker restart, with no `sandy --start` watching it) and whose entry fails
 idles for 60s, then exits so Docker's restart policy tries again; the next
 `sandy --start` for that workspace sees no supervisor behind it, removes it and
 starts a fresh session (with a supervisor still alive, it exits `6` instead).
+A container that comes back this way and keeps running has no supervisor, so
+sandy's end-of-session checks never run for it, and on macOS its file locks may
+have lapsed. Since 2.9.0 the next `sandy --attach` or `sandy --start` of that
+workspace says so, re-applies the macOS locks and records the protected files'
+contents (if no record exists); `sandy --stop` says so too and reports any
+protected file that changed. For a fully protected session, `--stop` it and
+`--start` again.
 See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 

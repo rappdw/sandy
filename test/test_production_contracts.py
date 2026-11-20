@@ -543,7 +543,8 @@ class ProductionContracts(unittest.TestCase):
     SCAN = ("_sandy_symlink_recorded", "_sandy_symlink_classify", "_sandy_fnmatch_escape", "_sandy_dir_has_entry", "_sandy_symlink_skip_parse", "_sandy_symlink_copied", "_sandy_symlink_is_copied_rel",
             "_sandy_symlink_inside", "_sandy_symlink_resolve", "_sandy_gitdir_rel", "_sandy_gitdir_host", "_sandy_submodule_gitdirs", "_sandy_symlink_byname_rels",
             "_sandy_symlink_canon", "_sandy_symlink_target_judged", "_sandy_symlink_walk",
-            "_sandy_symlink_protected_sweep", "_sandy_symlink_scan", "_sandy_ws_physical")
+            "_sandy_symlink_protected_sweep", "_sandy_symlink_is_internal_entry", "_sandy_symlink_any_internal",
+            "_sandy_symlink_internal_sweep", "_sandy_symlink_scan", "_sandy_ws_physical")
     RESOLVER = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
                 "_sandy_is_protected_rel") + SCAN + ("_sandy_resolve_symlinks",)
 

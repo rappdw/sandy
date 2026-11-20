@@ -251,7 +251,7 @@ Abridged from the real output of `sandy --print-schema` (2.9.0-dev): every field
   ],
   "protected_paths": {
     "files": [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", "..."],
-    "git_files": [".git/config", ".gitmodules", ".git/packed-refs"],
+    "git_files": [".git/config", ".gitmodules", ".git/packed-refs", ".git/commondir", ".git/config.worktree"],
     "dirs_always_mount": [".git/hooks", ".git/info", ".vscode", ".idea", ".circleci", ".devcontainer", ".claude/hooks", ".sandy", ".mirror", ".github/workflows"],
     "dirs_workflow_edit_conditional": [".github/workflows"]
   },

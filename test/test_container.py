@@ -356,6 +356,7 @@ else:
             # Use valid inert config. Empty version pins avoid downloads; Git's
             # generated config must remain intact for real startup operations.
             content = ('# pack-refs with: peeled fully-peeled sorted\n' if relative == '.git/packed-refs' else
+                       '.\n' if relative == '.git/commondir' else  # the gitdir itself: a no-op redirect
                        '{"crossSessionInbound":"refuse"}\n' if relative == '.claude/settings.local.json' else
                        '{}\n' if relative.endswith('.json') else
                        '' if relative in ('.python-version', '.nvmrc', '.node-version', '.ruby-version') else
@@ -374,6 +375,11 @@ else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('# host fixture\n')
             protected[relative] = '# host fixture\n'
+        # A submodule gitdir is recognized by what git requires of one.
+        child = project / '.git/modules/child'
+        (child / 'objects').mkdir(exist_ok=True)
+        (child / 'refs').mkdir(exist_ok=True)
+        (child / 'HEAD').write_text('ref: refs/heads/main\n')
         for directory in ('commands', 'agents', 'plugins'):
             path = project / '.claude' / directory
             path.mkdir(parents=True, exist_ok=True)

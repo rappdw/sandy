@@ -957,11 +957,27 @@ _sandy_protected_git_files() {
     # (detection-not-prevention, mirroring the protected-dirs hybrid model).
     # packed-refs STAYS :ro (bulk ref-spoofing / gc), so branch deletes of a
     # packed ref and `git gc` still fail — an accepted, narrow limitation.
+    # .git/commondir and .git/config.worktree (2.9.0): git reads both from any
+    # gitdir. commondir names the directory git takes config, hooks, objects and
+    # refs from; config.worktree is read as config when the repository enables
+    # extensions.worktreeConfig. Either one written by a session redirects the
+    # host's git, so both are :ro when present and reported when created.
     cat <<'EOF'
 .git/config
 .gitmodules
 .git/packed-refs
+.git/commondir
+.git/config.worktree
 EOF
+}
+# The git files the launch snapshot and the session-end report watch for
+# creation, like the protected files (2.9.0): all of the above except
+# .git/packed-refs, which git itself creates in-session (gc, pack-refs).
+_sandy_watched_git_files() {
+    local _g
+    while IFS= read -r _g; do
+        [ "$_g" = .git/packed-refs ] || printf '%s\n' "$_g"
+    done < <(_sandy_protected_git_files)
 }
 
 # #80: pretty-print a snapshotted HEAD value for the session-end notice.
@@ -2063,6 +2079,29 @@ _sandy_overlay_detect_agent() {
         .gemini/*) echo gemini ;;
     esac
 }
+# (Defined here, ahead of every dispatcher that walks a workspace path: --unlock
+# and --stop run long before the launch path reaches its first use.)
+# R2 (1.13.2): a path is safe to write only if NO component below the anchor is
+# a symlink. Stated as a property of the path rather than a containment test,
+# because it needs no canonicalization: a symlink-free chain from the anchor
+# down IS proof the file sits inside it, and `realpath` is GNU-only anyway.
+# Bash builtins only, so it is bash-3.2/BSD-clean.
+_sandy_path_symlink_component() {   # $1 = anchor dir, $2 = path under it -> prints the offending component
+    local _anchor="$1" _p="$2" _rest _seg _cur
+    _rest="${_p#"$_anchor"/}"
+    [ "$_rest" = "$_p" ] && return 1        # not under the anchor; nothing to walk
+    _cur="$_anchor"
+    while [ -n "$_rest" ]; do
+        _seg="${_rest%%/*}"
+        _cur="$_cur/$_seg"
+        if [ -L "$_cur" ]; then printf '%s' "${_cur#"$_anchor"/}"; return 0; fi
+        case "$_rest" in
+            */*) _rest="${_rest#*/}" ;;
+            *)   _rest="" ;;
+        esac
+    done
+    return 1
+}
 # One line that changes when anything in tree $1 is added, removed, renamed,
 # re-linked, re-moded or rewritten: the SHA-256 of a sorted listing of every
 # entry's `ls -ldn` line minus its date (mode, links, owner, size, name; the
@@ -2138,6 +2177,759 @@ _sandy_tree_fingerprint() {
             || exit 1
         printf '%s\n' "$_l" | LC_ALL=C sort | $_h | awk '{print $1}')" || _out=""
     if [ -n "$_out" ]; then echo "$_out"; else echo unhashable; fi
+}
+
+# --- Protected FILE contents (2.9.0) -----------------------------------------
+# A :ro bind holds the path it is mounted at, not the file behind it. On a
+# case-insensitive host file system (the macOS default) another spelling of a
+# protected file's name, looked up through the read-write workspace (or gitdir)
+# mount, can reach the same host file. So the launch records the SHA-256 of
+# every regular file sandy mounts :ro inside the workspace or the gitdir
+# (#hash<TAB><host path, hex><TAB><sha256> in .protected-existed-at-launch),
+# keeps a copy of each in $SANDBOX_DIR/.protected-copies/<sha256> (never
+# mounted into the container), and the session-end sweep reports any whose
+# contents changed, with the copy to compare and restore from. Detection on
+# every host; on macOS the files most worth it are also locked (below).
+#
+# SHA-256 of file $1 as lowercase hex, or "unhashable".
+_sandy_file_sha256() {
+    local _o=""
+    if command -v shasum >/dev/null 2>&1; then
+        _o="$(shasum -a 256 < "$1" 2>/dev/null | awk '{print $1}')" || _o=""
+    elif command -v sha256sum >/dev/null 2>&1; then
+        _o="$(sha256sum < "$1" 2>/dev/null | awk '{print $1}')" || _o=""
+    fi
+    case "$_o" in
+        [0-9a-f]*) printf '%s' "$_o" ;;
+        *) printf 'unhashable' ;;
+    esac
+}
+_sandy_hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n' || true; }
+# Hex back to the string. Built for _sandy_hex output only (pairs of [0-9a-f]).
+_sandy_unhex() {
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+    printf '%b' "$(printf '%s' "$1" | sed 's/../\\x&/g')"
+}
+# Record the :ro FILE mounts of the assembled argv into snapshot $1, and copy
+# each into directory $2 (created 0700 when absent; a copy older than 30 days
+# that this launch does not use is pruned). Mounts counted: a `:ro` -v whose
+# destination lies under the workspace or the gitdir a .git file names, and
+# whose source is a regular file.
+_sandy_protected_hash_snapshot() {
+    local _snap="$1" _cdir="$2" _i=0 _n=${#RUN_FLAGS[@]} _spec _src _dst _seen=$'\n' _h _t _um
+    if [ ! -d "$_cdir" ] || [ -L "$_cdir" ]; then
+        rm -f "$_cdir" 2>/dev/null || true
+        mkdir -m 700 "$_cdir" 2>/dev/null || true
+    fi
+    while [ "$_i" -lt "$_n" ]; do
+        if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
+            _spec="${RUN_FLAGS[$((_i + 1))]}"
+            _i=$((_i + 2))
+            case "$_spec" in *:ro) ;; *) continue ;; esac
+            _src="${_spec%%:*}"; _dst="${_spec#*:}"; _dst="${_dst%:ro}"
+            case "$_dst" in
+                "$SANDY_WORKSPACE"/*) ;;
+                *) if [ -z "${GITDIR_CONTAINER:-}" ]; then continue; fi
+                   case "$_dst" in "$GITDIR_CONTAINER"/*) ;; *) continue ;; esac ;;
+            esac
+            [ -f "$_src" ] || continue
+            case "$_seen" in *$'\n'"$_src"$'\n'*) continue ;; esac
+            _seen="$_seen$_src"$'\n'
+            _h="$(_sandy_file_sha256 "$_src")"
+            printf '#hash\t%s\t%s\n' "$(_sandy_hex "$_src")" "$_h" >> "$_snap"
+            [ "$_h" != unhashable ] && [ -d "$_cdir" ] && [ ! -L "$_cdir" ] || continue
+            if [ -f "$_cdir/$_h" ]; then
+                touch "$_cdir/$_h" 2>/dev/null || true
+                continue
+            fi
+            _um="$(umask)"; umask 077
+            _t="$(mktemp "$_cdir/.copy.XXXXXX" 2>/dev/null)" || _t=""
+            umask "$_um"
+            [ -n "$_t" ] || continue
+            if cp "$_src" "$_t" 2>/dev/null && [ "$(_sandy_file_sha256 "$_t")" = "$_h" ]; then
+                mv -f "$_t" "$_cdir/$_h" 2>/dev/null || rm -f "$_t"
+            else
+                rm -f "$_t"
+            fi
+            continue
+        fi
+        _i=$((_i + 1))
+    done
+    if [ -d "$_cdir" ] && [ ! -L "$_cdir" ]; then
+        find "$_cdir" -type f -mtime +30 -exec rm -f {} + 2>/dev/null || true
+    fi
+    return 0
+}
+# Session end: the #hash records of snapshot $1 whose file now differs (or is
+# gone), one "<host path, hex><TAB><sha256 at launch>" line each.
+_sandy_protected_hash_changed() {
+    local _k _hx _h0 _p
+    while IFS=$'\t' read -r _k _hx _h0; do
+        [ "$_k" = "#hash" ] || continue
+        _p="$(_sandy_unhex "$_hx")" || continue
+        if [ "$_h0" = unhashable ] || [ ! -f "$_p" ] || [ "$(_sandy_file_sha256 "$_p")" != "$_h0" ]; then
+            printf '%s\t%s\n' "$_hx" "$_h0"
+        fi
+    done < "$1"
+    return 0
+}
+# Print the session-end block for _sandy_protected_hash_changed output $1
+# (snapshot copies in directory $2). Reports, never writes: a restore is a
+# printed suggestion, and none is printed for a path that is now, or sits
+# under, a link (the copy would be written wherever the link points).
+_sandy_protected_hash_report() {
+    local _hx _h0 _p _shown _c _cmds=""
+    [ -n "$1" ] || return 0
+    printf "\n${YELLOW:-}[sandy]${NC:-} Protected files CHANGED during this session (sandy mounted them read-only; they existed at launch):\n" >&2
+    while IFS=$'\t' read -r _hx _h0; do
+        [ -n "$_hx" ] || continue
+        _p="$(_sandy_unhex "$_hx")" || continue
+        _shown="$_p"
+        case "$_p" in "${WORK_DIR:-/nonexistent}"/*) _shown="${_p#"$WORK_DIR"/}" ;; esac
+        _c="$2/$_h0"
+        if [ ! -e "$_p" ] && [ ! -L "$_p" ]; then
+            printf "${YELLOW:-}[sandy]${NC:-}   %q (now missing)\n" "$_shown" >&2
+        else
+            printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$_shown" >&2
+        fi
+        if [ "$_h0" != unhashable ] && [ -f "$_c" ] && [ ! -L "$_p" ] \
+           && { [ -z "${WORK_DIR:-}" ] || ! _sandy_path_symlink_component "$WORK_DIR" "$_p" >/dev/null; }; then
+            _cmds="$_cmds$(printf '  diff -u %q %q\n  cp %q %q' "$_c" "$_p" "$_c" "$_p")"$'\n'
+        fi
+    done <<< "$1"
+    printf "${YELLOW:-}[sandy]${NC:-} The session (or something on the host) rewrote these while they were mounted read-only:\n" >&2
+    printf "${YELLOW:-}[sandy]${NC:-} on a case-insensitive file system another spelling of the name reaches the same file.\n" >&2
+    printf "${YELLOW:-}[sandy]${NC:-} Review each before your next git, shell, IDE or agent operation in this workspace.\n" >&2
+    if [ -n "$_cmds" ]; then
+        printf "${YELLOW:-}[sandy]${NC:-} Sandy kept a copy of each from launch. To compare, and to restore one if the change is not yours:\n" >&2
+        while IFS= read -r _c; do
+            [ -n "$_c" ] || continue
+            printf "${YELLOW:-}[sandy]${NC:-} %s\n" "$_c" >&2
+        done <<< "$_cmds"
+    fi
+    printf "\n" >&2
+}
+
+# Session end: every git admin dir (_sandy_git_admin_dirs) not recorded in
+# snapshot $1 (#gitdir lines) was created during the session. Reported, never
+# removed: it may be the user's own `git worktree add` or submodule.
+# The links where git looks for worktree admin dirs and submodule gitdirs,
+# one "<path><TAB><target, hex>" line each: worktrees/ itself or any entry in
+# it, modules/ itself, and any link at a component of a submodule path below
+# it, in the top-level .git, in the gitdir a .git file names, and in every
+# submodule gitdir (the walkers above never follow a link, so a link planted
+# there in-session has no mount and is reported instead, 2.9.0).
+_sandy_git_admin_links() {   # $1 = workspace
+    local _g
+    for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
+        [ -d "$_g" ] && [ ! -L "$_g" ] || continue
+        _sandy_git_links_under "$_g"
+    done
+    return 0
+}
+_sandy_git_link_line() { printf '%s\t%s\n' "$1" "$(_sandy_link_hex "$1")"; }
+_sandy_git_links_under() {   # $1 = gitdir
+    local _c
+    if [ -L "$1/worktrees" ]; then
+        _sandy_git_link_line "$1/worktrees"
+    elif [ -d "$1/worktrees" ]; then
+        while IFS= read -r -d '' _c; do
+            [ -L "$_c" ] && _sandy_git_link_line "$_c"
+        done < <(find "$1/worktrees" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    fi
+    if [ -L "$1/modules" ]; then
+        _sandy_git_link_line "$1/modules"
+    elif [ -d "$1/modules" ]; then
+        _sandy_git_links_mod "$1/modules"
+    fi
+    return 0
+}
+_sandy_git_links_mod() {   # $1 = a directory under some modules/
+    local _c
+    while IFS= read -r -d '' _c; do
+        if [ -L "$_c" ]; then
+            _sandy_git_link_line "$_c"
+        elif [ -e "$_c/HEAD" ] || [ -d "$_c/objects" ] || [ -d "$_c/refs" ]; then
+            _sandy_git_links_under "$_c"
+        else
+            _sandy_git_links_mod "$_c"
+        fi
+    done < <(find "$1" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0 2>/dev/null)
+    return 0
+}
+# Session end: every git admin dir (_sandy_git_admin_dirs) not recorded in
+# snapshot $1 (#gitdir lines), and every link where git looks for one
+# (_sandy_git_admin_links) that is new or points elsewhere than at launch
+# (#gitlink lines), was created during the session. Reported, never removed:
+# it may be the user's own `git worktree add` or submodule.
+_sandy_git_admin_report() {
+    local _d _hx _n=0 _t _t0 _what
+    _sandy_git_admin_head() {
+        if [ "$_n" = 0 ]; then
+            printf "\n${YELLOW:-}[sandy]${NC:-} A git worktree or submodule gitdir was created during this session:\n" >&2
+        fi
+        _n=$((_n + 1))
+        return 0
+    }
+    while IFS= read -r _d; do
+        [ -n "$_d" ] || continue
+        _hx="$(_sandy_hex "$_d")"
+        grep -qxF "#gitdir"$'\t'"$_hx" "$1" 2>/dev/null && continue
+        _sandy_git_admin_head
+        printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$(_sandy_uchg_show "$_d")" >&2
+    done < <(_sandy_git_admin_dirs "$WORK_DIR")
+    while IFS=$'\t' read -r _d _t; do
+        [ -n "$_d" ] || continue
+        _hx="$(_sandy_hex "$_d")"
+        grep -qxF "#gitlink"$'\t'"$_hx"$'\t'"$_t" "$1" 2>/dev/null && continue
+        _t0="$(awk -F '\t' -v p="$_hx" '$1 == "#gitlink" && $2 == p { print "x" $3; exit }' "$1" 2>/dev/null || true)"
+        if [ -n "$_t0" ]; then _what="a link that existed at launch, RETARGETED during this session"; else _what="a symbolic link created during this session"; fi
+        _sandy_git_admin_head
+        printf "${YELLOW:-}[sandy]${NC:-}   %q -> %q  (%s)\n" "$(_sandy_uchg_show "$_d")" "$(readlink "$_d" 2>/dev/null || echo '?')" "$_what" >&2
+    done < <(_sandy_git_admin_links "$WORK_DIR")
+    if [ "$_n" -gt 0 ]; then
+        printf "${YELLOW:-}[sandy]${NC:-} Sandy did not protect it (it did not exist at launch). Its commondir, config and\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} hooks steer git run in that worktree or submodule: review them before running git there.\n\n" >&2
+    fi
+    return 0
+}
+
+# --- Git directory helpers -------------------------------------------------
+# (Defined here, ahead of the dispatchers: --attach, --stop and --start reach
+# the macOS lock before the launch path defines anything else.)
+# Host path $1 re-spelled under $WORK_DIR ("$WORK_DIR" or "$WORK_DIR/<rel>")
+# when it lies PHYSICALLY in the workspace; returns 1 otherwise. Its parent is
+# resolved with `cd -P` and `pwd -P` (every link, `//`, `/./`, `..`, a
+# trailing `/`, and on a case-insensitive file system the case on disk); its
+# last component is kept as named when it is a link or does not exist (the
+# link's location is what counts), and resolved with the rest when it is a
+# directory or `.`/`..`. The comparison is against `pwd -P` of the workspace,
+# with a path boundary, so <workspace>-secrets is outside.
+_sandy_ws_physical() {
+    local _p="$1" _real _par _base _rp
+    _real="${REAL_WORK_DIR:-}"
+    [ -n "$_real" ] || _real="$(cd "$WORK_DIR" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$_real" ] || return 1
+    while case "$_real" in //*) true ;; *) false ;; esac; do _real="${_real#/}"; done
+    case "$_p" in /*) ;; *) return 1 ;; esac
+    while case "$_p" in /|//) false ;; */) true ;; *) false ;; esac; do _p="${_p%/}"; done
+    _base="${_p##*/}"; _par="${_p%/*}"; [ -n "$_par" ] || _par=/
+    if [ "$_base" = . ] || [ "$_base" = .. ] || [ -z "$_base" ] \
+       || { [ -d "$_p" ] && [ ! -L "$_p" ]; }; then
+        _par="$_p"; _base=""
+    fi
+    _rp="$(CDPATH='' cd -P -- "$_par" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$_rp" ] || return 1
+    # `pwd -P` keeps a leading `//` too; on Linux and macOS it is `/`.
+    while case "$_rp" in //*) true ;; *) false ;; esac; do _rp="${_rp#/}"; done
+    [ -z "$_base" ] || _rp="${_rp%/}/$_base"
+    if [ "$_rp" = "$_real" ]; then printf '%s' "$WORK_DIR"; return 0; fi
+    case "$_rp" in "$_real"/*) printf '%s/%s' "$WORK_DIR" "${_rp#"$_real"/}"; return 0 ;; esac
+    return 1
+}
+# The `gitdir:` value of a .git FILE at the workspace root, and the directory
+# it names, resolved as the mount code has always resolved it (a logical `cd`
+# from the workspace). Shared by the gitdir mount and by the by-name sweep, so
+# the sweep judges exactly the directory that is mounted.
+_sandy_gitdir_rel() {
+    [ -f "$WORK_DIR/.git" ] || return 0
+    sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]'
+}
+# The directory is spelled under $WORK_DIR whenever it lies physically in the
+# workspace, however the value spells it (`//ws/x`, `/./`, `..`, a linked
+# ancestor, another case): every by-name decision compares spellings with
+# $WORK_DIR, and Docker normalizes what bash's `pwd` keeps (a leading `//`).
+_sandy_gitdir_host() {   # $1 = the gitdir value -> the directory, or nothing
+    [ -n "$1" ] || return 0
+    local _h _w
+    _h="$(cd "$WORK_DIR" && cd "$1" 2>/dev/null && pwd)" || return 0
+    [ -n "$_h" ] || return 0
+    if _w="$(_sandy_ws_physical "$_h")"; then printf '%s' "$_w"; else printf '%s' "$_h"; fi
+}
+# A git directory, by structure, as git itself recognizes one: HEAD, an
+# objects/ and a refs/ directory; the directory itself not a link. Its config
+# is not required (git does not require it either, and its hooks/ would still
+# run). 2.9.0: before, any directory holding a file named config counted, so a
+# branch named `config` made refs/heads a "gitdir", while a submodule nested
+# deeper than six levels got nothing.
+_sandy_is_gitdir() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -e "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
+}
+# The submodule gitdirs under modules/ directory $1 that get the :ro overlay,
+# NUL-separated: walked with no depth limit and without following links. A
+# directory there is either a submodule gitdir (_sandy_is_gitdir: printed, and
+# its own modules/ walked for nested submodules, nothing else inside it) or a
+# component of a submodule's path (walked). Shared by the overlay
+# (_protect_submodule_gitdirs), the by-name sweep and the macOS lock.
+_sandy_submodule_gitdirs() {
+    local _c
+    [ -d "$1" ] && [ ! -L "$1" ] || return 0
+    while IFS= read -r -d '' _c; do
+        [ ! -L "$_c" ] || continue
+        if _sandy_is_gitdir "$_c"; then
+            printf '%s\0' "$_c"
+            _sandy_submodule_gitdirs "$_c/modules"
+        elif [ -e "$_c/HEAD" ] || [ -d "$_c/objects" ] || [ -d "$_c/refs" ]; then
+            # Part of a gitdir but not a whole one: git would not use it, and
+            # it is never walked through (objects/ and refs/ hold no submodules).
+            _sandy_submodule_gitdirs "$_c/modules"
+        else
+            _sandy_submodule_gitdirs "$_c"
+        fi
+    done < <(find "$1" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+}
+# Every submodule gitdir and linked-worktree admin directory sandy protects,
+# one absolute path per line: under the top-level .git (when a directory) and
+# under the gitdir a .git file names ($GITDIR_HOST). The launch records them
+# (#gitdir lines) and the session-end sweep lists them again, so one created
+# during the session -- which got no :ro mount -- is reported (2.9.0).
+_sandy_git_admin_dirs() {   # $1 = workspace
+    local _g
+    for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
+        [ -d "$_g" ] && [ ! -L "$_g" ] || continue
+        _sandy_git_admin_dirs_of "$_g"
+    done
+    return 0
+}
+# The same below one gitdir $1 (not $1 itself): its worktree admin dirs, its
+# submodule gitdirs, and theirs.
+_sandy_git_admin_dirs_of() {
+    local _d _w
+    while IFS= read -r -d '' _w; do printf '%s\n' "$_w"; done < <(_sandy_worktree_admin_dirs "$1")
+    while IFS= read -r -d '' _d; do
+        printf '%s\n' "$_d"
+        while IFS= read -r -d '' _w; do printf '%s\n' "$_w"; done < <(_sandy_worktree_admin_dirs "$_d")
+    done < <(_sandy_submodule_gitdirs "$1/modules")
+    return 0
+}
+# The linked-worktree administrative directories of gitdir $1 (its
+# worktrees/<name>/, each with a regular HEAD; not links), NUL-separated. git
+# run in that worktree reads commondir and config.worktree from there, so they
+# redirect it exactly as a gitdir's own would (2.9.0).
+_sandy_worktree_admin_dirs() {
+    local _c
+    [ -d "$1/worktrees" ] && [ ! -L "$1/worktrees" ] || return 0
+    while IFS= read -r -d '' _c; do
+        [ ! -L "$_c" ] && [ -f "$_c/HEAD" ] && printf '%s\0' "$_c"
+    done < <(find "$1/worktrees" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+    return 0
+}
+
+# --- macOS: lock the most sensitive protected files (2.9.0) ------------------
+# The hash report above detects a write through another spelling of the name;
+# on macOS sandy also sets the user-immutable flag (chflags uchg) on these, for
+# the session, so such a write fails. Only a regular file that exists, reached
+# from its anchor (the workspace, or the gitdir a .git file names) through no
+# link, and only one whose flag is not set already (that one is the user's:
+# recorded as `preset`, never cleared).
+#
+# The fixed list, workspace-relative, one per line: adding a file is one line.
+_sandy_uchg_files() {
+    cat <<'EOF'
+.claude/settings.json
+.claude/settings.local.json
+.mcp.json
+.envrc
+.pre-commit-config.yaml
+.mise.toml
+.gitmodules
+.git
+.git/config
+.git/commondir
+.git/config.worktree
+EOF
+}
+# Every file to lock, absolute, one per line: the fixed list under workspace $1,
+# config/commondir/config.worktree of each submodule gitdir under .git/modules,
+# and, when .git is a FILE, the same three of the gitdir it names ($GITDIR_HOST)
+# and of its submodule gitdirs. "<anchor><TAB><path>": the anchor is the
+# directory the no-link walk starts from.
+_sandy_uchg_targets() {
+    local _r _d _root _a
+    while IFS= read -r _r; do
+        [ -n "$_r" ] && printf '%s\t%s\n' "$1" "$1/$_r"
+    done < <(_sandy_uchg_files)
+    for _root in "$1/.git/modules" ${GITDIR_HOST:+"$GITDIR_HOST/modules"}; do
+        case "$_root" in "$1"/*) _a="$1" ;; *) _a="$GITDIR_HOST" ;; esac
+        while IFS= read -r -d '' _d; do
+            for _r in config commondir config.worktree; do printf '%s\t%s\n' "$_a" "$_d/$_r"; done
+            _sandy_uchg_worktree_targets "$_a" "$_d"
+        done < <(_sandy_submodule_gitdirs "$_root")
+    done
+    if [ -n "${GITDIR_HOST:-}" ]; then
+        for _r in config commondir config.worktree; do printf '%s\t%s\n' "$GITDIR_HOST" "$GITDIR_HOST/$_r"; done
+        _sandy_uchg_worktree_targets "$GITDIR_HOST" "$GITDIR_HOST"
+    fi
+    if [ -d "$1/.git" ] && [ ! -L "$1/.git" ]; then _sandy_uchg_worktree_targets "$1" "$1/.git"; fi
+}
+# commondir and config.worktree of each linked-worktree admin dir of gitdir $2.
+_sandy_uchg_worktree_targets() {   # $1 = anchor  $2 = gitdir
+    local _w _r
+    while IFS= read -r -d '' _w; do
+        for _r in commondir config.worktree; do printf '%s\t%s\n' "$1" "$_w/$_r"; done
+    done < <(_sandy_worktree_admin_dirs "$2")
+}
+# THE switch: make this return 1 to turn the lock off everywhere (the launch
+# then neither sets nor reports it; unlocking a record left by an earlier
+# launch still works). Darwin with chflags only; never on Linux.
+_sandy_uchg_supported() {
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && command -v chflags >/dev/null 2>&1
+}
+# --- commondir seeding (2.9.0) -------------------------------------------------
+# git reads `commondir` from any gitdir. One that does not exist at launch has
+# nothing to mount :ro over or lock, and on a case-insensitive host a session
+# can create it under any spelling. So the launch creates `commondir` with the
+# content `.` (the gitdir itself: what git assumes when the file is absent) in
+# every gitdir that lacks one: the top-level .git, each submodule gitdir, each
+# linked-worktree admin dir, and the gitdir a .git file names, with theirs.
+# It is then mounted :ro, hashed and (macOS) locked like any protected git
+# file. Visible change while a session runs: `git rev-parse --git-common-dir`
+# prints an absolute path instead of `.git`. Measured with git 2.47 (status,
+# commit, worktree add/list/prune, gc, fsck, submodule update); libgit2,
+# gitoxide and JGit are untested.
+#
+# THE switch: make this return 1 to turn seeding off everywhere (records an
+# earlier launch left are still cleaned up).
+_sandy_commondir_seed_enabled() { return 0; }
+# What sandy created, in the sandbox: "seeded<TAB><path, hex><TAB><inode>".
+_sandy_commondir_record() { printf '%s/.commondir-seeded' "$1"; }
+# Seed gitdir $2 (anchor $1: the walk from there passes no link), appending to
+# record $3. Created by mktemp in the gitdir and renamed into place without
+# replacing anything (mv -n), then checked: the file at the path must be the
+# one sandy wrote.
+_sandy_commondir_seed_one() {   # $1 = anchor  $2 = gitdir  $3 = record
+    local _f="$2/commondir" _t _i
+    { [ -e "$_f" ] || [ -L "$_f" ]; } && return 0
+    [ -d "$2" ] && [ ! -L "$2" ] || return 0
+    if [ "$2" != "$1" ] && _sandy_path_symlink_component "$1" "$_f" >/dev/null; then return 0; fi
+    _t="$(mktemp "$2/.sandy-commondir.XXXXXX" 2>/dev/null)" || return 0
+    printf '.\n' > "$_t" && chmod 644 "$_t" || { rm -f "$_t"; return 0; }
+    _i="$(_sandy_file_inode "$_t")"
+    mv -n "$_t" "$_f" 2>/dev/null || true
+    rm -f "$_t" 2>/dev/null || true
+    if [ -f "$_f" ] && [ ! -L "$_f" ] && [ -n "$_i" ] && [ "$(_sandy_file_inode "$_f")" = "$_i" ]; then
+        printf 'seeded\t%s\t%s\n' "$(_sandy_hex "$_f")" "$_i" >> "$3"
+    fi
+    return 0
+}
+# True when record line fields ($1 path hex, $2 inode) still name the file
+# sandy created: no link at the path, same inode, content exactly `.`.
+_sandy_commondir_is_ours() {
+    local _f
+    _f="$(_sandy_unhex "$1")" || return 1
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ "$(_sandy_file_inode "$_f")" = "$2" ] || return 1
+    case "$_f" in
+        "${WORK_DIR:-/nonexistent}"/*) ! _sandy_path_symlink_component "$WORK_DIR" "$_f" >/dev/null || return 1 ;;
+    esac
+    if [ "$(cat "$_f" 2>/dev/null; echo x)" = ".
+x" ]; then return 0; fi
+    return 1
+}
+# Seed every gitdir of workspace $1 lacking a commondir; record in sandbox $2.
+# Lines of an earlier launch's record that still name sandy's file are kept,
+# so a later cleanup removes them.
+_sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
+    local _rec _k _h _i _keep="" _g _d _w _a
+    _rec="$(_sandy_commondir_record "$2")"
+    _sandy_commondir_fix_dirs "$1" "$2"
+    if [ -f "$_rec" ]; then
+        while IFS=$'\t' read -r _k _h _i; do
+            [ "$_k" = seeded ] && _sandy_commondir_is_ours "$_h" "$_i" && _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_i"$'\n'
+        done < "$_rec"
+    fi
+    printf '%s' "$_keep" > "$_rec"
+    _sandy_commondir_seed_enabled || { [ -s "$_rec" ] || rm -f "$_rec"; return 0; }
+    for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
+        [ -d "$_g" ] && [ ! -L "$_g" ] || continue
+        case "$_g" in "$1"/*) _a="$1" ;; *) _a="$_g" ;; esac
+        if _sandy_path_symlink_component "$1" "$_g" >/dev/null 2>&1 && [ "$_a" = "$1" ]; then continue; fi
+        _sandy_commondir_seed_one "$_a" "$_g" "$_rec"
+        while IFS= read -r _d; do
+            [ -n "$_d" ] && _sandy_commondir_seed_one "$_a" "$_d" "$_rec"
+        done < <(_sandy_git_admin_dirs_of "$_g")
+    done
+    [ -s "$_rec" ] || rm -f "$_rec"
+    return 0
+}
+# Session end: remove each commondir sandy created that is still exactly
+# what it created. One the session changed stays (the content report names it).
+_sandy_commondir_unseed() {   # $1 = sandbox
+    local _rec _k _h _i _f
+    _rec="$(_sandy_commondir_record "$1")"
+    [ -f "$_rec" ] || return 0
+    while IFS=$'\t' read -r _k _h _i; do
+        [ "$_k" = seeded ] || continue
+        if _sandy_commondir_is_ours "$_h" "$_i"; then
+            _f="$(_sandy_unhex "$_h")" && rm -f "$_f"
+        fi
+    done < "$_rec"
+    rm -f "$_rec"
+    return 0
+}
+_sandy_uchg_is_set() {
+    case ",$(stat -f '%Sf' "$1" 2>/dev/null)," in *,uchg,*) return 0 ;; esac
+    return 1
+}
+_sandy_file_inode() { ls -di "$1" 2>/dev/null | awk '{print $1}'; }
+# Status-change time (seconds): chflags moves it, and an immutable file's
+# contents, mode and owner cannot change, so a ctime other than the one sandy
+# recorded after setting the flag means its flags were changed since.
+_sandy_file_ctime() { stat -f '%c' "$1" 2>/dev/null || true; }
+# A path as shown to the user: workspace-relative when inside $WORK_DIR.
+_sandy_uchg_show() {
+    case "$1" in "${WORK_DIR:-/nonexistent}"/*) printf '%s' "${1#"$WORK_DIR"/}" ;; *) printf '%s' "$1" ;; esac
+}
+# The record of what sandy locked lives in the sandbox, outside the workspace:
+# "locked<TAB><absolute path, hex><TAB><inode><TAB><ctime>" for a flag sandy
+# set (ctime "-" until the flag is set), "preset<TAB><path, hex>" for one that
+# was already set. Written before any flag is set, so a launch that dies
+# part-way leaves a record of every file it may have locked.
+_sandy_uchg_record() { printf '%s/.uchg-locked' "$1"; }
+_sandy_uchg_write_record() {   # $1 = record  $2 = content (lines)
+    local _t
+    if [ -z "$2" ]; then rm -f "$1"; return 0; fi
+    _t="$(mktemp "${1%/*}/.uchg-locked.XXXXXX")" || return 1
+    printf '%s' "$2" > "$_t" && mv -f "$_t" "$1"
+}
+# $1 = sandbox dir  $2 = workspace. Sets _SANDY_UCHG_LOCKED (the paths locked,
+# as shown). The flag is set with -h (never through a final link), and the
+# inode is read again afterwards: a file swapped in between is unlocked again
+# and named, not left locked.
+_sandy_uchg_lock() {
+    local _rec _a _f _hx _ino _ino2 _ct _lines="" _lines2="" _kept="" _k _h _x _y _failed=""
+    _SANDY_UCHG_LOCKED=""
+    _sandy_uchg_supported || return 0
+    _rec="$(_sandy_uchg_record "$1")"
+    # A record an earlier unlock could not finish stays authoritative: those
+    # files are still sandy's, though their flag is set.
+    if [ -f "$_rec" ]; then
+        while IFS=$'\t' read -r _k _h _x _y; do
+            [ "$_k" = locked ] || continue
+            # One whose flag is no longer set is set again, on the same inode
+            # only, and its ctime refreshed (the unlock compares it).
+            _f="$(_sandy_unhex "$_h" 2>/dev/null)" || _f=""
+            if [ -n "$_f" ] && [ -f "$_f" ] && [ ! -L "$_f" ] && [ "$(_sandy_file_inode "$_f")" = "$_x" ] \
+               && ! _sandy_uchg_is_set "$_f" && chflags -h uchg "$_f" 2>/dev/null; then
+                _y="$(_sandy_file_ctime "$_f")"; _y="${_y:--}"
+                _SANDY_UCHG_LOCKED="$_SANDY_UCHG_LOCKED $(_sandy_uchg_show "$_f")"
+            fi
+            _kept="$_kept$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
+        done < "$_rec"
+        _sandy_uchg_write_record "$_rec" "$_kept" || true
+    fi
+    while IFS=$'\t' read -r _a _f; do
+        [ -n "$_f" ] || continue
+        [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+        if _sandy_path_symlink_component "$_a" "$_f" >/dev/null; then continue; fi
+        _hx="$(_sandy_hex "$_f")"
+        case "$_kept$_lines" in *$'\t'"$_hx"$'\t'*|*$'\t'"$_hx"$'\n'*) continue ;; esac
+        if _sandy_uchg_is_set "$_f"; then
+            _lines="${_lines}preset"$'\t'"$_hx"$'\n'
+            continue
+        fi
+        _ino="$(_sandy_file_inode "$_f")"
+        [ -n "$_ino" ] || continue
+        _lines="${_lines}locked"$'\t'"$_hx"$'\t'"$_ino"$'\t'-$'\n'
+    done < <(_sandy_uchg_targets "$2")
+    [ -n "$_lines" ] || return 0
+    _sandy_uchg_write_record "$_rec" "$_kept$_lines" || { warn "Could not record the macOS file locks; not locking."; return 0; }
+    while IFS=$'\t' read -r _k _h _x _y; do
+        [ -n "$_k" ] || continue
+        if [ "$_k" = locked ]; then
+            _f="$(_sandy_unhex "$_h")" || continue
+            if ! chflags -h uchg "$_f" 2>/dev/null; then
+                _failed="$_failed $(_sandy_uchg_show "$_f")"
+                continue
+            fi
+            _ino2="$(_sandy_file_inode "$_f")"
+            if [ "$_ino2" != "$_x" ] || [ -L "$_f" ]; then
+                chflags -h nouchg "$_f" 2>/dev/null || true
+                warn "Not locking $(_sandy_uchg_show "$_f"): it was replaced while sandy locked it (cleared again)."
+                continue
+            fi
+            _ct="$(_sandy_file_ctime "$_f")"
+            _y="${_ct:--}"
+            _SANDY_UCHG_LOCKED="$_SANDY_UCHG_LOCKED $(_sandy_uchg_show "$_f")"
+        fi
+        _lines2="$_lines2$_k"$'\t'"$_h"${_x:+$'\t'"$_x"}${_y:+$'\t'"$_y"}$'\n'
+    done <<< "$_lines"
+    _sandy_uchg_write_record "$_rec" "$_kept$_lines2" || true
+    [ -z "$_failed" ] || warn "Could not lock (chflags uchg):$_failed"
+    return 0
+}
+# $1 = sandbox dir  $2 = workspace. Clears exactly the flags the record says
+# sandy set, on the file it set them on: the same inode, its status unchanged
+# since (ctime), the path itself not a link, and a workspace path reached
+# through no link. Returns 0 when no lock of sandy's is left, 1 otherwise
+# (each named).
+_sandy_uchg_unlock() {
+    local _rec _k _h _x _y _f _s _lnk _keep="" _rc=0
+    _rec="$(_sandy_uchg_record "$1")"
+    [ -f "$_rec" ] || return 0
+    if ! command -v chflags >/dev/null 2>&1; then
+        warn "Files sandy locked on this workspace are listed in $_rec, but chflags is not available to unlock them."
+        return 1
+    fi
+    while IFS=$'\t' read -r _k _h _x _y; do
+        [ "$_k" = locked ] || continue
+        if ! _f="$(_sandy_unhex "$_h")" || [ -z "$_f" ]; then
+            # An earlier format: "locked<TAB><workspace-relative path><TAB><inode>".
+            case "$_h" in
+                ''|/*|*..*) _f="" ;;
+                *) if [ -z "$_y" ] && [ -n "$_x" ]; then _f="$2/$_h"; else _f=""; fi ;;
+            esac
+            if [ -z "$_f" ]; then
+                warn "Not unlocking an entry sandy cannot read in $_rec (kept): $(printf '%q ' "$_k" "$_h" "$_x" "$_y")"
+                _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
+                continue
+            fi
+            _h="$(_sandy_hex "$_f")"
+        fi
+        _s="$(_sandy_uchg_show "$_f")"
+        { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
+        if [ -L "$_f" ] || { case "$_f" in "$2"/*) true ;; *) false ;; esac \
+                && _lnk="$(_sandy_path_symlink_component "$2" "$_f")"; }; then
+            warn "Not unlocking $_s: ${_lnk:-it} is now a symbolic link. The file sandy locked is no longer at this path; find it and run: chflags nouchg <file>"
+            _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
+            _lnk=""
+            continue
+        fi
+        if [ "$(_sandy_file_inode "$_f")" != "$_x" ]; then
+            warn "Not unlocking $_s: it is not the file sandy locked (a different file now sits there)."
+            continue
+        fi
+        if [ -n "$_y" ] && [ "$_y" != - ] && [ "$(_sandy_file_ctime "$_f")" != "$_y" ]; then
+            warn "Not unlocking $_s: its flags changed after sandy set them, so they are left as they are."
+            continue
+        fi
+        _sandy_uchg_is_set "$_f" || continue
+        if ! chflags -h nouchg "$_f" 2>/dev/null; then
+            warn "Could not unlock $_f (chflags nouchg failed)."
+            _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
+        fi
+    done < "$_rec"
+    _sandy_uchg_write_record "$_rec" "$_keep" || _rc=1
+    [ -z "$_keep" ] || _rc=1
+    return "$_rc"
+}
+
+# True when container $1 (a name or id; empty = none was ever created) is
+# known to be gone: inspect reports no such object, or prints no id. An error
+# of any other kind (the daemon unreachable mid-teardown) is "maybe still
+# there", which keeps what depends on it.
+_sandy_container_gone() {
+    local _o _rc=0
+    [ -n "$1" ] || return 0
+    _o="$(docker inspect -f '{{.Id}}' "$1" 2>&1)" || _rc=$?
+    if [ "$_rc" = 0 ]; then
+        if [ -z "$_o" ]; then return 0; fi
+        return 1
+    fi
+    case "$_o" in *"No such"*|*"no such"*) return 0 ;; esac
+    return 1
+}
+# A `commondir` that is an EMPTY directory (Docker created it for a missing -v
+# source of a container that outlived its session) breaks every git command
+# there. Remove each such one, reached through no link, and say so: in every
+# gitdir of workspace $1 and at each path the seed record of sandbox $2 names.
+_sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
+    local _g _d _p _k _h _i _rec
+    {
+        for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
+            [ -d "$_g" ] && [ ! -L "$_g" ] || continue
+            printf '%s\n' "$_g/commondir"
+            while IFS= read -r _d; do [ -n "$_d" ] && printf '%s\n' "$_d/commondir"; done < <(_sandy_git_admin_dirs_of "$_g")
+        done
+        if [ -n "$2" ]; then
+            _rec="$(_sandy_commondir_record "$2")"
+            if [ -f "$_rec" ]; then
+                while IFS=$'\t' read -r _k _h _i; do
+                    [ "$_k" = seeded ] && _sandy_unhex "$_h" && printf '\n'
+                done < "$_rec"
+            fi
+        fi
+    } | while IFS= read -r _p; do
+        [ -n "$_p" ] && [ -d "$_p" ] && [ ! -L "$_p" ] || continue
+        case "$_p" in "$1"/*) ! _sandy_path_symlink_component "$1" "$_p" >/dev/null || continue ;; esac
+        if [ -n "$(ls -A "$_p" 2>/dev/null)" ]; then
+            warn "$(_sandy_uchg_show "$_p") is a directory with content where git expects a commondir file: git cannot run in that repository until it is moved away. Sandy leaves it alone."
+            continue
+        fi
+        if rmdir "$_p" 2>/dev/null; then
+            warn "Removed an empty directory at $(_sandy_uchg_show "$_p"): a container that outlived its session left it where sandy's commondir file was, and git cannot run with it there."
+        fi
+    done
+    return 0
+}
+
+# True when pid $1 is a live sandy supervisor for $WORK_DIR: alive, and its
+# command line is a `sandy --start` for this workspace (a pid reused after a
+# reboot is someone else's). `ps -o command=` is POSIX (GNU and BSD alike);
+# without ps, kill -0 alone decides.
+_sandy_supervisor_alive() {
+    local _c
+    kill -0 "$1" 2>/dev/null || return 1
+    command -v ps >/dev/null 2>&1 || return 0
+    _c="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+    case "$_c" in *" --start"*) ;; *) return 1 ;; esac
+    # The workspace as a whole argument (followed by a space or the end), so
+    # /x/ws is not taken for /x/ws2.
+    case "$_c " in *" --workspace $WORK_DIR "*) return 0 ;; esac
+    return 1
+}
+
+# --- A daemon container running without its supervisor (2.9.0) --------------
+# `--restart unless-stopped` brings a daemon container back after a reboot or a
+# Docker restart, but not its supervisor: nothing runs that session's cleanup,
+# and nothing re-applies protection that lapsed (a macOS lock cleared by a
+# reboot-time unlock, or never set). The next --attach and --start of that
+# workspace therefore warn, re-apply the macOS locks (the record is merged, so
+# locks still set stay sandy's) and, only when no launch snapshot exists, take
+# the content snapshot from the container's own :ro mounts. --stop warns and
+# prints the content report against whatever snapshot exists, then tears down
+# as before (which clears the locks and the seeded commondir files).
+# $1 = container  $2 = attach|start|stop. Returns 0 always.
+_sandy_unsupervised_daemon_protect() {
+    local _dpid _sess _sb _snap _src _dst
+    _dpid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$1" 2>/dev/null)" || _dpid=""
+    case "$_dpid" in ''|*[!0-9]*) _dpid="" ;; esac
+    if [ -n "$_dpid" ] && _sandy_supervisor_alive "$_dpid"; then return 0; fi
+    _sess="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$1" 2>/dev/null)" || _sess=""
+    case "$_sess" in ''|.*|*/*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+    _sb="$SANDY_HOME/sandboxes/$_sess"
+    [ -d "$_sb" ] && [ ! -L "$_sb" ] || return 0
+    _snap="$_sb/.protected-existed-at-launch"
+    warn "This daemon session (container ${1:0:12}) has no live supervisor: Docker restarted it after the supervisor ended (a reboot or a Docker restart)."
+    warn "  Since then it has run without sandy's session-end checks, and on macOS possibly without its file locks."
+    if [ "$2" = stop ]; then
+        if [ -f "$_snap" ]; then
+            _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$_snap")" "$_sb/.protected-copies"
+            rm -f "$_snap"
+        fi
+        return 0
+    fi
+    warn "  For a fully protected session: sandy --stop, then sandy --start."
+    # Outside the workspace only what the launch recorded is re-locked (its
+    # record lines, inode-checked): the .git file may have been re-pointed
+    # since, so the gitdir is not derived from it again.
+    GITDIR_HOST=""
+    _sandy_commondir_fix_dirs "$WORK_DIR" "$_sb"
+    _sandy_uchg_lock "$_sb" "$WORK_DIR"
+    if [ -n "${_SANDY_UCHG_LOCKED:-}" ]; then
+        info "Re-applied the macOS file locks:${_SANDY_UCHG_LOCKED}."
+    fi
+    if [ ! -f "$_snap" ]; then
+        RUN_FLAGS=()
+        while IFS=$'\t' read -r _src _dst; do
+            [ -n "$_src" ] && [ -n "$_dst" ] && RUN_FLAGS+=(-v "$_src:$_dst:ro")
+        done < <(docker inspect -f '{{range .Mounts}}{{if and (eq .Type "bind") (not .RW)}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' "$1" 2>/dev/null)
+        if [[ "$WORK_DIR" == "$HOME"/* ]]; then SANDY_WORKSPACE="/home/sandy/${WORK_DIR#$HOME/}"; else SANDY_WORKSPACE="$WORK_DIR"; fi
+        GITDIR_CONTAINER=""   # workspace mounts only (see above)
+        : > "$_snap"
+        _sandy_protected_hash_snapshot "$_snap" "$_sb/.protected-copies"
+        info "Recorded the protected files' contents now; 'sandy --stop' reports any change from here."
+    fi
+    return 0
 }
 
 # core.hooksPath redirect protection (Pillar "Week of Sandbox Escapes" #4
@@ -3148,6 +3940,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME. When the destination has no workspace there, the workspace itself is copied first, whole (.git, untracked and ignored files, symlinks as links), as a new directory (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist. --exclude PATTERN (repeatable, rsync syntax, relative to the workspace root) keeps paths out of the workspace copy; across a CPU architecture change its .venv/ and node_modules/ are skipped too. Credential-bearing files, in the sandbox and in a copied workspace, are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync-from"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"The reverse of --rsync (#409): PULL a sandbox from another host into this one, over outbound ssh + rsync from here only (the source is never modified). The copy is named for THIS host workspace path and gets the same rewrites as --rsync: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json. The source workspace defaults to the same path relative to $HOME on the remote. A local workspace named with --workspace that does not exist yet is pulled too, whole, as a new directory, and moves into place with the sandbox (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist (--exclude PATTERN as for --rsync). Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. It lands in a hidden staging directory and is renamed into place only once every step succeeds, so a failed pull installs nothing. Refuses while a live session holds the source on the remote and never overwrites a sandbox already here. Takes the source host as its argument. Sub-options: --workspace PATH, --src-workspace PATH, --src-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','
@@ -3155,7 +3948,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about that is missing the per-sandbox state a launch creates -- pip/ since 2.6.0 (#382; relay-state/ was the target from 2.2.0 through 2.5.x, but a launch no longer creates it), which is what --reset-sandbox leaves behind, and what any launch that failed part-way leaves behind; it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with that state in place. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, --approvals, and --accounts. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --unlock, --provision, --approvals, and --accounts. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -6416,7 +7209,8 @@ _sandy_rsy_host_ok() {   # $1 host, $2 flag name, $3 role (destination|source)
 _sandy_rsy_path_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9._/@+-]+$'; }
 # Everything regenerated per launch or per process; never copied either way.
 _SANDY_RSY_NEVER=(sandy-session.json gemini-system-settings.json relay-state/ feature-state/
-                  agent-args-composed/ launch/ proxy.log .protected-existed-at-launch claude/sessions/)
+                  agent-args-composed/ launch/ proxy.log .protected-existed-at-launch claude/sessions/
+                  .protected-copies/ .uchg-locked .commondir-seeded)
 _SANDY_RSY_ARCH_DIRS=(cargo go npm-global pip uv venv)
 # Non-interactive transport for every --rsync / --rsync-from transfer. -T on the
 # command line overrides a host's `RequestTTY yes` in ssh_config, which would
@@ -7404,6 +8198,70 @@ fi
 # reap here destroys non-reproducible state, not a rebuildable image or
 # container, so it does not belong in a command users already cron with
 # --yes for a much lower-stakes class of reap.
+# --- sandy --unlock (2.9.0) — clear the macOS file locks a session left set.
+# A launch on macOS sets chflags uchg on the protected files that matter most
+# (_sandy_uchg_lock) and clears them in its cleanup, at the next launch of the
+# workspace, and in --stop's direct teardown. This is the manual way, for a
+# session that died where none of those ran. It clears only what the record
+# in the sandbox says sandy set, on the file it set it on. Not a destructive
+# operation (it restores the file's normal state), so there is no --yes; it
+# refuses while a session of the workspace is running, since that session is
+# relying on the locks. Exit 0 when no lock of sandy's is left (including
+# when there was none), 1 otherwise.
+if [[ "${1:-}" == "--unlock" ]]; then
+    _ulk_ws=""; _ulk_dry=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)   shift; _ulk_ws="${1:-}"
+                           [ -n "$_ulk_ws" ] || { error "--unlock: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*) _ulk_ws="${1#--workspace=}"
+                           [ -n "$_ulk_ws" ] || { error "--unlock: --workspace needs a PATH"; exit 1; } ;;
+            --dry-run)     _ulk_dry=true ;;
+            *) error "--unlock: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+    _ulk_ws="${_ulk_ws:-$PWD}"
+    [ -d "$_ulk_ws" ] || { error "--unlock: workspace not found: $_ulk_ws"; exit 1; }
+    WORK_DIR="$(cd "$_ulk_ws" 2>/dev/null && pwd -P)" || { error "--unlock: cannot resolve workspace"; exit 1; }
+    _ulk_hash="$(printf '%s' "$WORK_DIR" | sha256)"; _ulk_hash="${_ulk_hash%% *}"; _ulk_hash="${_ulk_hash:0:8}"
+    _ulk_base="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"; _ulk_base="${_ulk_base:-project}"
+    _ulk_sb="$SANDY_HOME/sandboxes/${_ulk_base}-${_ulk_hash}"
+    _ulk_rec="$(_sandy_uchg_record "$_ulk_sb")"
+    if [ ! -f "$_ulk_rec" ] || ! grep -q $'^locked\t' "$_ulk_rec" 2>/dev/null; then
+        info "No files of $WORK_DIR are locked by sandy. Nothing to do."
+        exit 0
+    fi
+    _ulk_lock="$SANDY_HOME/sandboxes/.${_ulk_base}-${_ulk_hash}.lock"
+    if [ -d "$_ulk_lock" ]; then
+        _sandy_lock_state "$_ulk_lock"
+        if [ "$_SANDY_LOCK_STATE" != stale ]; then
+            error "--unlock: a session of this workspace is running (pid ${_SANDY_LOCK_PID:-unknown}); its locks are cleared when it ends."
+            exit 1
+        fi
+    fi
+    _ulk_ctr="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR" 2>/dev/null | head -1)" || _ulk_ctr=""
+    if [ -n "$_ulk_ctr" ]; then
+        error "--unlock: a daemon container of this workspace is running (${_ulk_ctr:0:12}), with or without its supervisor; stop it first: sandy --stop --workspace $(printf '%q' "$WORK_DIR")"
+        exit 1
+    fi
+    info "Files sandy locked in $WORK_DIR:"
+    while IFS=$'\t' read -r _ulk_k _ulk_r _ulk_x; do
+        [ "$_ulk_k" = locked ] && info "  $(_sandy_uchg_show "$(_sandy_unhex "$_ulk_r")")"
+    done < "$_ulk_rec"
+    if [ "$_ulk_dry" = true ]; then
+        info "(dry run: nothing changed)"
+        exit 0
+    fi
+    if _sandy_uchg_unlock "$_ulk_sb" "$WORK_DIR"; then
+        info "Unlocked."
+        exit 0
+    fi
+    error "--unlock: some files are still locked (see the warnings above, and $_ulk_rec)."
+    exit 1
+fi
+
 if [[ "${1:-}" == "--remove-sandbox" ]]; then
     _rms_workspace=""; _rms_sandbox=""; _rms_orphans=false
     _rms_dry_run=false; _rms_yes=false
@@ -9329,8 +10187,8 @@ Flags:
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
                      --exec, --login, --update-sessions, --reset-sandbox,
-                     --remove-sandbox, --provision, --approvals, and
-                     --accounts.
+                     --remove-sandbox, --unlock, --provision, --approvals,
+                     and --accounts.
   -v                 Alone (sandy -v): print the version. With other options:
                      verbose, show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
@@ -9394,6 +10252,11 @@ Sandbox maintenance (each entry says what it needs):
                      (every sandbox whose recorded workspace_path no longer
                      exists on disk). Sub-options: --workspace PATH, --sandbox
                      NAME, --orphans, --dry-run, --yes
+  --unlock           macOS: clear the file locks (chflags uchg) a session left
+                     on this workspace's protected files when it ended without
+                     its cleanup. Only what sandy set, on the same file; exit 0
+                     when none is left, 1 otherwise. Refuses while a session of
+                     the workspace runs. Sub-options: --workspace PATH, --dry-run
   --rsync HOST       COPY this workspace's sandbox to another host over ssh +
                      rsync, renamed for the destination's workspace path (the
                      sandbox name hashes it) with path-keyed state rewritten:
@@ -13739,6 +14602,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
             _sandy_d6_waited=$((_sandy_d6_waited + 1))
         done
         if [ "$_sandy_session_live" = 1 ]; then
+            _sandy_unsupervised_daemon_protect "$_sandy_daemon_existing" start
             info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
             exit 0
         fi
@@ -14051,6 +14915,7 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     # session). `|| rc=$?` (not a bare `$?` capture): tmux attach exits
     # non-zero when the session dies under the client, and an unguarded
     # failure would trip set -e before the DEC-C exit-code decision below.
+    _sandy_unsupervised_daemon_protect "$_sandy_attach_container" attach
     _sandy_attach_rc=0
     docker exec -it -u "$(id -u)" "$_sandy_attach_container" tmux attach -d -t sandy || _sandy_attach_rc=$?
     _sandy_tty_restore
@@ -14141,6 +15006,7 @@ if [ "$SANDY_STOP" = "true" ]; then
         # three things a supervisor-less session still has: container, networks,
         # and (maybe) a now-stale #14 lock.
         info "Stopping daemon session (no live supervisor — direct teardown)..."
+        _sandy_unsupervised_daemon_protect "$_sandy_stop_container" stop
         _sandy_stop_ok=true
         # docker stop (not just rm -f) first: it marks the container
         # intentionally-stopped, which is what defeats `--restart
@@ -14164,12 +15030,23 @@ if [ "$SANDY_STOP" = "true" ]; then
             # Same predicate and same check-rename-recheck removal as the
             # launch and --doctor --fix (#158): a launch that re-took this
             # lock in between keeps it.
+            _sandy_stop_reap_rc=0
             if [ -d "$_sandy_stop_lock" ]; then
-                _sandy_stop_reap_rc=0
                 _sandy_lock_reap_stale "$_sandy_stop_lock" || _sandy_stop_reap_rc=$?
                 if [ "$_sandy_stop_reap_rc" -eq 3 ]; then
                     warn "Workspace lock was re-taken while being cleared and could not be restored -- left at $_SANDY_LOCK_REAP_PATH (pid ${_SANDY_LOCK_PID:-unknown})."
                 fi
+            fi
+            # The macOS file locks the dead supervisor's session set: cleared
+            # only when no launch holds the workspace now (one that took the
+            # lock in between owns the record, and clears it itself).
+            if [ "$_sandy_stop_ok" = true ] && [ "$_sandy_stop_reap_rc" -eq 0 ] && [ ! -d "$_sandy_stop_lock" ] \
+               && [ -f "$(_sandy_uchg_record "$SANDY_HOME/sandboxes/$_sandy_stop_session")" ]; then
+                _sandy_uchg_unlock "$SANDY_HOME/sandboxes/$_sandy_stop_session" "$WORK_DIR" \
+                    || warn "Some files the session locked are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
+            fi
+            if [ "$_sandy_stop_ok" = true ] && [ "$_sandy_stop_reap_rc" -eq 0 ] && [ ! -d "$_sandy_stop_lock" ]; then
+                _sandy_commondir_unseed "$SANDY_HOME/sandboxes/$_sandy_stop_session"
             fi
         fi
         if [ "$_sandy_stop_ok" = "true" ]; then
@@ -16601,68 +17478,8 @@ _sandy_symlink_resolve() {
     done
 }
 
-# The `gitdir:` value of a .git FILE at the workspace root, and the directory
-# it names, resolved as the mount code has always resolved it (a logical `cd`
-# from the workspace). Shared by the gitdir mount and by the by-name sweep, so
-# the sweep judges exactly the directory that is mounted.
-_sandy_gitdir_rel() {
-    [ -f "$WORK_DIR/.git" ] || return 0
-    sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]'
-}
-# The directory is spelled under $WORK_DIR whenever it lies physically in the
-# workspace, however the value spells it (`//ws/x`, `/./`, `..`, a linked
-# ancestor, another case): every by-name decision compares spellings with
-# $WORK_DIR, and Docker normalizes what bash's `pwd` keeps (a leading `//`).
-_sandy_gitdir_host() {   # $1 = the gitdir value -> the directory, or nothing
-    [ -n "$1" ] || return 0
-    local _h _w
-    _h="$(cd "$WORK_DIR" && cd "$1" 2>/dev/null && pwd)" || return 0
-    [ -n "$_h" ] || return 0
-    if _w="$(_sandy_ws_physical "$_h")"; then printf '%s' "$_w"; else printf '%s' "$_h"; fi
-}
 
-# Host path $1 re-spelled under $WORK_DIR ("$WORK_DIR" or "$WORK_DIR/<rel>")
-# when it lies PHYSICALLY in the workspace; returns 1 otherwise. Its parent is
-# resolved with `cd -P` and `pwd -P` (every link, `//`, `/./`, `..`, a
-# trailing `/`, and on a case-insensitive file system the case on disk); its
-# last component is kept as named when it is a link or does not exist (the
-# link's location is what counts), and resolved with the rest when it is a
-# directory or `.`/`..`. The comparison is against `pwd -P` of the workspace,
-# with a path boundary, so <workspace>-secrets is outside.
-_sandy_ws_physical() {
-    local _p="$1" _real _par _base _rp
-    _real="${REAL_WORK_DIR:-}"
-    [ -n "$_real" ] || _real="$(cd "$WORK_DIR" 2>/dev/null && pwd -P)" || return 1
-    [ -n "$_real" ] || return 1
-    while case "$_real" in //*) true ;; *) false ;; esac; do _real="${_real#/}"; done
-    case "$_p" in /*) ;; *) return 1 ;; esac
-    while case "$_p" in /|//) false ;; */) true ;; *) false ;; esac; do _p="${_p%/}"; done
-    _base="${_p##*/}"; _par="${_p%/*}"; [ -n "$_par" ] || _par=/
-    if [ "$_base" = . ] || [ "$_base" = .. ] || [ -z "$_base" ] \
-       || { [ -d "$_p" ] && [ ! -L "$_p" ]; }; then
-        _par="$_p"; _base=""
-    fi
-    _rp="$(CDPATH='' cd -P -- "$_par" 2>/dev/null && pwd -P)" || return 1
-    [ -n "$_rp" ] || return 1
-    # `pwd -P` keeps a leading `//` too; on Linux and macOS it is `/`.
-    while case "$_rp" in //*) true ;; *) false ;; esac; do _rp="${_rp#/}"; done
-    [ -z "$_base" ] || _rp="${_rp%/}/$_base"
-    if [ "$_rp" = "$_real" ]; then printf '%s' "$WORK_DIR"; return 0; fi
-    case "$_rp" in "$_real"/*) printf '%s/%s' "$WORK_DIR" "${_rp#"$_real"/}"; return 0 ;; esac
-    return 1
-}
 
-# The submodule gitdirs under modules/ directory $1 that get the :ro overlay:
-# every directory holding a regular file named config, to depth 6, found
-# without following links (find's default). NUL-separated. Shared by the
-# overlay (_protect_submodule_gitdirs) and by the by-name sweep.
-_sandy_submodule_gitdirs() {
-    [ -d "$1" ] || return 0
-    local _cfg
-    while IFS= read -r -d '' _cfg; do
-        printf '%s\0' "${_cfg%/*}"
-    done < <(find "$1" -mindepth 1 -maxdepth 6 -type f -name config -print0 2>/dev/null)
-}
 
 # Every workspace path sandy mounts or copies BY NAME, workspace-relative and
 # NUL-separated: the protected paths (.git/config, .git/hooks, .git/info and
@@ -16676,7 +17493,7 @@ _sandy_submodule_gitdirs() {
 # the workspace is checked against what the gate judged
 # (_sandy_symlink_check_mounts), and refused instead of mounted.
 _sandy_symlink_byname_rels() {
-    local _r _g="" _ga _root _d
+    local _r _g="" _ga _root _d _w
     _sandy_is_protected_rel . || true    # loads _SANDY_PROTECTED_RELS
     for _r in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"} .gstack $(_sandy_symlink_copied); do
         printf '%s\0' "$_r"
@@ -16687,17 +17504,47 @@ _sandy_symlink_byname_rels() {
         "$WORK_DIR"/*) _g="${_ga#"$WORK_DIR"/}" ;;
     esac
     if [ "$_g" = . ]; then
-        printf '%s\0' config hooks info packed-refs
+        printf '%s\0' config hooks info packed-refs commondir config.worktree
     elif [ -n "$_g" ]; then
-        printf '%s\0' "$_g" "$_g/config" "$_g/hooks" "$_g/info" "$_g/packed-refs"
+        printf '%s\0' "$_g" "$_g/config" "$_g/hooks" "$_g/info" "$_g/packed-refs" "$_g/commondir" "$_g/config.worktree"
     fi
     for _root in "$WORK_DIR/.git/modules" ${_g:+"$_ga/modules"}; do
         while IFS= read -r -d '' _d; do
             case "$_d" in "$WORK_DIR"/*) ;; *) continue ;; esac
             _r="${_d#"$WORK_DIR"/}"
-            printf '%s\0' "$_r/config" "$_r/hooks" "$_r/info"
+            printf '%s\0' "$_r/config" "$_r/hooks" "$_r/info" "$_r/commondir" "$_r/config.worktree"
+            while IFS= read -r -d '' _w; do
+                printf '%s\0' "${_w#"$WORK_DIR"/}/commondir" "${_w#"$WORK_DIR"/}/config.worktree"
+            done < <(_sandy_worktree_admin_dirs "$_d")
         done < <(_sandy_submodule_gitdirs "$_root")
     done
+    # The linked-worktree admin files of the top-level gitdir and of an
+    # in-workspace gitdir a .git file names: worktrees/ itself and every
+    # entry in it, links included, so a link at either level is judged.
+    for _d in "$WORK_DIR/.git" ${_g:+"$_ga"}; do
+        case "$_d" in "$WORK_DIR"/*) ;; *) continue ;; esac
+        { [ -e "$_d/worktrees" ] || [ -L "$_d/worktrees" ]; } || continue
+        printf '%s\0' "${_d#"$WORK_DIR"/}/worktrees"
+        while IFS= read -r -d '' _w; do
+            printf '%s\0' "${_w#"$WORK_DIR"/}/commondir" "${_w#"$WORK_DIR"/}/config.worktree"
+        done < <(find "$_d/worktrees" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    done
+    # The core.hooksPath directory (mounted :ro by name, E.10), so a link at or
+    # above it is judged too. Read once per scan by _sandy_resolve_symlinks
+    # (this list is produced in a subshell, twice per scan) into
+    # _SANDY_BYNAME_HOOKSPATH, rather than through _sandy_configured_hooks_rel,
+    # which re-reads the protected lists: the scan reads them once (#494). A
+    # value with a newline, a tab, a leading # or a `..` component is left out
+    # here (that helper refuses it too).
+    _r="${_SANDY_BYNAME_HOOKSPATH:-}"
+    case "$_r" in
+        "$WORK_DIR"/*) _r="${_r#"$WORK_DIR"/}" ;;
+        "${REAL_WORK_DIR:-$WORK_DIR}"/*) _r="${_r#"${REAL_WORK_DIR:-$WORK_DIR}"/}" ;;
+        /*) _r="" ;;
+    esac
+    _r="${_r#./}"; _r="${_r%/}"
+    case "/$_r/" in *$'\n'*|*$'\t'*|/\#*|*/../*|//) _r="" ;; esac
+    if [ -n "$_r" ]; then printf '%s\0' "$_r"; fi
 }
 
 # Where workspace-relative $1's last component sits, workspace-relative: its
@@ -16763,6 +17610,60 @@ _sandy_symlink_walk() {
         [ ${#_SANDY_SL_RELS[@]} -eq "$_n" ] || _ok=1
     done
     return 1
+}
+
+# 2.9.0: a link that stays INSIDE the workspace, at or above a path sandy
+# protects or copies by name (`.claude -> cfg`, `.git -> vendor/repo`,
+# `.envrc -> conf/envrc`), is judged too. Sandy cannot protect such a path: its
+# :ro mount or overlay lands wherever the link resolves in the container, where
+# no ancestor can be pinned (_sandy_pin_mount_ancestors walks through no link),
+# and the link itself is an ordinary workspace entry the session can replace or
+# re-point. So the first link on the way to each by-name path (.gstack aside,
+# which is not a protected path), when it resolves inside the workspace, joins
+# DANGEROUS_SYMLINKS (and _SANDY_SL_INTERNAL, for the prompt's wording): the
+# one-time approval, no approval on a headless or non-TTY launch, no
+# SANDY_AUTO_APPROVE_PRIVILEGED. Nothing is mounted for it. A link that leaves
+# the workspace is _sandy_symlink_protected_sweep's (below), as before.
+# True when "LINK -> TARGET" entry $1 came from the internal sweep.
+_sandy_symlink_is_internal_entry() {
+    local _e
+    for _e in ${_SANDY_SL_INTERNAL[@]+"${_SANDY_SL_INTERNAL[@]}"}; do
+        [ "$_e" = "$1" ] && return 0
+    done
+    return 1
+}
+# True when any line of file $1 is such an entry.
+_sandy_symlink_any_internal() {
+    local _l
+    while IFS= read -r _l; do
+        _sandy_symlink_is_internal_entry "$_l" && return 0
+    done < "$1"
+    return 1
+}
+_sandy_symlink_internal_sweep() {
+    local _p _q _rest _w _t
+    _sandy_is_protected_rel . || true
+    while IFS= read -r -d '' _p; do
+        case "/$_p/" in */node_modules/*|*/.venv*/*) continue ;; esac
+        [ "$_p" != .gstack ] || continue
+        _q=""; _rest="$_p"
+        while [ -n "$_rest" ]; do
+            _q="${_q:+$_q/}${_rest%%/*}"
+            case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+            _w="$WORK_DIR/$_q"
+            if [ -L "$_w" ]; then
+                _t="$(readlink -f "$_w" 2>/dev/null || true)"
+                if [ -n "$_t" ] && _sandy_symlink_inside "$_t" && ! _sandy_symlink_recorded "$_q" "$_t"; then
+                    DANGEROUS_SYMLINKS+=("$_q -> $_t")
+                    _SANDY_SL_RELS+=("$_q"); _SANDY_SL_TGTS+=("$_t")
+                    _SANDY_SL_INTERNAL+=("$_q -> $_t")
+                fi
+                break
+            fi
+            [ -e "$_w" ] || break
+        done
+    done < <(_sandy_symlink_byname_rels)
+    return 0
 }
 
 # The workspace paths sandy mounts or copies BY NAME (_sandy_symlink_byname_rels)
@@ -16939,6 +17840,7 @@ _sandy_symlink_scan() {
     kill "$_timer" 2>/dev/null || true
     wait "$_timer" 2>/dev/null || true
     _sandy_symlink_protected_sweep
+    _sandy_symlink_internal_sweep
     _dur=$((SECONDS - _t0))
     if [ "$_dur" -gt 5 ]; then
         info "Symlink scan took ${_dur}s. A large directory that holds no link the session needs mounted can be left out with SANDY_SYMLINK_SCAN_SKIP (comma-separated, workspace-relative; e.g. in ~/.sandy/config, or in .sandy/config, which asks for approval once)."
@@ -16954,11 +17856,12 @@ _sandy_resolve_symlinks() {
     # so strip it or nothing inside the workspace would compare as inside.
     while case "$REAL_WORK_DIR" in //*) true ;; *) false ;; esac; do REAL_WORK_DIR="${REAL_WORK_DIR#/}"; done
     _SANDY_PROTECTED_RELS_LOADED=""   # #494: re-read the protected lists for this scan
+    _SANDY_BYNAME_HOOKSPATH="$(git -C "$WORK_DIR" config --path --get core.hooksPath 2>/dev/null)" || _SANDY_BYNAME_HOOKSPATH=""
     DANGEROUS_SYMLINKS=()
     # Parallel arrays: resolved host path and the container path where it should be mounted
     SYMLINK_HOST_PATHS=()
     SYMLINK_CONTAINER_PATHS=()
-    _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
+    _SANDY_SL_RELS=(); _SANDY_SL_TGTS=(); _SANDY_SL_INTERNAL=()
     _sandy_symlink_scan
 
     # `--approvals` report mode (#296): the verdict this gate reaches below,
@@ -17011,6 +17914,10 @@ _sandy_resolve_symlinks() {
                     error "  $_new"
                 done < "$_new_tmp"
                 error ""
+                if _sandy_symlink_any_internal "$_new_tmp"; then
+                    error "A link that stays in the workspace is listed because it sits at or above a path"
+                    error "sandy protects: that path cannot be protected while it sits under a link."
+                fi
                 error "This would expose files outside the workspace to sandy."
                 error "If this is legitimate, delete the symlink, relaunch sandy, re-create it,"
                 error "and re-approve from the symlink warning — or clear the approval list:"
@@ -17023,11 +17930,23 @@ _sandy_resolve_symlinks() {
             cp "$_current_tmp" "$_approved_list"
         else
             # First encounter for this sandbox — prompt the user (existing ceremony).
-            warn "Symlinks that point outside the workspace:"
-            for s in "${DANGEROUS_SYMLINKS[@]}"; do
-                warn "  $s"
-            done
-            printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
+            if [ ${#DANGEROUS_SYMLINKS[@]} -gt ${#_SANDY_SL_INTERNAL[@]} ]; then
+                warn "Symlinks that point outside the workspace:"
+                for s in "${DANGEROUS_SYMLINKS[@]}"; do
+                    _sandy_symlink_is_internal_entry "$s" || warn "  $s"
+                done
+            fi
+            if [ ${#_SANDY_SL_INTERNAL[@]} -gt 0 ]; then
+                warn "Symlinks inside the workspace at or above a path sandy protects:"
+                for s in "${_SANDY_SL_INTERNAL[@]}"; do
+                    warn "  $s"
+                done
+                printf "\033[0;33m[sandy] Sandy cannot protect a path while it sits under a link: the session could re-point\033[0m\n"
+                printf "\033[0;33m[sandy] or replace the link, and what the link names then reaches your host workspace.\033[0m\n"
+            fi
+            if [ ${#DANGEROUS_SYMLINKS[@]} -gt ${#_SANDY_SL_INTERNAL[@]} ]; then
+                printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
+            fi
             # No interactive stdin to answer y/N — the `sandy --start` supervisor runs
             # the launch under /dev/null (a headless/piped run has no terminal either).
             # A bare `read` here consumes EOF and "aborts" with misleading "remove the
@@ -18170,6 +19089,16 @@ fi
 rm -rf "$SANDBOX_DIR/launch" "$SANDBOX_DIR"/claude/.*.sandy-launch.* "$SANDBOX_DIR"/claude/*.sandy-launch.* \
        "$SANDBOX_DIR"/claude/hooks/*.sandy-launch.* "$SANDBOX_DIR"/gemini/*.sandy-launch.* \
        "$SANDBOX_DIR"/codex/*.sandy-launch.* 2>/dev/null || true
+# macOS file locks a session that never reached its cleanup left set: the
+# workspace lock is held, so no session of this workspace is running, and the
+# record is stale. Cleared before any of sandy's own writes into the workspace.
+if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ]; then
+    if _sandy_uchg_unlock "$SANDBOX_DIR" "$WORK_DIR"; then
+        info "Unlocked the files an earlier session of this workspace left locked."
+    else
+        warn "Some files an earlier session locked are still locked: see $(_sandy_uchg_record "$SANDBOX_DIR")"
+    fi
+fi
 _sandy_launch_id="$( (openssl rand -hex 8 2>/dev/null) \
     || (head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
     || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
@@ -19377,27 +20306,6 @@ fi
 # escape hatch, not a bug. Runs here so both files exist BEFORE the protected-files
 # :ro mount loop and the .protected-existed-at-launch snapshot (workspace target only
 # — the sandbox target is never :ro and predates this block regardless).
-# R2 (1.13.2): a path is safe to write only if NO component below the anchor is
-# a symlink. Stated as a property of the path rather than a containment test,
-# because it needs no canonicalization: a symlink-free chain from the anchor
-# down IS proof the file sits inside it, and `realpath` is GNU-only anyway.
-# Bash builtins only, so it is bash-3.2/BSD-clean.
-_sandy_path_symlink_component() {   # $1 = anchor dir, $2 = path under it -> prints the offending component
-    local _anchor="$1" _p="$2" _rest _seg _cur
-    _rest="${_p#"$_anchor"/}"
-    [ "$_rest" = "$_p" ] && return 1        # not under the anchor; nothing to walk
-    _cur="$_anchor"
-    while [ -n "$_rest" ]; do
-        _seg="${_rest%%/*}"
-        _cur="$_cur/$_seg"
-        if [ -L "$_cur" ]; then printf '%s' "${_cur#"$_anchor"/}"; return 0; fi
-        case "$_rest" in
-            */*) _rest="${_rest#*/}" ;;
-            *)   _rest="" ;;
-        esac
-    done
-    return 1
-}
 
 _sandy_csi_write() {
     # $1 = accept|hold|refuse   $2 = absolute target file   $3 = anchor dir the
@@ -20395,7 +21303,7 @@ cleanup() {
             if [ -f "$WORK_DIR/$_pf" ]; then
                 _new_protected+=("$_pf")
             fi
-        done < <(_sandy_protected_files)
+        done < <(_sandy_protected_files; _sandy_watched_git_files)
         # Issue F: a core.hooksPath target the agent CREATED during the session.
         # An existing one was :ro-mounted at launch (and recorded in the snapshot,
         # so it's skipped here); an absent-at-launch one escapes the mount, so
@@ -20505,6 +21413,16 @@ cleanup() {
             printf "${YELLOW}[sandy]${NC} flag it in the approval prompt as CREATED BY A SANDY SESSION. Record:\n" >&2
             printf "${YELLOW}[sandy]${NC}   %s\n\n" "$(_sandy_df_session_record "$WORK_DIR")" >&2
         fi
+        # Protected FILES whose contents changed although mounted :ro (#hash
+        # records; _sandy_protected_hash_snapshot). Reported, never restored.
+        _sandy_protected_hash_report \
+            "$(_sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch")" \
+            "$SANDBOX_DIR/.protected-copies"
+        # Git admin dirs created in-session (#gitdir records; only when the
+        # launch got as far as recording them).
+        if grep -qx '#gitdirs-recorded' "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            _sandy_git_admin_report "$SANDBOX_DIR/.protected-existed-at-launch"
+        fi
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
     # #80: .git/HEAD is rw in-container, so `git switch` works — but a switch that
@@ -20612,6 +21530,26 @@ cleanup() {
     # assigned; at that point the agent doesn't exist yet, so this is a no-op.
     if [ -n "${CONTAINER_NAME:-}" ]; then
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    # The macOS file locks and the seeded commondir files, only once the
+    # container is known to be gone (_sandy_container_gone). Unlocking under a
+    # container that survived reopens what the locks close, and a seed removed
+    # under one that Docker restarts later (a reboot or a Docker restart during
+    # this teardown) comes back as a directory Docker creates for the missing
+    # -v source, which breaks every git command in the workspace. So when the
+    # container may still exist, both are kept, and said so.
+    if [ -n "${SANDBOX_DIR:-}" ] && [ -n "${WORK_DIR:-}" ] \
+       && { [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ] || [ -f "$(_sandy_commondir_record "$SANDBOX_DIR")" ]; }; then
+        if _sandy_container_gone "${CONTAINER_NAME:-}"; then
+            if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ]; then
+                _sandy_uchg_unlock "$SANDBOX_DIR" "$WORK_DIR" \
+                    || warn "Some files sandy locked for this session are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
+            fi
+            _sandy_commondir_unseed "$SANDBOX_DIR"
+        else
+            warn "The container ${CONTAINER_NAME} may still exist, so the macOS file locks and the seeded commondir files are kept."
+            warn "  Once it is gone: sandy --stop --workspace $(printf '%q' "$WORK_DIR") (or the next launch) clears them."
+        fi
     fi
     # Egress-proxy teardown: stop the sidecar container and remove both the
     # sidecar and egress networks (a network can't be removed while a container
@@ -22156,6 +23094,10 @@ esac
 # Submodules use a .git *file* with a relative gitdir: path. We remap the gitdir
 # into the container using the same $HOME-relative mapping so the relative
 # references between worktree and gitdir resolve correctly.
+# commondir seeding (_sandy_commondir_seed) runs before any git mount: here for
+# the top-level .git and what is under it, and again below, once the gitdir a
+# .git file names is known and validated.
+_sandy_commondir_seed "$WORK_DIR" "$SANDBOX_DIR"
 if [ -f "$WORK_DIR/.git" ]; then
     # Resolved by the helpers the by-name symlink sweep also calls, so the
     # sweep judges this gitdir (and its config, hooks, info and modules/) at
@@ -22195,6 +23137,7 @@ if [ -f "$WORK_DIR/.git" ]; then
         else
             GITDIR_CONTAINER="$GITDIR_HOST"
         fi
+        _sandy_commondir_seed "$WORK_DIR" "$SANDBOX_DIR"
         RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_CONTAINER")
         # R5b: the gitdir is mounted RW because git must write it (index, refs,
         # objects) -- so the host-code-execution surfaces inside it need the same
@@ -22209,6 +23152,11 @@ if [ -f "$WORK_DIR/.git" ]; then
         [ -f "$GITDIR_HOST/config" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config:$GITDIR_CONTAINER/config:ro")
         [ -d "$GITDIR_HOST/hooks" ]  && RUN_FLAGS+=(-v "$GITDIR_HOST/hooks:$GITDIR_CONTAINER/hooks:ro")
         [ -d "$GITDIR_HOST/info" ]   && RUN_FLAGS+=(-v "$GITDIR_HOST/info:$GITDIR_CONTAINER/info:ro")
+        # A linked worktree's gitdir holds commondir (the main repository's
+        # .git, where git takes config and hooks from); config.worktree is
+        # read as config. Both redirect the host's git when rewritten.
+        [ -f "$GITDIR_HOST/commondir" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/commondir:$GITDIR_CONTAINER/commondir:ro")
+        [ -f "$GITDIR_HOST/config.worktree" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config.worktree:$GITDIR_CONTAINER/config.worktree:ro")
         info "  Git submodule: gitdir at $GITDIR_CONTAINER"
     fi
 fi
@@ -22300,6 +23248,13 @@ while IFS= read -r _gpf; do
     [ -z "$_gpf" ] && continue
     [ -f "$WORK_DIR/$_gpf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_gpf:$SANDY_WORKSPACE/$_gpf:ro")
 done < <(_sandy_protected_git_files)
+# A .git FILE (a linked worktree or a submodule checkout) names the gitdir the
+# host's git uses, so it is mounted :ro too: rewritten, it would point the
+# host's next git command at a directory the agent furnished. git never writes
+# it in normal use. A .git that is a link is left to the symlink gate.
+if [ -f "$WORK_DIR/.git" ] && [ ! -L "$WORK_DIR/.git" ]; then
+    RUN_FLAGS+=(-v "$WORK_DIR/.git:$SANDY_WORKSPACE/.git:ro")
+fi
 
 # Pre-existing-debris auto-cleanup: previous sandy versions left empty stub
 # dirs on the host that persist across sessions. Auto-remove them at launch
@@ -22412,7 +23367,7 @@ _cfg_hooks_snap="$(_sandy_configured_hooks_rel "$WORK_DIR")"
 while IFS= read -r _pf; do
     [ -z "$_pf" ] && continue
     [ -e "$WORK_DIR/$_pf" ] && echo "$_pf" >> "$SANDBOX_DIR/.protected-existed-at-launch"
-done < <(_sandy_protected_files)
+done < <(_sandy_protected_files; _sandy_watched_git_files)
 # Links already on the way to a watched path at launch (#link lines; the
 # dangerous-symlink gate judged any that leave the workspace), and which object
 # each existing watched path is (#id lines, _sandy_path_identity). The session-end
@@ -22428,7 +23383,7 @@ while IFS= read -r _pd; do
     if [ -n "$_id_snap" ]; then
         printf '#id\t%s\t%s\n' "$_pd" "$_id_snap" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
-done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs; _sandy_protected_files; printf '%s\n' "$_cfg_hooks_snap")
+done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs; _sandy_protected_files; _sandy_watched_git_files; printf '%s\n' "$_cfg_hooks_snap")
 unset _lnk_snap _id_snap
 
 # #80: .git/HEAD is rw in-container (git switch/checkout work). Snapshot the
@@ -22470,7 +23425,11 @@ _protect_submodule_gitdirs() {
     # The same list the by-name symlink sweep judges (_sandy_submodule_gitdirs).
     while IFS= read -r -d '' _sub_dir; do
         _rel="${_sub_dir#$root_host}"  # e.g. "/research/claude-code"
-        RUN_FLAGS+=(-v "$_sub_dir/config:$root_container${_rel}/config:ro")
+        # Existence-gated (2.9.0): a gitdir is found by structure now, and a
+        # missing -v source would be created on the host.
+        if [ -f "$_sub_dir/config" ]; then
+            RUN_FLAGS+=(-v "$_sub_dir/config:$root_container${_rel}/config:ro")
+        fi
         # Submodule hooks/info: existence-gated, same as the top-level
         # protected-dirs loop above. Absent → no mount, no stub. Agent's
         # writes are caught by the session-end detection sweep.
@@ -22480,8 +23439,35 @@ _protect_submodule_gitdirs() {
         if [ -d "$_sub_dir/info" ]; then
             RUN_FLAGS+=(-v "$_sub_dir/info:$root_container${_rel}/info:ro")
         fi
+        # commondir / config.worktree: read by git from any gitdir (2.9.0).
+        if [ -f "$_sub_dir/commondir" ]; then
+            RUN_FLAGS+=(-v "$_sub_dir/commondir:$root_container${_rel}/commondir:ro")
+        fi
+        if [ -f "$_sub_dir/config.worktree" ]; then
+            RUN_FLAGS+=(-v "$_sub_dir/config.worktree:$root_container${_rel}/config.worktree:ro")
+        fi
+        _protect_worktree_admin_dirs "$_sub_dir" "$root_container${_rel}"
     done < <(_sandy_submodule_gitdirs "$root_host")
 }
+# The linked-worktree admin directories of gitdir $1 (container path $2):
+# commondir and config.worktree of each, :ro when present (2.9.0). A
+# repository with many worktrees gets two mounts at most per worktree, plus
+# the ancestor pins (_sandy_pin_mount_ancestors) of each admin directory.
+_protect_worktree_admin_dirs() {
+    local _w _n
+    while IFS= read -r -d '' _w; do
+        _n="${_w##*/}"
+        [ -f "$_w/commondir" ] && RUN_FLAGS+=(-v "$_w/commondir:$2/worktrees/$_n/commondir:ro")
+        [ -f "$_w/config.worktree" ] && RUN_FLAGS+=(-v "$_w/config.worktree:$2/worktrees/$_n/config.worktree:ro")
+    done < <(_sandy_worktree_admin_dirs "$1")
+    return 0
+}
+if [ -d "$WORK_DIR/.git" ] && [ ! -L "$WORK_DIR/.git" ]; then
+    _protect_worktree_admin_dirs "$WORK_DIR/.git" "$SANDY_WORKSPACE/.git"
+fi
+if [ -n "${GITDIR_HOST:-}" ] && [ -n "${GITDIR_CONTAINER:-}" ]; then
+    _protect_worktree_admin_dirs "$GITDIR_HOST" "$GITDIR_CONTAINER"
+fi
 # Regular repo: .git/modules lives under the workspace bind mount.
 _protect_submodule_gitdirs "$WORK_DIR/.git/modules" "$SANDY_WORKSPACE/.git/modules"
 # Separate-gitdir / submodule-worktree: modules live under $GITDIR_HOST, which
@@ -23992,9 +24978,158 @@ if [ -n "$_SANDY_STAGED" ]; then
 fi
 # --- END stale-image launch-staging fallback (#400) -------------------------
 
+# Pin the ancestors of every mount inside the workspace. A bind mount cannot be
+# renamed or removed (EBUSY), but rename(2) of a directory ABOVE one carries it
+# along: an ancestor rename could move protected mounts aside, and what is then
+# created at the old path lands in the host workspace unprotected. So every
+# directory strictly between the workspace root and a path mounted inside it
+# (.git for .git/config and .git/hooks; .git/modules/<m> for a submodule's;
+# .github for .github/workflows; .claude for .claude/settings.json, .claude/hooks
+# and the copy-overlays; .gemini; a nested core.hooksPath's parents; an
+# in-workspace gitdir's parents) is bound onto itself, read-write. Its contents
+# stay as writable as before; the directory itself becomes a mount point that
+# cannot be moved, removed or replaced.
+#
+# Only a directory that exists on the host and is reached from the workspace
+# root through no link at all (_sandy_path_symlink_component) is pinned:
+# nothing is created (Docker makes a missing -v source on the host), and a
+# linked ancestor is never a mount source -- the walk stops at the link, which
+# is the symlink gate's to judge and the launch snapshot's to record. The
+# workspace root is never pinned (it is the workspace mount), nor is a path
+# already mounted (a duplicate destination makes docker refuse). Derived from
+# the assembled argv, like _sandy_symlink_check_mounts, so a new mount site is
+# covered without a list to keep in step.
+#
+# The argv is then rebuilt: everything up to and including the workspace
+# mount, the pins (parents before children), every other mount inside the
+# workspace, then the rest, each group in its original order. Docker sorts
+# mounts by destination depth anyway; the order is written out so it does not
+# rest on that alone.
+#
+# _sandy_pin_clean_rel: workspace-relative destination $1 as Docker mounts it.
+# Docker cleans a -v destination lexically (`a//b`, `a/./b`, `a/x/../b` ->
+# `a/b`), so the mount, and its ancestors, are where the cleaned spelling says
+# (the walk below still stops at a link among them). A `..` above the workspace
+# root prints nothing and returns 1: that destination's ancestors are not
+# pinned. A relative core.hooksPath such as `tools/x/../hooks` is the case this
+# exists for.
+_sandy_pin_clean_rel() {
+    local _rest="$1" _seg _out=""
+    while [ -n "$_rest" ]; do
+        _seg="${_rest%%/*}"
+        case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+        case "$_seg" in
+            ''|.) continue ;;
+            ..) [ -n "$_out" ] || return 1
+                case "$_out" in */*) _out="${_out%/*}" ;; *) _out="" ;; esac ;;
+            *)  _out="${_out:+$_out/}$_seg" ;;
+        esac
+    done
+    [ -n "$_out" ] || return 1
+    printf '%s' "$_out"
+}
+_sandy_pin_under() {   # $1 = anchor host dir  $2 = its container path
+    local _i=0 _n=${#RUN_FLAGS[@]} _spec _dst _rel _rest _seg _p _wsmount _ws_seen=""
+    local _dsts=$'\n' _pins=$'\n'
+    local -a _head=() _pin=() _deep=() _tail=()
+    _wsmount="$1:$2"
+    while [ "$_i" -lt "$_n" ]; do
+        if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
+            _spec="${RUN_FLAGS[$((_i + 1))]}"
+            [ "$_spec" != "$_wsmount" ] || _ws_seen=1
+            _dst="${_spec#*:}"; _dst="${_dst%:ro}"
+            case "$_dst" in
+                "$2"/?*)
+                    if _rel="$(_sandy_pin_clean_rel "${_dst#"$2"/}")"; then
+                        _dsts="$_dsts$_rel"$'\n'
+                    fi ;;
+            esac
+            _i=$((_i + 2)); continue
+        fi
+        _i=$((_i + 1))
+    done
+    [ -n "$_ws_seen" ] || return 0
+    while IFS= read -r _rel; do
+        [ -n "$_rel" ] || continue
+        _p=""; _rest="$_rel"
+        while :; do
+            case "$_rest" in */*) ;; *) break ;; esac
+            _seg="${_rest%%/*}"; _rest="${_rest#*/}"
+            _p="${_p:+$_p/}$_seg"
+            if _sandy_path_symlink_component "$1" "$1/$_p" >/dev/null; then break; fi
+            [ -d "$1/$_p" ] || break
+            case "$_dsts$_pins" in *$'\n'"$_p"$'\n'*) continue ;; esac
+            _pins="$_pins$_p"$'\n'
+            _pin+=(-v "$1/$_p:$2/$_p")
+        done
+    done <<< "$_dsts"
+    [ ${#_pin[@]} -gt 0 ] || return 0
+    _i=0; _ws_seen=""
+    while [ "$_i" -lt "$_n" ]; do
+        if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
+            _spec="${RUN_FLAGS[$((_i + 1))]}"
+            _dst="${_spec#*:}"; _dst="${_dst%:ro}"
+            case "$_dst" in
+                "$2"/?*) _deep+=(-v "$_spec") ;;
+                *)  if [ -n "$_ws_seen" ]; then _tail+=(-v "$_spec"); else _head+=(-v "$_spec"); fi
+                    [ "$_spec" != "$_wsmount" ] || _ws_seen=1 ;;
+            esac
+            _i=$((_i + 2)); continue
+        fi
+        if [ -n "$_ws_seen" ]; then _tail+=("${RUN_FLAGS[$_i]}"); else _head+=("${RUN_FLAGS[$_i]}"); fi
+        _i=$((_i + 1))
+    done
+    # Written back element by element, not by a whole-array assignment: the
+    # argv only grows (every element is kept, the pins are added), so each
+    # index is overwritten and none is left over; and the launch's per-mode
+    # resets stay the only whole-array assignments (§175(6), §191, §225).
+    _i=0
+    for _spec in "${_head[@]}" "${_pin[@]}" ${_deep[@]+"${_deep[@]}"} ${_tail[@]+"${_tail[@]}"}; do
+        RUN_FLAGS[$_i]="$_spec"
+        _i=$((_i + 1))
+    done
+    return 0
+}
+# The workspace, and the gitdir a .git file names when it is mounted outside
+# the workspace (a submodule checkout, --separate-git-dir): its modules/ and
+# worktrees/ carry :ro mounts too, under its own rw mount, so the same walk
+# pins their ancestors there, anchored at that gitdir (2.9.0).
+_sandy_pin_mount_ancestors() {
+    _sandy_pin_under "$WORK_DIR" "$SANDY_WORKSPACE"
+    if [ -n "${GITDIR_HOST:-}" ] && [ -n "${GITDIR_CONTAINER:-}" ]; then
+        case "$GITDIR_CONTAINER/" in
+            "$SANDY_WORKSPACE"/*) ;;
+            *) _sandy_pin_under "$GITDIR_HOST" "$GITDIR_CONTAINER" ;;
+        esac
+    fi
+    return 0
+}
+_sandy_pin_mount_ancestors
+
 # Every -v source in the workspace leaves it only through links the gate
 # judged (B2): a backstop for the by-name sweep, derived from the argv itself.
+# It runs after the pins, so their sources are checked too.
 _sandy_symlink_check_mounts
+
+# The contents of every protected FILE as it ships, and a copy of each, for the
+# session-end report (_sandy_protected_hash_snapshot); then, on macOS, the lock
+# on the most sensitive of them (_sandy_uchg_lock). Both after every host-side
+# write sandy makes into the workspace (the settings.local.json pin included).
+_sandy_protected_hash_snapshot "$SANDBOX_DIR/.protected-existed-at-launch" "$SANDBOX_DIR/.protected-copies"
+# The git admin dirs that exist now (#gitdir lines): one created in-session has
+# no :ro mount, so the session-end sweep reports it.
+while IFS= read -r _gd_snap; do
+    [ -n "$_gd_snap" ] && printf '#gitdir\t%s\n' "$(_sandy_hex "$_gd_snap")" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+done < <(_sandy_git_admin_dirs "$WORK_DIR")
+while IFS=$'\t' read -r _gd_snap _gd_tgt; do
+    [ -n "$_gd_snap" ] && printf '#gitlink\t%s\t%s\n' "$(_sandy_hex "$_gd_snap")" "$_gd_tgt" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+done < <(_sandy_git_admin_links "$WORK_DIR")
+printf '#gitdirs-recorded\n' >> "$SANDBOX_DIR/.protected-existed-at-launch"
+unset _gd_snap _gd_tgt
+_sandy_uchg_lock "$SANDBOX_DIR" "$WORK_DIR"
+if [ -n "${_SANDY_UCHG_LOCKED:-}" ]; then
+    info "Locked until this session ends (macOS chflags uchg):${_SANDY_UCHG_LOCKED}. Host-side writes to them fail until then; 'sandy --unlock' clears a lock a session left behind."
+fi
 
 if [ "$SANDY_VERBOSE" -ge 3 ]; then
     info "Docker run flags:"

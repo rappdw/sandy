@@ -48,6 +48,8 @@ These rules each exist because breaking them shipped a real hole. Keep them when
 - **Approvals resolve on the client's tty, before the supervisor forks** (`SANDY_APPROVE_ONLY` pre-pass). `SANDY_AUTO_APPROVE_PRIVILEGED` covers config keys and the Dockerfile gate. It deliberately does *not* cover the dangerous-symlink gate. (§162, §183)
 - **Allowlists, not blocklists**, for anything that exposes host material (e.g. `SANDY_SSH_KEYS`: the mount itself is the exposure). (§132)
 - **Fail loudly.** A silent no-op that looks like the mechanism working (an unmatched allowlist entry, a dropped duplicate flag, a skipped feature) gets a warning that names the cause.
+- **A mount inside the workspace has every ancestor pinned.** Each existing, link-free directory between the workspace root and a protected or overlay mount is bound onto itself read-write, ahead of the deeper mounts, so it cannot be renamed and carry the mount away (`_sandy_pin_mount_ancestors`, derived from the argv). A link at or above a protected path needs the symlink approval instead. (§246, §248)
+- **A `:ro` file mount does not protect the file on a case-insensitive host.** Every `:ro` file mount is hashed at launch and a change is reported at session end, never auto-restored; on macOS the most sensitive ones are `chflags uchg` for the session, and sandy clears only the flags its record says it set, on the same inode, never through a link (`_sandy_uchg_supported` is the one off switch). (§248)
 - Everything sandy emits as data is UTC (`date -u` or epoch). (§163)
 
 ## Compatibility and versioning
