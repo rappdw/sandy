@@ -162,6 +162,118 @@ done
 
 # --- Helpers ---
 
+# --- BEGIN SANDY_INTEG_COVERAGE ---
+# Every skip in this suite goes through skip(), so this is the one place a
+# skipped section becomes visible. Outside GitHub Actions it prints the ⊘ line
+# and counts it, exactly as before. Under Actions (GITHUB_ACTIONS=true) a run
+# that skipped a section used to end "All N tests passed (K skipped)" and show
+# green, so nothing on the run page said that a whole agent went untested
+# (decision D11). There each skip also prints a ::warning annotation, and the
+# end of the run appends a coverage block to $GITHUB_STEP_SUMMARY. A skip still
+# never turns the run red, and the final line and exit status do not change.
+#
+# Sections that can never run in CI (they need a login file that exists only on
+# a maintainer's host) are "not applicable in CI" under Actions: no warning, not
+# counted as incomplete coverage, but still listed in the summary. They still
+# count in SKIP, so the final line reads the same. Outside Actions they are
+# ordinary skips. Keyed by section id, not by message text:
+#   9   Codex OAuth read-only mount (~/.codex/auth.json)
+#   10  Gemini OAuth (~/.gemini/oauth_creds.json or tokens.json)
+# Kept self-contained (state and functions only) so run-tests.sh §247 can
+# extract this exact block and drive it.
+_INTEG_CI_NA_SECTIONS="9 10"
+_COV_SKIP_COUNT=0
+_COV_SKIP_LINES=()
+_COV_NA_COUNT=0
+_COV_NA_LINES=()
+
+_integ_under_actions() { [ "${GITHUB_ACTIONS:-}" = true ]; }
+
+_integ_section_ci_na() {
+    local _s
+    for _s in $_INTEG_CI_NA_SECTIONS; do
+        if [ "$_s" = "$1" ]; then return 0; fi
+    done
+    return 1
+}
+
+# Workflow-command data escaping (%, CR, LF), so a reason cannot end the
+# annotation early or smuggle in a second command line.
+_integ_annotation_escape() {
+    local _v="$1"
+    _v="${_v//\%/%25}"
+    _v="${_v//$'\r'/%0D}"
+    _v="${_v//$'\n'/%0A}"
+    printf '%s' "$_v"
+}
+
+skip() {
+    SKIP=$((SKIP + 1))
+    local _sec="${_CUR_SECTION_ID:-?}" _what="$*"
+    if _integ_under_actions && _integ_section_ci_na "$_sec"; then
+        _COV_NA_LINES[_COV_NA_COUNT]="section ${_sec}: ${_what}"
+        _COV_NA_COUNT=$((_COV_NA_COUNT + 1))
+        printf "  \033[0;33m⊘ %s (not applicable in CI)\033[0m\n" "$*"
+        return 0
+    fi
+    _COV_SKIP_LINES[_COV_SKIP_COUNT]="section ${_sec}: ${_what}"
+    _COV_SKIP_COUNT=$((_COV_SKIP_COUNT + 1))
+    printf "  \033[0;33m⊘ %s (skipped)\033[0m\n" "$*"
+    if _integ_under_actions; then
+        printf '::warning title=Integration coverage::%s\n' \
+            "$(_integ_annotation_escape "section ${_sec}: skipped (${_what})")"
+    fi
+    return 0
+}
+
+# The coverage block of the job summary, as markdown on stdout.
+_integ_coverage_md() {
+    local _i _desel=0
+    if [ "$_COV_SKIP_COUNT" -gt 0 ]; then
+        printf '### Integration coverage incomplete\n\n'
+        printf '%d skipped:\n\n' "$_COV_SKIP_COUNT"
+        _i=0
+        while [ "$_i" -lt "$_COV_SKIP_COUNT" ]; do
+            printf -- '- %s\n' "${_COV_SKIP_LINES[$_i]}"
+            _i=$((_i + 1))
+        done
+    else
+        printf '### Integration coverage: complete\n'
+    fi
+    if [ "$_COV_NA_COUNT" -gt 0 ]; then
+        printf '\nNot applicable in CI (%d; each needs a host login file, so not counted above):\n\n' "$_COV_NA_COUNT"
+        _i=0
+        while [ "$_i" -lt "$_COV_NA_COUNT" ]; do
+            printf -- '- N/A: %s\n' "${_COV_NA_LINES[$_i]}"
+            _i=$((_i + 1))
+        done
+    fi
+    # A section deselected by SANDY_INTEG_ONLY / SANDY_INTEG_SKIP (a dispatch
+    # input) did not run either. Say so, so "complete" never stands alone.
+    _i=0
+    while [ "$_i" -lt "${_SEC_COUNT:-0}" ]; do
+        if [ "${_SEC_STATES[$_i]}" = deselected ]; then _desel=$((_desel + 1)); fi
+        _i=$((_i + 1))
+    done
+    if [ "$_desel" -gt 0 ]; then
+        printf '\n%d section(s) deselected by SANDY_INTEG_ONLY/SANDY_INTEG_SKIP and not run.\n' "$_desel"
+    fi
+    printf '\n'
+}
+
+# Appends that block to $GITHUB_STEP_SUMMARY, under Actions only and only when
+# it is set. A write error prints one note and returns 0: a report about the
+# run must never be what fails it.
+_integ_coverage_summary() {
+    _integ_under_actions || return 0
+    [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+    if ! _integ_coverage_md 2>/dev/null >>"$GITHUB_STEP_SUMMARY"; then
+        printf "\033[0;33m! could not append the coverage block to GITHUB_STEP_SUMMARY (%s)\033[0m\n" "$GITHUB_STEP_SUMMARY"
+    fi
+    return 0
+}
+# --- END SANDY_INTEG_COVERAGE ---
+
 # --- BEGIN SANDY_INTEG_SECTION_HOOK ---
 # Sentinel pair (mirrors the AUTOGEN sentinel convention used elsewhere in
 # this repo) so run-tests.sh's own suite-hook section can extract this exact,
@@ -174,7 +286,7 @@ done
 info()  { printf "\033[0;36m%s\033[0m\n" "$*"; }
 pass()  { PASS=$((PASS + 1)); printf "  \033[0;32m✓ %s\033[0m\n" "$*"; }
 fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\n" "$*"; }
-skip()  { SKIP=$((SKIP + 1)); printf "  \033[0;33m⊘ %s (skipped)\033[0m\n" "$*"; }
+# skip() lives in the SANDY_INTEG_COVERAGE block above: it also records coverage.
 
 # --- Section timing + selection (SANDY_INTEG_ONLY / SANDY_INTEG_SKIP) ---
 # Clock: bash's builtin SECONDS (integer). BSD date has no %N and bash 3.2 has
@@ -2468,6 +2580,8 @@ else
     fi
 fi
 _print_timing_table
+# Under GitHub Actions: the coverage block of the job summary (D11). Never fails.
+_integ_coverage_summary || true
 
 # `|| true` is not decoration. This is a COSMETIC footer -- a timestamp, a commit
 # id, clean/dirty -- and it runs AFTER COMPLETED=true, so a non-zero return here
