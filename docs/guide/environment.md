@@ -80,6 +80,8 @@ First launch with a new skill pack takes a few minutes (downloading, compiling, 
 
 Skills are automatically discovered by Claude Code at session start. Skill pack `bin/` directories are added to PATH.
 
+gstack keeps its per-project state in the workspace's `.gstack/` directory, which sandy creates if it is missing and mounts read-write at `~/.gstack` in the container. If `.gstack` is a symlink to a directory, the container gets that directory, read-write. So sandy asks you once before the first launch that mounts it, wherever it points (inside the workspace, outside it, outside your home directory), and a launch with no terminal refuses until you have approved it. A `.gstack` link to the workspace itself, to `.git` (or, in a linked worktree, the main repository's `.git`), your `core.hooksPath` directory, `.sandy` or another path sandy keeps read-only (or a directory holding one, or inside one) stops the launch with no prompt, because the container could then change that path through `~/.gstack`. So does a `.gstack` that is a dangling link or a file. Sandy never creates or copies gstack state through a link.
+
 ## GPU support
 
 Sandy can pass host GPUs into the container for ML/AI workloads. This requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed on the host.

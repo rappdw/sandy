@@ -17732,8 +17732,12 @@ _sandy_symlink_classify() {
             # target's contents to the agent wherever it points; it is judged
             # here, and the copy (_sandy_copy_overlay) carries the contents,
             # never the link.
+            # #544: and a path sandy mounts read-write by name
+            # (_sandy_symlink_is_byname_mount_rel: .gstack). Docker mounts
+            # the link's target, so it is judged wherever it points.
             _sl_rel="${link#$WORK_DIR/}"
-            if _sandy_is_protected_rel "$_sl_rel" || _sandy_symlink_is_copied_rel "$_sl_rel"; then
+            if _sandy_is_protected_rel "$_sl_rel" || _sandy_symlink_is_copied_rel "$_sl_rel" \
+               || _sandy_symlink_is_byname_mount_rel "$_sl_rel"; then
                 DANGEROUS_SYMLINKS+=("$_sl_rel -> $target")
                 _SANDY_SL_RELS+=("$_sl_rel"); _SANDY_SL_TGTS+=("$target")
             fi
@@ -17756,6 +17760,12 @@ _sandy_symlink_classify() {
         # learns why it did not appear.
         case "$target" in
             "$SANDY_HOME"|"$SANDY_HOME"/*)
+                # Once per link: the by-name sweep classifies a by-name path
+                # the scan already saw.
+                case "${_SANDY_SL_SHWARN:-}" in
+                    *$'\n'"${link#$WORK_DIR/} -> $target"$'\n'*) return 0 ;;
+                esac
+                _SANDY_SL_SHWARN="${_SANDY_SL_SHWARN:-$'\n'}${link#$WORK_DIR/} -> $target"$'\n'
                 warn "Ignoring symlink into sandy's own state: ${link#$WORK_DIR/} -> $target"
                 warn "  Mounting \$SANDY_HOME into a sandbox would expose operator state the agent must not reach."
                 return 0 ;;
@@ -17909,6 +17919,100 @@ _sandy_symlink_is_copied_rel() {
         .claude/commands|.claude/agents|.claude/plugins|.gemini/extensions|.gemini/commands) return 0 ;;
     esac
     return 1
+}
+
+# #544: the workspace path sandy MOUNTS read-write by name at a fixed
+# container path, outside the protected and copied lists: .gstack, while the
+# gstack skill pack is on (the match the mount site uses). Docker follows a
+# link at a -v source on the host, so a link there mounts its target
+# read-write wherever it points. The gate judges such a link wherever it
+# points, a target outside $HOME included (_sandy_symlink_classify), and the
+# -v check refuses one planted after the gate (_sandy_symlink_path_unjudged).
+# SANDY_SKILL_PACKS is passive, so a workspace .sandy/config can turn this
+# mount on: the link is what needs the approval. Without gstack nothing is
+# mounted there, and a link at .gstack is an ordinary workspace link.
+_sandy_symlink_is_byname_mount_rel() {
+    [ "$1" = .gstack ] || return 1
+    case ",${SANDY_SKILL_PACKS:-}," in *,gstack,*) return 0 ;; esac
+    return 1
+}
+
+# True when canonical paths $1 and $2 are the same, or one lies under the other.
+# With _SANDY_PATH_CI=1 (set by _sandy_gstack_forbidden on macOS, whose
+# default APFS volume is case-insensitive) the comparison ignores case, so
+# `.gstack -> .GIT` is .git however readlink reports the case.
+_sandy_path_overlaps() {
+    local _a="$1" _b="$2"
+    if [ "${_SANDY_PATH_CI:-}" = 1 ]; then
+        _a="$(printf '%s' "$_a" | tr '[:upper:]' '[:lower:]')"
+        _b="$(printf '%s' "$_b" | tr '[:upper:]' '[:lower:]')"
+    fi
+    [ "$_a" = "$_b" ] && return 0
+    [ "$_a" = / ] || [ "$_b" = / ] && return 0
+    case "$_a/" in "$_b"/*) return 0 ;; esac
+    case "$_b/" in "$_a"/*) return 0 ;; esac
+    return 1
+}
+# A .gstack link that no approval can make safe: it resolves (readlink -f,
+# through any chain, relative or absolute) to the workspace or a directory
+# above it, or to a directory that is, holds or lies under .git, the gitdir a
+# .git file names, the directory a commondir file there names (a linked
+# worktree's main .git, whose hooks/ and config the host's git uses), a
+# protected path (E.10: .sandy among them), the in-workspace core.hooksPath
+# directory (mounted :ro, E.10) or a copied tree. The container gets that directory read-write at ~/.gstack, beside the
+# read-only mounts at their workspace paths, so it would write, say, the
+# host's .git/hooks through ~/.gstack/hooks. Prints the path it collides
+# with; read-only (resolves, never writes).
+_sandy_gstack_forbidden() {   # $1 = workspace dir -> prints what it overlaps, returns 0 when forbidden
+    local WORK_DIR="$1" REAL_WORK_DIR _t _p _pt _ga _cd _g _x _w _SANDY_PATH_CI=""
+    [ -L "$WORK_DIR/.gstack" ] || return 1
+    [ "$(uname -s 2>/dev/null)" != Darwin ] || _SANDY_PATH_CI=1
+    _t="$(readlink -f "$WORK_DIR/.gstack" 2>/dev/null || true)"
+    [ -n "$_t" ] || return 1
+    REAL_WORK_DIR="$(cd "$WORK_DIR" 2>/dev/null && pwd -P)" || return 1
+    while case "$REAL_WORK_DIR" in //*) true ;; *) false ;; esac; do REAL_WORK_DIR="${REAL_WORK_DIR#/}"; done
+    # The workspace, or a directory above it (which holds all of it).
+    _x="$_t"; _w="$REAL_WORK_DIR"
+    if [ -n "$_SANDY_PATH_CI" ]; then
+        _x="$(printf '%s' "$_x" | tr '[:upper:]' '[:lower:]')"; _w="$(printf '%s' "$_w" | tr '[:upper:]' '[:lower:]')"
+    fi
+    [ "$_x" != / ] || { printf 'the workspace'; return 0; }
+    case "$_w/" in "$_x"/*) printf 'the workspace'; return 0 ;; esac
+    for _p in .git $(_sandy_protected_files) $(_sandy_protected_dirs) $(_sandy_protected_git_files) $(_sandy_symlink_copied) \
+              $(_sandy_extra_hooks_dir "$WORK_DIR"); do
+        _pt="$(_sandy_symlink_resolve "$_p")"
+        [ -n "$_pt" ] || continue
+        if _sandy_path_overlaps "$_t" "$_pt"; then printf '%s' "$_p"; return 0; fi
+    done
+    _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
+    if [ -n "$_ga" ]; then
+        _pt="$(readlink -f "$_ga" 2>/dev/null || true)"
+        if [ -n "$_pt" ] && _sandy_path_overlaps "$_t" "$_pt"; then printf 'the gitdir .git names'; return 0; fi
+    fi
+    # The commondir of .git or of that gitdir (relative to the gitdir that
+    # holds it, as git reads it).
+    for _g in "$WORK_DIR/.git" ${_ga:+"$_ga"}; do
+        [ -f "$_g/commondir" ] && [ ! -L "$_g/commondir" ] || continue
+        _cd="$(head -n 1 "$_g/commondir" 2>/dev/null)" || continue
+        [ -n "$_cd" ] || continue
+        case "$_cd" in /*) ;; *) _cd="$_g/$_cd" ;; esac
+        _pt="$(cd "$_cd" 2>/dev/null && pwd -P)" || continue
+        if [ -n "$_pt" ] && _sandy_path_overlaps "$_t" "$_pt"; then printf 'the main repository .git (commondir)'; return 0; fi
+    done
+    return 1
+}
+# Refuse the launch for such a link (no prompt: approving it cannot help).
+# Called before the gate, by the gstack preparation and just before docker
+# run, each only while gstack is on.
+_sandy_gstack_refuse_forbidden() {   # $1 = workspace dir
+    local _what
+    _what="$(_sandy_gstack_forbidden "$1")" || return 0
+    error_lit "$1/.gstack is a symlink to $(readlink -f "$1/.gstack" 2>/dev/null), which is, holds or lies under $_what."
+    error_lit "  gstack state is mounted read-write at ~/.gstack, so this would make $_what writable"
+    error_lit "  in the container past its read-only protection. No approval can make that safe."
+    error_lit "  Remove the link, or point it at a directory of its own, and launch again."
+    _sandy_daemon_fatal
+    exit 1
 }
 
 # True when canonical path $1 is the workspace or lies inside it. A bare
@@ -18072,12 +18176,17 @@ _sandy_symlink_walk() {
 # :ro mount or overlay lands wherever the link resolves in the container, where
 # no ancestor can be pinned (_sandy_pin_mount_ancestors walks through no link),
 # and the link itself is an ordinary workspace entry the session can replace or
-# re-point. So the first link on the way to each by-name path (.gstack aside,
-# which is not a protected path), when it resolves inside the workspace, joins
+# re-point. So the first link on the way to each by-name path, when it
+# resolves inside the workspace, joins
 # DANGEROUS_SYMLINKS (and _SANDY_SL_INTERNAL, for the prompt's wording): the
 # one-time approval, no approval on a headless or non-TTY launch, no
 # SANDY_AUTO_APPROVE_PRIVILEGED. Nothing is mounted for it. A link that leaves
 # the workspace is _sandy_symlink_protected_sweep's (below), as before.
+# .gstack (#544, verifier round 1), while gstack is on, is judged the same way
+# for another reason: the container gets what it resolves to read-write at
+# ~/.gstack. It is listed on its own (_SANDY_SL_GSTACK); a target no approval
+# can make safe (.git, a protected path, the workspace) is refused before the
+# gate (_sandy_gstack_refuse_forbidden).
 # True when "LINK -> TARGET" entry $1 came from the internal sweep.
 _sandy_symlink_is_internal_entry() {
     local _e
@@ -18099,7 +18208,8 @@ _sandy_symlink_internal_sweep() {
     _sandy_is_protected_rel . || true
     while IFS= read -r -d '' _p; do
         case "/$_p/" in */node_modules/*|*/.venv*/*) continue ;; esac
-        [ "$_p" != .gstack ] || continue
+        # .gstack is mounted read-write by name only while gstack is on.
+        [ "$_p" != .gstack ] || _sandy_symlink_is_byname_mount_rel .gstack || continue
         _q=""; _rest="$_p"
         while [ -n "$_rest" ]; do
             _q="${_q:+$_q/}${_rest%%/*}"
@@ -18111,6 +18221,7 @@ _sandy_symlink_internal_sweep() {
                     DANGEROUS_SYMLINKS+=("$_q -> $_t")
                     _SANDY_SL_RELS+=("$_q"); _SANDY_SL_TGTS+=("$_t")
                     _SANDY_SL_INTERNAL+=("$_q -> $_t")
+                    [ "$_q" != .gstack ] || _SANDY_SL_GSTACK="$_q -> $_t"
                 fi
                 break
             fi
@@ -18173,8 +18284,9 @@ _sandy_symlink_protected_sweep() {
 # target in $SANDY_HOME is never covered; one that is, or lies under, a
 # target this launch's gate judged is covered (and so is the rest of its
 # tree, until a prefix comes back in); otherwise a target under $HOME, or
-# any target at a protected path, at a copied tree, or at one whose workspace
-# name cannot be told, is printed. A path with no link and no `..` component cannot leave
+# any target at a protected path, at a copied tree, at the path mounted by name
+# (_sandy_symlink_is_byname_mount_rel), or at one whose workspace name cannot
+# be told, is printed. A path with no link and no `..` component cannot leave
 # where it is, so it costs no readlink.
 _sandy_symlink_path_unjudged() {
     local _rest="$1" _w="" _c _any="" _t _in=0 _ent="" _ok="" _q _qp _shp=""
@@ -18198,7 +18310,22 @@ _sandy_symlink_path_unjudged() {
         { [ -e "$_w" ] || [ -L "$_w" ]; } || return 1
         _t="$(readlink -f "$_w" 2>/dev/null || true)"
         [ -n "$_t" ] || return 1
-        if _sandy_symlink_inside "$_t"; then _in=1; _ent=1; continue; fi
+        if _sandy_symlink_inside "$_t"; then
+            # #544: a link at the path mounted read-write by name
+            # (.gstack) that stays in the workspace must be one this
+            # launch's gate judged, at this target.
+            if [ -n "$_ent" ] && [ "$_in" = 1 ] && [ -L "$_w" ]; then
+                _q=""
+                case "$_w/" in */../*) ;; "$WORK_DIR"/*) _q="${_w#"$WORK_DIR"/}" ;; esac
+                if [ -z "$_q" ] && _qp="$(_sandy_ws_physical "$_w")"; then
+                    case "$_qp" in "$WORK_DIR"/*) _q="${_qp#"$WORK_DIR"/}" ;; esac
+                fi
+                if [ -n "$_q" ] && _sandy_symlink_is_byname_mount_rel "$_q" && ! _sandy_symlink_recorded "$_q" "$_t"; then
+                    printf '%s -> %s\n' "$_q" "$_t"; return 0
+                fi
+            fi
+            _in=1; _ent=1; continue
+        fi
         [ -n "$_ent" ] || continue
         [ "$_in" = 0 ] || _ok=""
         _in=0
@@ -18222,23 +18349,40 @@ _sandy_symlink_path_unjudged() {
         esac
         if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
         if [[ "$_t" == "$HOME"/* ]] || { [ -z "$_q" ] && [ -z "$_qp" ]; } \
-           || { [ -n "$_q" ] && { _sandy_is_protected_rel "$_q" || _sandy_symlink_is_copied_rel "$_q"; }; } \
-           || { [ -n "$_qp" ] && { _sandy_is_protected_rel "$_qp" || _sandy_symlink_is_copied_rel "$_qp"; }; }; then
+           || { [ -n "$_q" ] && { _sandy_is_protected_rel "$_q" || _sandy_symlink_is_copied_rel "$_q" || _sandy_symlink_is_byname_mount_rel "$_q"; }; } \
+           || { [ -n "$_qp" ] && { _sandy_is_protected_rel "$_qp" || _sandy_symlink_is_copied_rel "$_qp" || _sandy_symlink_is_byname_mount_rel "$_qp"; }; }; then
             printf '%s -> %s\n' "${_q:-${_qp:-$_w}}" "$_t"; return 0
         fi
     done
     return 1
 }
 
-# Refuse the launch for the "PREFIX -> TARGET" lines in $1.
+# Refuse the launch for the "PREFIX -> TARGET" lines in $1. A target in
+# $SANDY_HOME is never mounted, judged or not, so for one of those the fix is
+# removing the link: launching again cannot help.
 _sandy_symlink_unjudged_refuse() {
-    local _l
+    local _l _t _shp _sh="" _other=""
+    _shp="$(cd "$SANDY_HOME" 2>/dev/null && pwd -P)" || _shp=""
     error "A path sandy mounts or copies by name leaves the workspace through a link the"
     error "symlink check did not judge (added after the check, or a mount it does not know):"
     while IFS= read -r _l; do
-        [ -z "$_l" ] || error "  $_l"
+        [ -n "$_l" ] || continue
+        error "  $_l"
+        _t="${_l#* -> }"
+        case "$_t" in
+            "$SANDY_HOME"|"$SANDY_HOME"/*|"${_shp:-$SANDY_HOME}"|"${_shp:-$SANDY_HOME}"/*) _sh=1 ;;
+            *) _other=1 ;;
+        esac
     done <<< "$1"
-    error "Nothing was started. Launch again: the check then judges the link like any other."
+    if [ -n "$_sh" ]; then
+        error "A link into sandy's own state (\$SANDY_HOME) is never mounted, approved or not:"
+        error "remove it from the workspace."
+    fi
+    if [ -n "$_other" ]; then
+        error "Nothing was started. Launch again: the check then judges the link like any other."
+    else
+        error "Nothing was started."
+    fi
     _sandy_daemon_fatal
     exit 1
 }
@@ -18249,6 +18393,8 @@ _sandy_symlink_unjudged_refuse() {
 # list (_sandy_symlink_byname_rels) does not know of yet.
 _sandy_symlink_check_mounts() {
     local _i=0 _n=${#RUN_FLAGS[@]} _hit _bad=""
+    # #544: re-pointed onto .git, a protected path or the workspace since the gate.
+    if _sandy_symlink_is_byname_mount_rel .gstack; then _sandy_gstack_refuse_forbidden "$WORK_DIR"; fi
     while [ "$_i" -lt "$_n" ]; do
         if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
             if _hit="$(_sandy_symlink_path_unjudged "${RUN_FLAGS[$((_i + 1))]%%:*}")"; then
@@ -18305,6 +18451,17 @@ _sandy_symlink_scan() {
 _sandy_resolve_symlinks() {
     # Check for symlinks that escape the workspace (potential sandbox escape).
     # We track both the display info and the mount info needed to make them work.
+    # Every judgement below resolves links with `readlink -f`; one that does
+    # not work (an old macOS, a readlink without -f first on PATH) would make
+    # every link look unresolvable, which the scan treats as harmless. Fail
+    # closed instead.
+    if ! readlink -f / >/dev/null 2>&1; then
+        error_lit "The symlink check needs \`readlink -f\`, and $(command -v readlink 2>/dev/null || printf 'readlink') does not support it."
+        error_lit "  Without it no link in the workspace can be judged, so nothing was started."
+        error_lit "  Put a readlink that supports -f first on PATH (macOS 12.3 or later has one; or GNU coreutils)."
+        _sandy_daemon_fatal
+        exit 1
+    fi
     REAL_WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
     # `pwd -P` keeps a leading `//` (`--workspace //path`); readlink -f does not,
     # so strip it or nothing inside the workspace would compare as inside.
@@ -18315,8 +18472,14 @@ _sandy_resolve_symlinks() {
     # Parallel arrays: resolved host path and the container path where it should be mounted
     SYMLINK_HOST_PATHS=()
     SYMLINK_CONTAINER_PATHS=()
-    _SANDY_SL_RELS=(); _SANDY_SL_TGTS=(); _SANDY_SL_INTERNAL=()
+    _SANDY_SL_RELS=(); _SANDY_SL_TGTS=(); _SANDY_SL_INTERNAL=(); _SANDY_SL_GSTACK=""; _SANDY_SL_SHWARN=$'\n'
     _sandy_symlink_scan
+    # #544: a .gstack link onto .git, a protected path or the workspace is
+    # refused here, before the gate could offer to approve it (the --start
+    # approval pass included). Report mode only reports.
+    if [ -z "${_SANDY_APPROVE_REPORT:-}" ] && _sandy_symlink_is_byname_mount_rel .gstack; then
+        _sandy_gstack_refuse_forbidden "$WORK_DIR"
+    fi
 
     # `--approvals` report mode (#296): the verdict this gate reaches below,
     # without its writes -- the approved-list refresh (`cp`) runs on EVERY
@@ -18390,14 +18553,21 @@ _sandy_resolve_symlinks() {
                     _sandy_symlink_is_internal_entry "$s" || warn "  $s"
                 done
             fi
-            if [ ${#_SANDY_SL_INTERNAL[@]} -gt 0 ]; then
+            _sl_gs_n=0; [ -z "${_SANDY_SL_GSTACK:-}" ] || _sl_gs_n=1
+            if [ ${#_SANDY_SL_INTERNAL[@]} -gt "$_sl_gs_n" ]; then
                 warn "Symlinks inside the workspace at or above a path sandy protects:"
                 for s in "${_SANDY_SL_INTERNAL[@]}"; do
-                    warn "  $s"
+                    [ "$s" = "${_SANDY_SL_GSTACK:-}" ] || warn "  $s"
                 done
                 printf "\033[0;33m[sandy] Sandy cannot protect a path while it sits under a link: the session could re-point\033[0m\n"
                 printf "\033[0;33m[sandy] or replace the link, and what the link names then reaches your host workspace.\033[0m\n"
             fi
+            if [ -n "${_SANDY_SL_GSTACK:-}" ]; then
+                warn "A .gstack link inside the workspace (gstack state, mounted read-write at ~/.gstack):"
+                warn_lit "  $_SANDY_SL_GSTACK"
+                printf "\033[0;33m[sandy] The container gets the directory it names read-write, beside its place in the workspace.\033[0m\n"
+            fi
+            unset _sl_gs_n
             if [ ${#DANGEROUS_SYMLINKS[@]} -gt ${#_SANDY_SL_INTERNAL[@]} ]; then
                 printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
             fi
@@ -19420,6 +19590,17 @@ _sandy_release_lock() {
     rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true
     return 0
 }
+# The gstack migration's staging directory (_sandy_gstack_prepare), removed
+# when the launch exits before renaming it into place. Called by the interim
+# EXIT trap; empty once the rename is done.
+_SANDY_GSTACK_STAGE=""
+_sandy_gstack_unstage() {
+    local _s="${_SANDY_GSTACK_STAGE:-}"
+    _SANDY_GSTACK_STAGE=""
+    [ -n "$_s" ] || return 0
+    if [ -d "$_s" ] && [ ! -L "$_s" ]; then rm -rf "$_s" 2>/dev/null || true; fi
+    return 0
+}
 
 # --- Bare-sandy-when-daemon-exists gate (DEC-B; milestone 1.1.0, #17 Batch 2) ---
 # A daemon session's #14 lock is held by its supervisor (or, post-reboot, by
@@ -19527,7 +19708,7 @@ echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
 # `trap cleanup EXIT …` later supersedes this and releases the lock itself, so
 # there's no double-free. (Covers normal/`exit` paths in the gap; a bare signal
 # there is the larger trap-restructure tracked for post-rc1.)
-trap '_sandy_release_lock' EXIT
+trap '_sandy_gstack_unstage; _sandy_release_lock' EXIT
 
 SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
@@ -21286,19 +21467,106 @@ fi
 # new workspace location hasn't been touched, copy it over. The legacy dir
 # is renamed to .migrated rather than deleted in case the cp -a was partial
 # and the user wants to recover.
+#
+# #545: the host never writes through a .gstack link. What is there decides:
+#   - nothing: created here, as a directory sandy makes itself (mkdir without
+#     -p, which fails on anything already at the name, a dangling link
+#     included), or, for the migration, copied into a fresh mktemp -d
+#     directory beside it and renamed into place, then checked to be that
+#     directory (a .gstack that appeared in between would have taken the
+#     copy inside it: refused);
+#   - a real directory: used as it is, nothing written;
+#   - a link (at .gstack itself; _sandy_path_symlink_component walks the
+#     path) onto the workspace, .git, the gitdir, a protected path or a
+#     copied tree: refused, no prompt (_sandy_gstack_refuse_forbidden; the
+#     scan and the -v check refuse it too);
+#   - any other link that leads to a directory: nothing written, and the
+#     migration skipped, as it always was for an existing .gstack. The mount
+#     follows the link, so the dangerous-symlink gate judges it wherever it
+#     points (#544: in the workspace, outside $HOME as well as under it;
+#     never into $SANDY_HOME) and
+#     the launch mounts it only after the one-time approval. Kept rather
+#     than refused because a link to shared gstack state worked, after
+#     approval, before this change, and refusing it would remove that;
+#   - a dangling link, a link to a non-directory, or any other non-directory:
+#     refused by name (it used to be a raw "File exists" from mkdir -p under
+#     set -e), with nothing written.
+# The legacy $SANDBOX_DIR/gstack is read only when it is a real directory: an
+# older sandy mounted it read-write into the container, so a link there was
+# the agent's.
+_sandy_gstack_refuse() {   # $1 = what is wrong
+    error_lit "$1"
+    error_lit "  gstack state lives in the workspace's .gstack directory, which the container"
+    error_lit "  mounts read-write; sandy never creates or copies it through a link."
+    error_lit "  Remove it, or make it a directory (or a link to one), and launch again."
+    _sandy_daemon_fatal
+    exit 1
+}
+# The mv flag that renames onto a link instead of into the directory it names
+# (GNU -T, BSD -h), or nothing when this mv has neither. Probed on a file in a
+# scratch directory of its own: a flag mv does not know fails, and one it
+# knows replaces the link, leaving the directory it named empty.
+_sandy_mv_nofollow_flag() {
+    local _d _f
+    _d="$(mktemp -d 2>/dev/null)" || return 0
+    for _f in -T -h; do
+        rm -rf "$_d/a" "$_d/b" "$_d/l"
+        mkdir "$_d/b" && : > "$_d/a" && ln -s b "$_d/l" || break
+        if mv "$_f" "$_d/a" "$_d/l" 2>/dev/null && [ -f "$_d/l" ] && [ ! -L "$_d/l" ] && [ -z "$(ls -A "$_d/b")" ]; then
+            printf '%s' "$_f"; break
+        fi
+    done
+    rm -rf "$_d"
+    return 0
+}
+_sandy_gstack_prepare() {   # $1 = workspace dir  $2 = sandbox dir
+    local _ws="$1" _sb="$2" _g="$1/.gstack" _lnk _tmp _mode _mvf _in
+    if _lnk="$(_sandy_path_symlink_component "$_ws" "$_g")"; then
+        # Onto .git, a protected path or the workspace: no approval helps.
+        _sandy_gstack_refuse_forbidden "$_ws"
+        [ -d "$_g" ] && return 0     # judged by the dangerous-symlink gate
+        _sandy_gstack_refuse "$_g is a symlink that does not lead to a directory (-> $(readlink "$_g" 2>/dev/null || printf '?')): not using it for gstack state."
+    fi
+    if [ -e "$_g" ]; then
+        [ -d "$_g" ] && return 0
+        _sandy_gstack_refuse "$_g exists and is not a directory: not using it for gstack state."
+    fi
+    if [ -d "$_sb/gstack" ] && [ ! -L "$_sb/gstack" ] && [ -n "$(ls -A "$_sb/gstack" 2>/dev/null)" ]; then
+        info "migrating gstack state: $_sb/gstack -> $_g"
+        _mvf="$(_sandy_mv_nofollow_flag)"
+        _tmp="$(mktemp -d "$_ws/.gstack.XXXXXX")" \
+            || _sandy_gstack_refuse "cannot create a staging directory in $_ws for the gstack state migration."
+        _SANDY_GSTACK_STAGE="$_tmp"     # removed by the EXIT trap if the launch stops before the rename
+        # mktemp -d makes it 0700; give it what mkdir would have.
+        _mode="$(umask)"; _mode="$(printf '%o' $(( 0777 & ~0$_mode )))"
+        chmod "$_mode" "$_tmp" 2>/dev/null || true
+        cp -a "$_sb/gstack/." "$_tmp/" 2>/dev/null || true
+        # The rename, with -T/-h, fails on a link that appeared at .gstack
+        # (a directory cannot be renamed over a link) instead of moving the
+        # copy into where it points. A plain mv (neither flag) is checked
+        # after: a copy that went into a directory there is named.
+        if [ -e "$_g" ] || [ -L "$_g" ] || ! mv ${_mvf:+"$_mvf"} "$_tmp" "$_g" 2>/dev/null \
+           || [ -L "$_g" ] || [ ! -d "$_g" ] || [ -e "$_g/${_tmp##*/}" ]; then
+            if [ -d "$_tmp" ] && [ ! -L "$_tmp" ]; then
+                rm -rf "$_tmp"; _SANDY_GSTACK_STAGE=""
+                _sandy_gstack_refuse "$_g appeared while the gstack state was being migrated to it: not using it."
+            fi
+            _SANDY_GSTACK_STAGE=""
+            _in="$(readlink -f "$_g" 2>/dev/null || printf '%s' "$_g")/${_tmp##*/}"
+            _sandy_gstack_refuse "$_g appeared while the gstack state was being migrated to it, and the migrated copy went into $_in: check that directory and remove the copy."
+        fi
+        _SANDY_GSTACK_STAGE=""
+        mv "$_sb/gstack" "$_sb/gstack.migrated" 2>/dev/null || true
+        return 0
+    fi
+    # Ensure the bind-mount target exists. Docker would auto-create it as root
+    # otherwise; we want it owned by the workspace user instead.
+    mkdir "$_g" 2>/dev/null || _sandy_gstack_refuse "cannot create $_g for gstack state (did something appear there?)."
+    return 0
+}
 case ",${SANDY_SKILL_PACKS:-}," in
     *,gstack,*)
-        if [ -d "$SANDBOX_DIR/gstack" ] && [ ! -d "$WORK_DIR/.gstack" ]; then
-            if [ -n "$(ls -A "$SANDBOX_DIR/gstack" 2>/dev/null)" ]; then
-                info "migrating gstack state: $SANDBOX_DIR/gstack -> $WORK_DIR/.gstack"
-                mkdir -p "$WORK_DIR/.gstack"
-                cp -a "$SANDBOX_DIR/gstack/." "$WORK_DIR/.gstack/" 2>/dev/null || true
-                mv "$SANDBOX_DIR/gstack" "$SANDBOX_DIR/gstack.migrated" 2>/dev/null || true
-            fi
-        fi
-        # Ensure the bind-mount target exists. Docker would auto-create it
-        # as root otherwise; we want it owned by the workspace user instead.
-        mkdir -p "$WORK_DIR/.gstack"
+        _sandy_gstack_prepare "$WORK_DIR" "$SANDBOX_DIR"
         # Nudge the user toward gitignoring it. Only nag in a git workspace,
         # and only when not already ignored. Use `git check-ignore` if
         # available so we honor patterns from any source (.gitignore,

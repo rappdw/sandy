@@ -28672,6 +28672,383 @@ check "§250(d) SANDY_AGENT=claude, runs as SANDY_AGENT=claude with the claude i
 unset _S250_PATH _S250_CWS _S250_C _S250_W _S250_A _S250_O _S250_R
 unset -f _s250_ws
 
+section "§251: a workspace .gstack link is judged by the dangerous-symlink gate wherever it points, and sandy never creates or migrates gstack state through one (#544, #545)"
+# ============================================================
+# WHY. With the gstack pack on (SANDY_SKILL_PACKS is passive, so a workspace
+# .sandy/config can turn it on), the launch mounts $WORK_DIR/.gstack
+# read-write at ~/.gstack, and Docker follows a link at a -v source on the
+# host. #544: the gate judged a link outside $HOME only at a protected path or
+# a copied tree, so `.gstack -> <dir outside $HOME>` was mounted read-write
+# with no prompt. #545: the host prepared .gstack with `mkdir -p` and copied
+# the legacy $SANDBOX_DIR/gstack into it, a write through whatever the path
+# held. Asserted on real launches (the A6 stubs), plus the -v check and the
+# migration's last step on their own:
+#   (a) .gstack -> outside $HOME, gstack from the workspace config, no
+#       terminal: the gate refuses a first encounter, naming the link, even
+#       with SANDY_AUTO_APPROVE_PRIVILEGED=1; no agent run, nothing written
+#       to the target;
+#   (b) the same link approved: mounted, nothing written to the target
+#       (a link to a directory is kept, after approval, under $HOME or not);
+#   (c) the -v check refuses .gstack -> outside $HOME that the gate did not
+#       judge (planted after it), and only while gstack is on;
+#   (d) a dangling .gstack link, a .gstack file, and a dangling link with a
+#       legacy $SANDBOX_DIR/gstack to migrate: refused by name, nothing
+#       created where the link points, the legacy directory untouched;
+#   (e) the migration with nothing at .gstack: a real directory holding the
+#       legacy state, no staging directory left, the legacy one renamed; a
+#       legacy directory that is a link is not read;
+#   (f) a .gstack that appears between the checks and the rename into place
+#       (planted from a stub cp) is refused, and the copy does not land in
+#       where it points; (f2) the same at the rename itself (mv -T / -h);
+#   (i) a launch stopped mid-migration leaves no staging directory;
+#   (j) the -v check: an in-workspace .gstack link the gate did not judge, and
+#       one re-pointed onto .git, are refused;
+#   (k) .gstack -> .git, .sandy or . is refused with no prompt, approved or
+#       not, by the launch and by the --start approval pass (the container
+#       would get .git/hooks read-write through ~/.gstack); .gstack -> an
+#       ordinary workspace directory needs the approval, and is mounted once
+#       approved;
+#   (l) .gstack -> $SANDY_HOME is warned about once and refused with
+#       "remove it", not "launch again".
+_S251_SKV=(A6_NET=1 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_s251_ws() {   # $1 = CASE: a workspace whose .sandy/config turns gstack on
+    mkdir -p "$_A6_DIR/$1/ws/.sandy"
+    printf 'SANDY_SKILL_PACKS=gstack\n' > "$_A6_DIR/$1/ws/.sandy/config"
+}
+# The agent run's -v value for the .gstack mount, or nothing.
+_s251_gmount() {   # $1 = CASE
+    local a
+    a="$(_a6_agent_args "$1")"
+    [ -n "$a" ] || return 0
+    awk 'p=="-v" && /:\/home\/sandy\/\.gstack$/ {print} {p=$0}' "$a"
+}
+
+# (a) first encounter, no terminal: refused at the gate.
+_S251_C=s251a; _S251_O="$_A6_DIR/$_S251_C-out"
+_s251_ws "$_S251_C"; mkdir -p "$_S251_O"; ln -s "$_S251_O" "$_A6_DIR/$_S251_C/ws/.gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}" SANDY_AUTO_APPROVE_PRIVILEGED=1
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -q "need interactive approval" "$_A6_DIR/$_S251_C/out" || echo "not refused at the symlink gate"
+    grep -qF ".gstack -> $_S251_O" "$_A6_DIR/$_S251_C/out" || echo "the link is not named"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"
+    [ -z "$(ls -A "$_S251_O")" ] || echo "written to the target: $(ls -A "$_S251_O" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(a)" "$_S251_C"
+check "§251(a) .gstack -> a directory outside \$HOME, gstack on from the workspace config, no terminal: the gate refuses the first encounter, naming it, though SANDY_AUTO_APPROVE_PRIVILEGED=1; no agent run, nothing written to the target (mutation: .gstack not judged outside \$HOME in _sandy_symlink_classify; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (b) the same link, approved: mounted, and the host wrote nothing through it.
+_S251_C=s251b; _S251_O="$_A6_DIR/$_S251_C-out"
+_s251_ws "$_S251_C"; mkdir -p "$_S251_O"; ln -s "$_S251_O" "$_A6_DIR/$_S251_C/ws/.gstack"
+mkdir -p "$(_a6_sandbox "$_S251_C")"; printf '%s\n' ".gstack -> $_S251_O" > "$(_a6_sandbox "$_S251_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ "$(_s251_gmount "$_S251_C")" = "$_A6_DIR/$_S251_C/ws/.gstack:/home/sandy/.gstack" ] || echo "gstack mount: '$(_s251_gmount "$_S251_C")'"
+    [ -L "$_A6_DIR/$_S251_C/ws/.gstack" ] || echo "the link was replaced"
+    [ -z "$(ls -A "$_S251_O")" ] || echo "written to the target: $(ls -A "$_S251_O" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(b)" "$_S251_C"
+check "§251(b) control: that link, approved, launches with .gstack mounted and the link left as it is, nothing written through it by the host (${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (c) the -v check on its own: .gstack -> outside $HOME not judged by the gate.
+_S251_D="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
+          _sandy_symlink_is_byname_mount_rel _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts _sandy_path_overlaps _sandy_gstack_forbidden \
+          _sandy_gstack_refuse_forbidden _sandy_symlink_resolve _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host _sandy_symlink_recorded \
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S251_D/fns.sh"
+done
+unset _f
+mkdir -p "$_S251_D/h/ws" "$_S251_D/out"
+ln -s "$_S251_D/out" "$_S251_D/h/ws/.gstack"
+_s251_chk() {   # $1 = SANDY_SKILL_PACKS -> what the check prints, then rc=
+    ( trap - ERR; set +e
+      error() { printf '%s\n' "$*"; }; warn() { :; }; _sandy_daemon_fatal() { :; }
+      . "$_S251_D/fns.sh"
+      HOME="$_S251_D/h"; SANDY_HOME="$_S251_D/h/.sandy"; WORK_DIR="$_S251_D/h/ws"; REAL_WORK_DIR="$WORK_DIR"
+      SANDY_SKILL_PACKS="$1"
+      _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
+      RUN_FLAGS=(-v "$WORK_DIR:/w" -v "$WORK_DIR/.gstack:/home/sandy/.gstack")
+      _sandy_symlink_check_mounts; echo "rc=$?" ) 2>&1 || true
+}
+_S251_R1="$(_s251_chk gstack)"; _S251_R2="$(_s251_chk "")"
+check "§251(c) the -v check refuses .gstack -> outside \$HOME that the gate did not judge (a link planted after it) while gstack is on, and leaves it alone with gstack off, when nothing is mounted there (mutation: .gstack not counted in _sandy_symlink_path_unjudged; got: $(printf '%s' "$_S251_R1" | tr '\n' ' ')/$(printf '%s' "$_S251_R2" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  .gstack -> $3/out" && ! printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$2" | grep -qx "rc=0"' _ "$_S251_R1" "$_S251_R2" "$_S251_D"
+
+# (d) refused by name, nothing created: a dangling link; a file; a dangling
+# link with a legacy directory to migrate.
+_S251_C=s251d; _S251_O="$_A6_DIR/$_S251_C-out"
+_s251_ws "$_S251_C"; mkdir -p "$_S251_O"; ln -s "$_S251_O/state" "$_A6_DIR/$_S251_C/ws/.gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "$_A6_DIR/$_S251_C/ws/.gstack is a symlink that does not lead to a directory" "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+    if grep -q "File exists" "$_A6_DIR/$_S251_C/out"; then echo "the raw mkdir error"; fi
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"
+    [ -z "$(ls -A "$_S251_O")" ] || echo "created where the link points: $(ls -A "$_S251_O" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(d1)" "$_S251_C"
+check "§251(d1) a dangling .gstack link is refused by name before anything is written, not with mkdir -p's raw \"File exists\"; nothing is created where it points (mutation: the link guard in _sandy_gstack_prepare removed; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+_S251_C=s251f
+_s251_ws "$_S251_C"; printf 'not a dir\n' > "$_A6_DIR/$_S251_C/ws/.gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "$_A6_DIR/$_S251_C/ws/.gstack exists and is not a directory" "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"
+    [ "$(cat "$_A6_DIR/$_S251_C/ws/.gstack")" = "not a dir" ] || echo "the file was changed"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(d2)" "$_S251_C"
+check "§251(d2) a .gstack that is a regular file is refused by name and left as it is (${_S251_R:-ok})" \
+    test -z "$_S251_R"
+_S251_C=s251m; _S251_O="$_A6_DIR/$_S251_C-out"
+_s251_ws "$_S251_C"; mkdir -p "$_S251_O"; ln -s "$_S251_O/state" "$_A6_DIR/$_S251_C/ws/.gstack"
+mkdir -p "$(_a6_sandbox "$_S251_C")/gstack"; printf 'legacy\n' > "$(_a6_sandbox "$_S251_C")/gstack/state.json"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "is a symlink that does not lead to a directory" "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+    [ -z "$(ls -A "$_S251_O")" ] || echo "created where the link points: $(ls -A "$_S251_O" | tr '\n' ' ')"
+    [ -f "$(_a6_sandbox "$_S251_C")/gstack/state.json" ] || echo "the legacy directory was moved"
+    [ -z "$(cd "$_A6_DIR/$_S251_C/ws" && ls -d .gstack.* 2>/dev/null)" ] || echo "a staging directory was left"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(d3)" "$_S251_C"
+check "§251(d3) a dangling .gstack link with a legacy \$SANDBOX_DIR/gstack to migrate: refused by name, nothing created where the link points, the legacy directory left in place (mutation: the link guard removed; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (e) the migration with nothing at .gstack, and a legacy directory that is a
+# link (an older sandy mounted it read-write into the container).
+_S251_C=s251e
+_s251_ws "$_S251_C"
+mkdir -p "$(_a6_sandbox "$_S251_C")/gstack/sub"; printf 'legacy\n' > "$(_a6_sandbox "$_S251_C")/gstack/sub/state.json"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_W="$_A6_DIR/$_S251_C/ws"
+_S251_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    { [ -d "$_S251_W/.gstack" ] && [ ! -L "$_S251_W/.gstack" ]; } || echo ".gstack is not a real directory"
+    [ "$(cat "$_S251_W/.gstack/sub/state.json" 2>/dev/null)" = legacy ] || echo "the legacy state was not migrated"
+    [ -z "$(cd "$_S251_W" && ls -d .gstack.* 2>/dev/null)" ] || echo "a staging directory was left"
+    [ -d "$(_a6_sandbox "$_S251_C")/gstack.migrated" ] || echo "the legacy directory was not renamed"
+    [ "$(_s251_gmount "$_S251_C")" = "$_S251_W/.gstack:/home/sandy/.gstack" ] || echo "gstack mount: '$(_s251_gmount "$_S251_C")'"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(e1)" "$_S251_C"
+check "§251(e1) control: with nothing at .gstack the legacy state is migrated into a real .gstack directory (staged and renamed into place, no staging directory left, the legacy one renamed .migrated) and mounted (${_S251_R:-ok})" \
+    test -z "$_S251_R"
+_S251_C=s251l; _S251_O="$_A6_DIR/$_S251_C-out"
+_s251_ws "$_S251_C"; mkdir -p "$_S251_O" "$(_a6_sandbox "$_S251_C")"; printf 'S251-OUTSIDE\n' > "$_S251_O/secret"
+ln -s "$_S251_O" "$(_a6_sandbox "$_S251_C")/gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    { [ -d "$_A6_DIR/$_S251_C/ws/.gstack" ] && [ ! -L "$_A6_DIR/$_S251_C/ws/.gstack" ]; } || echo ".gstack is not a real directory"
+    [ ! -e "$_A6_DIR/$_S251_C/ws/.gstack/secret" ] || echo "the link target was copied into .gstack"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(e2)" "$_S251_C"
+check "§251(e2) a legacy \$SANDBOX_DIR/gstack that is a link is not read: .gstack is created empty, nothing copied from where the link points (mutation: the -L test on the legacy directory dropped; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (f) the last step: a .gstack link appears while the state is copied into the
+# staging directory (a cp stub plants it), so the rename would move the copy
+# into wherever it points.
+for _f in _sandy_path_symlink_component _sandy_gstack_refuse _sandy_gstack_prepare _sandy_mv_nofollow_flag _sandy_gstack_unstage; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S251_D/prep.sh"
+done
+unset _f
+mkdir -p "$_S251_D/f/ws" "$_S251_D/f/sb/gstack" "$_S251_D/f/out"; printf 'legacy\n' > "$_S251_D/f/sb/gstack/state.json"
+_S251_R="$( ( trap - ERR; set +e
+    error_lit() { printf '%s\n' "$*"; }; info() { :; }; _sandy_daemon_fatal() { :; }
+    cp() { command cp "$@"; ln -s "$_S251_D/f/out" "$_S251_D/f/ws/.gstack"; }
+    . "$_S251_D/prep.sh"
+    _sandy_gstack_prepare "$_S251_D/f/ws" "$_S251_D/f/sb"; echo "rc=$?" ) 2>&1 || true)"
+check "§251(f) a .gstack link that appears between the checks and the rename into place is refused, and the staged copy does not land where it points (mutation: the existence check before the mv dropped; got: $(printf '%s' "$_S251_R" | tr '\n' ' '); out: $(ls -A "$_S251_D/f/out" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "appeared while the gstack state was being migrated" && ! printf "%s\n" "$1" | grep -qx "rc=0" && test -z "$(ls -A "$2")" && test -z "$(cd "$3" && ls -d .gstack.* 2>/dev/null)" && test -f "$4/gstack/state.json"' \
+    _ "$_S251_R" "$_S251_D/f/out" "$_S251_D/f/ws" "$_S251_D/f/sb"
+# (f2) the link appears at the rename itself (an mv stub plants it just
+# before the real rename). With GNU -T or BSD -h the rename fails on the link
+# and nothing reaches where it points; with neither, the copy goes in there
+# and the refusal names where.
+rm -rf "$_S251_D/f"
+mkdir -p "$_S251_D/f/ws" "$_S251_D/f/sb/gstack" "$_S251_D/f/out"; printf 'legacy\n' > "$_S251_D/f/sb/gstack/state.json"
+_S251_MVF="$( ( trap - ERR; set +e; . "$_S251_D/prep.sh"; _sandy_mv_nofollow_flag ) 2>/dev/null || true)"
+_S251_R="$( ( trap - ERR; set +e
+    error_lit() { printf '%s\n' "$*"; }; info() { :; }; _sandy_daemon_fatal() { :; }; _sandy_gstack_refuse_forbidden() { :; }
+    mv() { eval "_l=\${$#}"; if [ "$_l" = "$_S251_D/f/ws/.gstack" ]; then ln -s "$_S251_D/f/out" "$_l"; fi; command mv "$@"; }
+    . "$_S251_D/prep.sh"
+    _sandy_gstack_prepare "$_S251_D/f/ws" "$_S251_D/f/sb"; echo "rc=$?" ) 2>&1 || true)"
+_S251_OK=0
+{ printf '%s\n' "$_S251_R" | grep -qF "appeared while the gstack state was being migrated" && ! printf '%s\n' "$_S251_R" | grep -qx "rc=0" \
+  && if [ -n "$_S251_MVF" ]; then [ -z "$(ls -A "$_S251_D/f/out")" ]; else printf '%s\n' "$_S251_R" | grep -qF "the migrated copy went into $_S251_D/f/out/.gstack."; fi \
+  && [ -z "$(cd "$_S251_D/f/ws" && ls -d .gstack.* 2>/dev/null)" ]; } || _S251_OK=1
+check "§251(f2) a .gstack link that appears at the rename itself is refused; with this host's mv flag (${_S251_MVF:-none}) the rename fails on the link and nothing lands where it points, with neither flag the refusal names where the copy went (mutation: the -T/-h flag not passed to mv; got: $(printf '%s' "$_S251_R" | tr '\n' ' '); out: $(ls -A "$_S251_D/f/out" | tr '\n' ' '))" \
+    test "$_S251_OK" = 0
+
+# (i) a launch that stops between mktemp and the rename leaves no staging
+# directory: the EXIT trap removes it (here a cp stub exits mid-copy).
+rm -rf "$_S251_D/f"
+mkdir -p "$_S251_D/f/ws" "$_S251_D/f/sb/gstack"; printf 'legacy\n' > "$_S251_D/f/sb/gstack/state.json"
+( trap - ERR; set +e
+  error_lit() { :; }; info() { :; }; _sandy_daemon_fatal() { :; }
+  cp() { exit 3; }
+  . "$_S251_D/prep.sh"
+  _SANDY_GSTACK_STAGE=""
+  trap '_sandy_gstack_unstage' EXIT
+  _sandy_gstack_prepare "$_S251_D/f/ws" "$_S251_D/f/sb" ) >/dev/null 2>&1 || true
+check "§251(i) a launch that stops mid-migration leaves no <ws>/.gstack.XXXXXX staging directory behind, and nothing at .gstack (mutation: the staging path not recorded for the EXIT trap; left: $(cd "$_S251_D/f/ws" && ls -A | tr '\n' ' '))" \
+    bash -c 'test -z "$(cd "$1" && ls -A)"' _ "$_S251_D/f/ws"
+check "§251(i2) the interim EXIT trap runs the staging cleanup (mutation: _sandy_gstack_unstage dropped from it)" \
+    grep -qxF "trap '_sandy_gstack_unstage; _sandy_release_lock' EXIT" "$SANDY_SCRIPT"
+
+# (j) the -v check, for a .gstack link that stays in the workspace: one the
+# gate did not judge at this target is refused, a judged one passes; and one
+# re-pointed onto .git since the gate is refused even when judged, as no
+# approval can cover it.
+mkdir -p "$_S251_D/j/h/ws/sub/plain" "$_S251_D/j/h/ws/.git/hooks"
+_s251_jchk() {   # $1 = .gstack target (workspace-relative)  $2 = recorded target or "" -> output, rc=
+    rm -f "$_S251_D/j/h/ws/.gstack"; ln -s "$1" "$_S251_D/j/h/ws/.gstack"
+    ( trap - ERR; set +e
+      error() { printf '%s\n' "$*"; }; error_lit() { printf '%s\n' "$*"; }; warn() { :; }; _sandy_daemon_fatal() { :; }
+      . "$_S251_D/fns.sh"
+      HOME="$_S251_D/j/h"; SANDY_HOME="$_S251_D/j/h/.sandy"; WORK_DIR="$_S251_D/j/h/ws"; REAL_WORK_DIR="$WORK_DIR"
+      SANDY_SKILL_PACKS=gstack
+      _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
+      if [ -n "$2" ]; then _SANDY_SL_RELS+=(.gstack); _SANDY_SL_TGTS+=("$WORK_DIR/$2"); fi
+      RUN_FLAGS=(-v "$WORK_DIR:/w" -v "$WORK_DIR/.gstack:/home/sandy/.gstack")
+      _sandy_symlink_check_mounts; echo "rc=$?" ) 2>&1 || true
+}
+_S251_J1="$(_s251_jchk sub/plain "")"; _S251_J2="$(_s251_jchk sub/plain sub/plain)"; _S251_J3="$(_s251_jchk .git .git)"
+check "§251(j) the -v check refuses a .gstack link inside the workspace the gate did not judge at its target, passes one it judged, and refuses .gstack -> .git even judged (mutation: in-workspace .gstack not checked in _sandy_symlink_path_unjudged / the forbidden check dropped from _sandy_symlink_check_mounts; got: $(printf '%s|' "$_S251_J1" "$_S251_J2" "$_S251_J3" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  .gstack -> $4/j/h/ws/sub/plain" && ! printf "%s\n" "$1" | grep -qx "rc=0" \
+             && printf "%s\n" "$2" | grep -qx "rc=0" \
+             && printf "%s\n" "$3" | grep -qF "which is, holds or lies under .git" && ! printf "%s\n" "$3" | grep -qx "rc=0"' \
+    _ "$_S251_J1" "$_S251_J2" "$_S251_J3" "$_S251_D"
+unset _S251_J1 _S251_J2 _S251_J3 _S251_MVF _S251_OK
+unset -f _s251_jchk
+
+# (k) launches: .gstack onto .git, .sandy or the workspace is refused, named,
+# nothing mounted, though the link is on the approved list; a .gstack link to
+# an ordinary workspace directory needs the approval (no terminal: refused)
+# and, approved, is mounted.
+_s251_k() {   # $1 = CASE  $2 = .gstack target  $3 = approve (1) or not
+    _s251_ws "$1"; mkdir -p "$_A6_DIR/$1/ws/sub/plain"
+    git -C "$_A6_DIR/$1/ws" init -q 2>/dev/null || mkdir -p "$_A6_DIR/$1/ws/.git/hooks"
+    ln -s "$2" "$_A6_DIR/$1/ws/.gstack"
+    if [ "$3" = 1 ]; then
+        mkdir -p "$(_a6_sandbox "$1")"
+        printf '%s\n' ".gstack -> $(cd "$_A6_DIR/$1/ws/$2" && pwd -P)" > "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list"
+    fi
+    _a6_launch "$1" "${_S251_SKV[@]}"
+}
+for _S251_K in git:.git:.git sandy:.sandy:.sandy dot:.:the\ workspace; do
+    _S251_C="s251k-${_S251_K%%:*}"; _S251_T="${_S251_K#*:}"; _S251_W="${_S251_T#*:}"; _S251_T="${_S251_T%%:*}"
+    _s251_k "$_S251_C" "$_S251_T" 1
+    _S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+        grep -qF "which is, holds or lies under $_S251_W." "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+        [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"
+        if grep -rqsF -- ":/home/sandy/.gstack" "$_A6_DIR/$_S251_C/runs"; then echo ".gstack mounted"; fi; } 2>&1)" || true
+    [ -z "$_S251_R" ] || _a6_diag "§251(k) $_S251_T" "$_S251_C"
+    check "§251(k) .gstack -> $_S251_T, gstack on from the workspace config, on the approved list: refused before the gate, naming $_S251_W; no agent run, nothing mounted (mutation: all three forbidden-target refusals dropped -- the preparation, the scan, the -v check; a dropped .git, protected-dir or workspace test; ${_S251_R:-ok})" \
+        test -z "$_S251_R"
+done
+# The --start approval pass (SANDY_APPROVE_ONLY) refuses it too, on the
+# client's terminal, before any supervisor: the gstack preparation never runs
+# there, so the scan's own refusal is what stops it.
+_S251_C=s251k-pass
+_s251_ws "$_S251_C"; git -C "$_A6_DIR/$_S251_C/ws" init -q 2>/dev/null || mkdir -p "$_A6_DIR/$_S251_C/ws/.git/hooks"
+ln -s .git "$_A6_DIR/$_S251_C/ws/.gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_A6_DIR/$_S251_C/result" --
+check "§251(k-pass) the --start approval pass refuses .gstack -> .git by name, before any prompt (mutation: the forbidden-target refusal dropped from _sandy_resolve_symlinks; rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" != 0 && grep -qF "which is, holds or lies under .git." "$2" && ! grep -q "need interactive approval" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S251_C/out"
+_S251_C=s251k-plain
+_s251_k "$_S251_C" sub/plain 0
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -q "need interactive approval" "$_A6_DIR/$_S251_C/out" || echo "not refused at the symlink gate"
+    grep -qF ".gstack -> $_A6_DIR/$_S251_C/ws/sub/plain" "$_A6_DIR/$_S251_C/out" || echo "the link is not named"
+    grep -qF "A .gstack link inside the workspace" "$_A6_DIR/$_S251_C/out" || echo "not listed as a .gstack link"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(k-plain)" "$_S251_C"
+check "§251(k-plain) .gstack -> an ordinary workspace directory, no terminal: the gate lists it as a .gstack link and refuses the first encounter; no agent run (mutation: .gstack skipped by _sandy_symlink_internal_sweep again; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+_S251_C=s251k-plainok
+_s251_k "$_S251_C" sub/plain 1
+_S251_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ "$(_s251_gmount "$_S251_C")" = "$_A6_DIR/$_S251_C/ws/.gstack:/home/sandy/.gstack" ] || echo "gstack mount: '$(_s251_gmount "$_S251_C")'"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(k-plainok)" "$_S251_C"
+check "§251(k-plainok) control: that link, approved, launches with .gstack mounted (${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (k-hooks) the in-workspace core.hooksPath directory (mounted :ro, E.10), and
+# (k-common) a linked worktree's main .git (its commondir), are refused too:
+# both hold hooks the host's git runs.
+_S251_C=s251k-hooks
+_s251_ws "$_S251_C"; mkdir -p "$_A6_DIR/$_S251_C/ws/tools/hooks"
+git -C "$_A6_DIR/$_S251_C/ws" init -q
+git -C "$_A6_DIR/$_S251_C/ws" config core.hooksPath tools/hooks
+ln -s tools/hooks "$_A6_DIR/$_S251_C/ws/.gstack"
+mkdir -p "$(_a6_sandbox "$_S251_C")"
+printf '%s\n' ".gstack -> $_A6_DIR/$_S251_C/ws/tools/hooks" > "$(_a6_sandbox "$_S251_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "which is, holds or lies under tools/hooks." "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(k-hooks)" "$_S251_C"
+check "§251(k-hooks) .gstack -> the in-workspace core.hooksPath directory (tools/hooks, mounted :ro), approved: refused by name, no agent run (mutation: core.hooksPath left out of _sandy_gstack_forbidden; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+_S251_C=s251k-common
+_S251_M="$_A6_DIR/$_S251_C/main"
+mkdir -p "$_S251_M"
+git -C "$_S251_M" init -q
+git -C "$_S251_M" -c user.email=a6@example.invalid -c user.name=a6 commit -q --allow-empty -m a6
+git -C "$_S251_M" worktree add -q "$_A6_DIR/$_S251_C/ws" 2>/dev/null
+_s251_ws "$_S251_C"
+ln -s "$_S251_M/.git/hooks" "$_A6_DIR/$_S251_C/ws/.gstack"
+mkdir -p "$(_a6_sandbox "$_S251_C")"
+printf '%s\n' ".gstack -> $_S251_M/.git/hooks" > "$(_a6_sandbox "$_S251_C")/.sandy-approved-symlinks.list"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ -f "$_A6_DIR/$_S251_C/ws/.git" ] || echo "fixture: no linked worktree"
+    [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "which is, holds or lies under the main repository .git (commondir)." "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(k-common)" "$_S251_C"
+check "§251(k-common) in a linked worktree, .gstack -> the main repository's .git/hooks (what commondir names), approved: refused by name, no agent run (mutation: commondir left out of _sandy_gstack_forbidden; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (k-case) macOS (A6_OS=Darwin): .gstack -> .GIT is .git on a case-insensitive
+# volume, and is refused as .git whatever case readlink reports.
+_S251_C=s251k-case
+_s251_ws "$_S251_C"; git -C "$_A6_DIR/$_S251_C/ws" init -q
+ln -s .GIT "$_A6_DIR/$_S251_C/ws/.gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}" A6_OS=Darwin
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "which is, holds or lies under .git." "$_A6_DIR/$_S251_C/out" || echo "not refused as .git"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(k-case)" "$_S251_C"
+check "§251(k-case) on macOS .gstack -> .GIT is refused as .git (compared without case; mutation: _SANDY_PATH_CI never set; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+
+# (n) no working readlink -f: the gate refuses the launch, named, rather than
+# judging every link unresolvable (and so harmless).
+_S251_C=s251n
+_s251_ws "$_S251_C"; mkdir -p "$_A6_DIR/$_S251_C/rl"
+printf '#!/bin/sh\n[ "$1" = -f ] && { echo "readlink: illegal option -- f" >&2; exit 1; }\nexec %s "$@"\n' "$(command -v readlink)" > "$_A6_DIR/$_S251_C/rl/readlink"
+chmod +x "$_A6_DIR/$_S251_C/rl/readlink"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}" PATH="$_A6_DIR/$_S251_C/rl:$_A6_DIR/bin:$PATH"
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    grep -qF "The symlink check needs \`readlink -f\`" "$_A6_DIR/$_S251_C/out" || echo "no named refusal"
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(n)" "$_S251_C"
+check "§251(n) with a readlink that rejects -f first on PATH the launch is refused by name, before any container (mutation: the readlink -f probe in _sandy_resolve_symlinks dropped; ${_S251_R:-ok})" \
+    test -z "$_S251_R"
+unset _S251_M
+# (l) .gstack -> $SANDY_HOME: warned once, and refused with the fix that can
+# work (remove the link), not "launch again".
+_S251_C=s251l2
+_s251_ws "$_S251_C"; mkdir -p "$_A6_DIR/$_S251_C/sh/x"; ln -s "$_A6_DIR/$_S251_C/sh/x" "$_A6_DIR/$_S251_C/ws/.gstack"
+_a6_launch "$_S251_C" "${_S251_SKV[@]}"
+_S251_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    _n="$(grep -c "Ignoring symlink into sandy's own state" "$_A6_DIR/$_S251_C/out" || true)"
+    [ "$_n" = 1 ] || echo "warned $_n times"
+    grep -qF "is never mounted, approved or not" "$_A6_DIR/$_S251_C/out" || echo "no never-mounted explanation"
+    if grep -qF "Launch again" "$_A6_DIR/$_S251_C/out"; then echo "told to launch again"; fi
+    [ -z "$(_a6_agent_args "$_S251_C")" ] || echo "the agent ran"; } 2>&1)" || true
+[ -z "$_S251_R" ] || _a6_diag "§251(l)" "$_S251_C"
+check "§251(l) .gstack -> \$SANDY_HOME/x: warned once, refused before docker run with \"never mounted ... remove it\", not \"Launch again\"; no agent run (${_S251_R:-ok})" \
+    test -z "$_S251_R"
+unset _S251_K _S251_T
+unset -f _s251_k
+rm -rf "$_S251_D"
+unset _S251_SKV _S251_C _S251_O _S251_R _S251_R1 _S251_R2 _S251_D _S251_W
+unset -f _s251_ws _s251_gmount _s251_chk
+
 unset _S248_SEEN _S248_DB _S248_DENV _S248_SUP
 unset -f chflags_stub_unlock
 unset _S248_MK _S248_B2
