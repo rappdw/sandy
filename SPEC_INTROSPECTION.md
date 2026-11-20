@@ -946,7 +946,7 @@ Takes a path to a `.sandy/config`-style file. Real output (paths and the path ha
 }
 ```
 
-`source_tier` is `privileged` for a path under `$SANDY_HOME/` and `passive` for any other path (the tier the loader would give the file), never a source name such as `workspace`. Values are **not** type-checked: `SANDY_CPUS=banana` above produces no error or warning. The checks are key names (unknown keys) and the approval tier (privileged keys, and passive keys whose value is gated).
+`source_tier` is `privileged` for exactly `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`, and `passive` for any other path (including any other file under `$SANDY_HOME/`) (the tier the loader would give the file), never a source name such as `workspace`. Values are **not** type-checked: `SANDY_CPUS=banana` above produces no error or warning. The checks are key names (unknown keys) and the approval tier (privileged keys, and passive keys whose value is gated).
 
 Exit code: `0` whenever the file exists, whatever the warnings; `1` when it does not (with a JSON body whose `errors[]` names the missing file) and on a usage error (no PATH, see "Stream contract").
 
