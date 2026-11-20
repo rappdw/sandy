@@ -943,6 +943,7 @@ _sandy_protected_files() {
 .pre-commit-config.yaml
 .claude/settings.json
 .claude/settings.local.json
+.gemini/settings.json
 EOF
 }
 # Top-level .git files that can trigger host-side code execution if tampered.
@@ -2051,11 +2052,14 @@ EOF
 }
 
 # Detection-only directories. The agent CLI on the HOST reads these from the
-# workspace (slash commands, subagents, plugins), so an agent-created file here
-# is live for the user's next host session. Sandy overlays a sandbox-only copy
-# on each one ONLY when the workspace (or the sandbox) already has it (the
-# copy-overlay block before `docker run`); otherwise nothing is mounted and a
-# creation lands in the workspace. They are deliberately NOT in
+# workspace (slash commands, subagents, plugins, skills, extensions), so an
+# agent-created file here is live for the user's next host session. Sandy
+# overlays a sandbox-only copy on each one ONLY when the workspace (or the
+# sandbox) already has it (the copy-overlay block before `docker run`);
+# otherwise nothing is mounted and a creation lands in the workspace.
+# .claude/skills (#557) has no overlay at all: it is always the plain rw
+# workspace path, so an existing one is fingerprinted at launch and a change
+# reported, and a session can still author a skill the operator then reviews. They are deliberately NOT in
 # _sandy_protected_dirs: that list gets a :ro mount when the dir exists, which
 # would make an existing .claude/commands read-only and break its writable
 # overlay. Mounting is unchanged; the launch snapshot and the session-end
@@ -2065,16 +2069,20 @@ _sandy_overlay_detect_dirs() {
 .claude/commands
 .claude/agents
 .claude/plugins
+.claude/skills
+.gemini/extensions
 .gemini/commands
 EOF
 }
 # The agent whose overlay covers a _sandy_overlay_detect_dirs entry: the
-# .claude/* copies are mounted only when claude runs, .gemini/commands only
+# .claude/* copies are mounted only when claude runs, the .gemini/* ones only
 # when gemini does. In any other session an existing entry is the plain rw
 # workspace path, so the snapshot fingerprints it instead of trusting an
-# overlay that was never mounted.
+# overlay that was never mounted. .claude/skills has no overlay in any
+# session, so it names no agent (and _sandy_agent_has "" is false).
 _sandy_overlay_detect_agent() {
     case "$1" in
+        .claude/skills) ;;
         .claude/*) echo claude ;;
         .gemini/*) echo gemini ;;
     esac
@@ -2528,6 +2536,7 @@ _sandy_uchg_files() {
     cat <<'EOF'
 .claude/settings.json
 .claude/settings.local.json
+.gemini/settings.json
 .mcp.json
 .envrc
 .pre-commit-config.yaml
@@ -3940,7 +3949,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
-    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME. When the destination has no workspace there, the workspace itself is copied first, whole (.git, untracked and ignored files, symlinks as links), as a new directory (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist. --exclude PATTERN (repeatable, rsync syntax, relative to the workspace root) keeps paths out of the workspace copy; across a CPU architecture change its .venv/ and node_modules/ are skipped too. Credential-bearing files, in the sandbox and in a copied workspace, are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync-from"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"The reverse of --rsync (#409): PULL a sandbox from another host into this one, over outbound ssh + rsync from here only (the source is never modified). The copy is named for THIS host workspace path and gets the same rewrites as --rsync: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json. The source workspace defaults to the same path relative to $HOME on the remote. A local workspace named with --workspace that does not exist yet is pulled too, whole, as a new directory, and moves into place with the sandbox (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist (--exclude PATTERN as for --rsync). Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. It lands in a hidden staging directory and is renamed into place only once every step succeeds, so a failed pull installs nothing. Refuses while a live session holds the source on the remote and never overwrites a sandbox already here. Takes the source host as its argument. Sub-options: --workspace PATH, --src-workspace PATH, --src-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','

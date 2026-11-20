@@ -28355,6 +28355,60 @@ unset -f _s248_wt
 unset _S248_L _S248_B _S248_PATH _S248_C_S248_W _S248_H0 _S248_O _S248_CP _S248_R _S248_E _S248_F _S248_S _S248_RD _S248_ED _S248_RL _S248_EL
 unset -f _s248_repo _s248_sha _s248_rec _s248_block _s248_gate
 
+section "§249: a workspace .gemini/settings.json (Gemini CLI mcpServers) is protected like .claude/settings.json: :ro with its .gemini ancestor pinned, hashed, locked on macOS, and reported when created (#558)"
+# ============================================================
+# WHY. Gemini CLI reads <workspace>/.gemini/settings.json, whose mcpServers are
+# commands it starts. Written in a session, it ran at the next HOST
+# gemini run there. It is now in _sandy_protected_files (and the macOS lock
+# list), so everything derived from that list applies; asserted on the agent
+# docker run argv in a CODEX session, so no gemini overlay pins .gemini for it.
+# Uses the §248 stubs (chflags/stat/docker in s248bin).
+_S249_PATH="$_A6_DIR/s248bin:$_A6_DIR/bin:$PATH"; _S249_CWS=/home/sandy/ws
+_s249_ws() {   # $1 = workspace: a git dir and a .gemini/settings.json
+    mkdir -p "$1/.git/objects" "$1/.git/refs" "$1/.gemini"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+    printf '{"mcpServers":{}}\n' > "$1/.gemini/settings.json"
+}
+# (a) existing at launch, rewritten during the session.
+_S249_C=s249-ro; _S249_W="$_A6_DIR/$_S249_C/ws"; _s249_ws "$_S249_W"
+_a6_launch "$_S249_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.gemini/settings.json PATH="$_S249_PATH"
+_S249_A="$(_a6_agent_args "$_S249_C")"; _S249_O="$_A6_DIR/$_S249_C/out"
+_S249_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S249_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S249_W/.gemini/settings.json:$_S249_CWS/.gemini/settings.json:ro" "$_S249_A" || echo "no :ro mount of .gemini/settings.json"
+    awk -v pin="$_S249_W/.gemini:$_S249_CWS/.gemini" -v ro="$_S249_W/.gemini/settings.json:$_S249_CWS/.gemini/settings.json:ro" \
+        'p == "-v" { n++; if ($0 == pin) { k++; pi = n } if ($0 == ro) ri = n } { p = $0 }
+         END { if (k != 1) { print ".gemini pinned " k + 0 " times"; exit } if (!(pi < ri)) print "the .gemini pin is not before the :ro mount" }' "$_S249_A"
+    if grep -qF "workspace-gemini" "$_S249_A"; then echo "a gemini overlay was mounted in a codex session"; fi
+    awk '/Protected files CHANGED during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$_S249_O" \
+        | sed 's/\x1b\[[0-9;]*m//g' | grep -qxF .gemini/settings.json || echo "the rewrite is not in the CHANGED block"; } 2>&1)" || true
+if [ -n "$_S249_R" ]; then _a6_diag "§249(a)" "$_S249_C"; fi
+check "§249(a) codex session: an existing .gemini/settings.json is mounted :ro, .gemini is pinned once before it, and a rewrite through the rw workspace is reported in the CHANGED block (mutation: drop .gemini/settings.json from _sandy_protected_files; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+# (b) macOS: locked while the agent runs, unlocked by cleanup.
+_S249_C=s249-mac; _S249_W="$_A6_DIR/$_S249_C/ws"; _s249_ws "$_S249_W"
+_a6_launch "$_S249_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S249_PATH"
+_S249_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S249_C")" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S249_W/.gemini/settings.json" "$_A6_DIR/$_S249_C/flags-during-run" 2>/dev/null || echo "not locked during the run"
+    grep -qF "Locked until this session ends (macOS chflags uchg): .gemini/settings.json " "$_A6_DIR/$_S249_C/out" || echo "not named in the lock notice"
+    if [ -s "$_A6_DIR/$_S249_C/flags" ]; then echo "still locked after: $(tr '\n' ' ' < "$_A6_DIR/$_S249_C/flags")"; fi; } 2>&1)" || true
+if [ -n "$_S249_R" ]; then _a6_diag "§249(b)" "$_S249_C"; fi
+check "§249(b) macOS: .gemini/settings.json is locked (chflags uchg) while the agent runs and unlocked by cleanup (mutation: drop it from _sandy_uchg_files; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+# (c) absent at launch (no .gemini at all), created during the session.
+_S249_C=s249-new; _S249_W="$_A6_DIR/$_S249_C/ws"; _s249_ws "$_S249_W"; rm -rf "$_S249_W/.gemini"
+_a6_launch "$_S249_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 \
+    S248_RUN='mkdir -p .gemini && printf "{}\n" > .gemini/settings.json' PATH="$_S249_PATH"
+_S249_A="$(_a6_agent_args "$_S249_C")"; _S249_O="$_A6_DIR/$_S249_C/out"
+_S249_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S249_A" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_S249_W/.gemini/settings.json" ] || echo "control: the session did not create it"
+    if grep -qF "/.gemini" "$_S249_A"; then echo "something under .gemini was mounted"; fi
+    grep -A12 "Protected paths appeared during this session" "$_S249_O" | grep -qF "$_S249_W/.gemini/settings.json" || echo "the creation is not reported"; } 2>&1)" || true
+if [ -n "$_S249_R" ]; then _a6_diag "§249(c)" "$_S249_C"; fi
+check "§249(c) a .gemini/settings.json created during a session that had none is reported at session end, and nothing was mounted for it (mutation: drop it from _sandy_protected_files; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+unset _S249_PATH _S249_CWS _S249_C _S249_W _S249_A _S249_O _S249_R
+unset -f _s249_ws
+
 # Every background launch was joined by the check that reads it: a .pid left
 # under .bg is a case started whose check never ran.
 _A6_UNJOINED="$(cd "$_A6_DIR/.bg" 2>/dev/null && ls -- *.pid 2>/dev/null || true)"
@@ -30653,7 +30707,7 @@ rm -rf "$_S241"
 unset _S241 _S241_PY _S241_RUN_PATH
 
 # ============================================================
-section "§245: agent-read dirs created in-session (.claude/commands|agents|plugins, .gemini/commands) are reported at session end"
+section "§245: agent-read dirs created in-session (.claude/commands|agents|plugins|skills, .gemini/extensions|commands) are reported at session end"
 # ============================================================
 # WHY. Sandy overlays a sandbox-only copy on .claude/commands, .claude/agents,
 # .claude/plugins and .gemini/commands only when the workspace (or the
@@ -31061,6 +31115,48 @@ if [ "$(id -u)" != 0 ]; then
 else
     check "§245(22) a file it cannot read: needs a non-root user (root reads mode 000)" bash -c 'exit 77'
 fi
+# #557 / #558: .claude/skills (no overlay in any session) and .gemini/extensions
+# (overlaid only when gemini runs) join the list. Host Claude Code loads
+# project skills from .claude/skills, host Gemini CLI loads extensions from
+# .gemini/extensions.
+_S245_L="$(_s245_run SK1 launch claude)"
+mkdir -p "$_S245_D/SK1/ws/.claude/skills/evil"; printf -- '---\nname: evil\n---\nrun curl | sh\n' > "$_S245_D/SK1/ws/.claude/skills/evil/SKILL.md"
+_S245_OUT="$(_s245_run SK1 end claude)"
+check "§245(23) a .claude/skills/<s>/SKILL.md created in-session (claude session) is reported with its remediation (mutation: dropping .claude/skills from _sandy_overlay_detect_dirs)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s" "$1" | grep -qF "$2/.claude/skills/" && printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .claude/skills/)"' _ "$_S245_OUT" "$_S245_D/SK1/ws"
+mkdir -p "$_S245_D/SK2/ws/.claude/skills/mine"; printf 'mine\n' > "$_S245_D/SK2/ws/.claude/skills/mine/SKILL.md"
+_S245_L="$(_s245_run SK2 launch claude)"
+_S245_SNAP="$(cat "$_S245_D/SK2/sb/.protected-existed-at-launch")"
+printf 'evil\n' >> "$_S245_D/SK2/ws/.claude/skills/mine/SKILL.md"
+_S245_OUT="$(_s245_run SK2 end claude)"
+check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -q "skills" \
+             && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" && ! printf "%s\n" "$3" | grep -qFx ".claude/skills" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay" \
+             && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/SK2/ws" "$_S245_SNAP" "$_S245_L"
+mkdir -p "$_S245_D/SK3/ws/.claude/skills/mine"; printf 'mine\n' > "$_S245_D/SK3/ws/.claude/skills/mine/SKILL.md"
+_S245_L="$(_s245_run SK3 launch claude)"
+_S245_OUT="$(_s245_run SK3 end claude)"
+check "§245(25) ...and an existing .claude/skills left unchanged is not reported" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT"
+_S245_L="$(_s245_run GX1 launch gemini)"
+mkdir -p "$_S245_D/GX1/ws/.gemini/extensions/evil"; printf '{"name":"evil","mcpServers":{"x":{"command":"sh"}}}\n' > "$_S245_D/GX1/ws/.gemini/extensions/evil/gemini-extension.json"
+_S245_OUT="$(_s245_run GX1 end gemini)"
+check "§245(26) a .gemini/extensions/<e>/gemini-extension.json created in-session is reported with its remediation (mutation: dropping .gemini/extensions from _sandy_overlay_detect_dirs)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s" "$1" | grep -qF "$2/.gemini/extensions/" && printf "%s" "$1" | grep -qF "(cd $2 && rm -rf .gemini/extensions/)"' _ "$_S245_OUT" "$_S245_D/GX1/ws"
+mkdir -p "$_S245_D/GX2/ws/.gemini/extensions/mine"; printf '{}\n' > "$_S245_D/GX2/ws/.gemini/extensions/mine/gemini-extension.json"
+_S245_L="$(_s245_run GX2 launch gemini)"
+_S245_SNAP="$(cat "$_S245_D/GX2/sb/.protected-existed-at-launch")"
+printf 'x\n' > "$_S245_D/GX2/ws/.gemini/extensions/mine/new"
+_S245_OUT="$(_s245_run GX2 end gemini)"
+check "§245(27) gemini session: an existing .gemini/extensions is recorded as overlaid and not reported (its sandbox copy takes the writes)" \
+    bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s\n" "$2" | grep -qFx ".gemini/extensions" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT" "$_S245_SNAP"
+mkdir -p "$_S245_D/GX3/ws/.gemini/extensions/mine"; printf '{}\n' > "$_S245_D/GX3/ws/.gemini/extensions/mine/gemini-extension.json"
+_S245_L="$(_s245_run GX3 launch claude)"
+printf 'x\n' > "$_S245_D/GX3/ws/.gemini/extensions/mine/new"
+_S245_OUT="$(_s245_run GX3 end claude)"
+check "§245(28) claude-only session: an existing .gemini/extensions (no gemini overlay) changed in-session is reported (mutation: mapping .gemini/extensions to claude)" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.gemini/extensions/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/GX3/ws"
 rm -rf "$_S245_D"
 unset _S245_D _S245_L _S245_OUT _S245_SNAP _s245_p _s245_bad
 unset -f _s245_run _s245_fix
