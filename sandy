@@ -3173,11 +3173,13 @@ _sandy_session_end_protected_report() {
                 fi
             done
             printf "${YELLOW}[sandy]${NC}\n" >&2
-            printf "${YELLOW}[sandy]${NC} Sandy keeps these paths away from your host workspace when they exist at launch,\n" >&2
-            printf "${YELLOW}[sandy]${NC} because they auto-execute code or steer an agent under common operations (git\n" >&2
-            printf "${YELLOW}[sandy]${NC} hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`, IDE/shell/tool\n" >&2
-            printf "${YELLOW}[sandy]${NC} configs on project open or next use, and .claude/ or .gemini/ commands, agents\n" >&2
-            printf "${YELLOW}[sandy]${NC} and plugins are read by the agent CLI on your host at its next start).\n" >&2
+            printf "${YELLOW}[sandy]${NC} Sandy watches these paths because they auto-execute code or steer an agent under\n" >&2
+            printf "${YELLOW}[sandy]${NC} common operations: git hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`,\n" >&2
+            printf "${YELLOW}[sandy]${NC} IDE/shell/tool configs on project open or next use, and the .claude/ and .gemini/\n" >&2
+            printf "${YELLOW}[sandy]${NC} commands, agents, plugins, skills, extensions and settings are\n" >&2
+            printf "${YELLOW}[sandy]${NC} read by the agent CLI on your host at its next start. Most are kept away from your\n" >&2
+            printf "${YELLOW}[sandy]${NC} host workspace (read-only, or a sandbox-only copy) only when they exist at launch;\n" >&2
+            printf "${YELLOW}[sandy]${NC} .claude/skills/ never is.\n" >&2
             if [ -n "$_rm_args" ] || [ -n "$_rm_links" ]; then
                 printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
                 if [ -n "$_rm_args" ]; then
