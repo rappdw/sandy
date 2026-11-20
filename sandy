@@ -13842,6 +13842,26 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         fi
     fi
 
+    # Update restart (2.9.0): --update-sessions runs this --start with stderr
+    # on /dev/null, so the pre-pass above did not run, and the supervisor
+    # would fail closed -- drop a pending key and come up on the host's
+    # choice, which is a degraded restart nobody sees. The orchestrator checks
+    # just before its --stop, but a gated input can still change after that
+    # check. So under SANDY_UPDATE_RESTART=1 an unresolved approval REFUSES
+    # the start (exit 6, as a refused pre-pass above) instead. Skipped with
+    # --agent, which --approvals cannot take (the orchestrator never passes
+    # one); the supervisor's own gates still apply after this point.
+    if [ "${SANDY_UPDATE_RESTART:-}" = "1" ] && [ -z "${SANDY_AGENT_OVERRIDE:-}" ] \
+       && ! { [ -t 0 ] && [ -t 2 ]; }; then
+        _sandy_ur_rc=0
+        "$SANDY_SELF" --approvals --workspace "$WORK_DIR" </dev/null >/dev/null 2>&1 || _sandy_ur_rc=$?
+        if [ "$_sandy_ur_rc" -eq 2 ]; then
+            error "An approval is pending for $WORK_DIR — not restarting the daemon without it (--update-sessions)."
+            error "Approve once from a terminal: run sandy (or sandy --start) in $WORK_DIR, then start it again."
+            exit 6
+        fi
+    fi
+
     # D1 — daemonize the supervisor with `nohup … & disown`, deliberately NOT
     # setsid: setsid ships with util-linux and is ABSENT on macOS, which is
     # daemon-mode's primary platform (sandy-ui), and failing-clean there isn't
@@ -14221,6 +14241,48 @@ _sandy_build_fail_remove() {
 # preflight in the --start/--attach/--stop family, so "defined immediately
 # before its dispatcher" already satisfies the forward-reference discipline.
 
+# _sandy_update_pending_summary JSON: from a `sandy --approvals` document,
+# "<gate>[: KEY, KEY]; <gate>..." for each unresolved gate, key NAMES only
+# (the report never carries values). Gate and key names are matched against
+# fixed shapes; anything else is left out rather than echoed, so a hostile
+# workspace cannot put text into the warning. Prints nothing if it finds none.
+_sandy_update_pending_summary() {
+    local _j="$1" _u _g _out="" _rest _keys _k _kl
+    _u="$(printf '%s' "$_j" | sed -n 's/.*"unresolved":\[\([^]]*\)\].*/\1/p' | tr ',' '\n' | tr -d '" ')"
+    while IFS= read -r _g; do
+        case "$_g" in passive_privileged|symlinks|dockerfile) ;; *) continue ;; esac
+        _kl=""
+        if [ "$_g" = passive_privileged ]; then
+            _rest="${_j#*\{\"gate\":\"passive_privileged\"}"
+            if [ "$_rest" != "$_j" ]; then
+                _rest="${_rest%%\{\"gate\":*}"
+                _keys="$(printf '%s' "$_rest" | sed -n 's/.*"keys":\[\([^]]*\)\].*/\1/p' | tr ',' '\n' | tr -d '" ')"
+                while IFS= read -r _k; do
+                    [[ "$_k" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+                    _kl="${_kl:+$_kl, }$_k"
+                done <<< "$_keys"
+            fi
+        fi
+        _out="${_out:+$_out; }$_g${_kl:+: $_kl}"
+    done <<< "$_u"
+    printf '%s' "$_out"
+}
+
+# _sandy_update_approval_pending SESS WS WHAT: 0 (and a warning) when the
+# workspace has an approval that is pending, changed or refused, judged by the
+# same report `sandy --approvals` gives (the launch path itself, no --agent,
+# as the --update-sessions children have none). WHAT names what is skipped.
+# Any other report status, including 1 (no report could be produced), is 1:
+# that session is left to the existing steps, exactly as before this check.
+_sandy_update_approval_pending() {
+    local _rc=0 _json _what
+    _json="$("$SANDY_SELF" --approvals --workspace "$2" </dev/null 2>/dev/null)" || _rc=$?
+    [ "$_rc" -eq 2 ] || return 1
+    _what="$(_sandy_update_pending_summary "$_json")"
+    warn "  $1: approval pending for $2 (${_what:-see sandy --approvals}) — skipping its $3; it keeps running as it is. Approve once from a terminal: run sandy (or sandy --start) in that workspace, then re-run --update-sessions."
+    return 0
+}
+
 # Enumerate every daemon session on the host in one `docker ps` call (DEC-U7:
 # global, cwd-independent — filters on label=sandy.daemon=true only, no
 # workspace filter). One line per container: cid|session|workspace_path|image.
@@ -14358,13 +14420,29 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         _sandy_clear_build_cache
         info "Build cache cleared. Each image is rebuilt once, by the first session that uses it."
     fi
-    _upd_build_failed=()
+    _upd_build_failed=() _upd_appr_pending=()
     for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
         _upd_ws="${_upd_wspaths[$_upd_i]}"
         _upd_sess="${_upd_sessions[$_upd_i]:-${_upd_cids[$_upd_i]:0:12}}"
         if [ -z "$_upd_ws" ] || [ ! -d "$_upd_ws" ]; then
             warn "  $_upd_sess: workspace path missing/unreadable (${_upd_ws:-<empty>}) — skipping image refresh."
             _upd_build_failed[$_upd_i]=1
+            continue
+        fi
+        # Approval guard (2.9.0): every child here runs with no terminal (the
+        # build below with </dev/null; the restart's --start with stderr on
+        # /dev/null, which skips its tty pre-pass), so a gate that is still
+        # unanswered fails closed: a workspace SANDY_AGENT wider than the host's
+        # is dropped, and the session would be rebuilt and restarted on the
+        # HOST's agents, auth mode or base image, with the warning lost in a
+        # discarded log. Ask the same report `sandy --approvals` gives (judged
+        # by the launch path itself, no --agent, as these children have none)
+        # and leave such a session running as it is. Step 6 asks again just
+        # before it stops a session, since a config edit or a removed approval
+        # file between here and there would otherwise still restart it degraded.
+        if _sandy_update_approval_pending "$_upd_sess" "$_upd_ws" "rebuild and restart"; then
+            _upd_build_failed[$_upd_i]=1
+            _upd_appr_pending[$_upd_i]=1
             continue
         fi
         info "Refreshing images for $_upd_sess ($_upd_ws)..."
@@ -14432,6 +14510,11 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     # justified by the half that can be judged.
     _upd_stale=() _upd_idle_age=() _upd_action=() _upd_reason=()
     for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        if [ "${_upd_appr_pending[$_upd_i]:-0}" = "1" ]; then
+            _upd_action[$_upd_i]="skip"
+            _upd_reason[$_upd_i]="approval pending"
+            continue
+        fi
         if [ "${_upd_build_failed[$_upd_i]:-0}" = "1" ]; then
             _upd_action[$_upd_i]="skip"
             _upd_reason[$_upd_i]="build failed"
@@ -14495,8 +14578,20 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         exit 0
     fi
 
+    # A session skipped for a pending approval is a goal NOT met (the
+    # maintenance-command rule: exit 1), so a cron job sees it; --dry-run
+    # above stays 0, it only reports the plan.
+    _upd_appr_n=0
+    for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        [ "${_upd_appr_pending[$_upd_i]:-0}" = "1" ] && _upd_appr_n=$((_upd_appr_n + 1))
+    done
+
     if [ "$_upd_restart_count" -eq 0 ]; then
         info "Nothing to restart."
+        if [ "$_upd_appr_n" -gt 0 ]; then
+            warn "$_upd_appr_n session(s) skipped: approval pending (see above)."
+            exit 1
+        fi
         exit 0
     fi
 
@@ -14507,7 +14602,9 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             IFS= read -r _upd_confirm </dev/tty || _upd_confirm=""
             case "$_upd_confirm" in
                 y|Y|yes|YES|Yes) : ;;
-                *) info "Aborted — no sessions restarted."; exit 0 ;;
+                *) info "Aborted — no sessions restarted."
+                   [ "$_upd_appr_n" -gt 0 ] && { warn "$_upd_appr_n session(s) skipped: approval pending (see above)."; exit 1; }
+                   exit 0 ;;
             esac
         else
             error "Non-interactive; pass --yes to restart sessions without a prompt."
@@ -14524,6 +14621,12 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         [ "${_upd_action[$_upd_i]}" = "restart" ] || continue
         _upd_sess="${_upd_sessions[$_upd_i]:-${_upd_cids[$_upd_i]:0:12}}"
         _upd_ws="${_upd_wspaths[$_upd_i]}"
+        if _sandy_update_approval_pending "$_upd_sess" "$_upd_ws" "restart"; then
+            _upd_action[$_upd_i]="skip"
+            _upd_appr_pending[$_upd_i]=1
+            _upd_appr_n=$((_upd_appr_n + 1))
+            continue
+        fi
         info "Restarting $_upd_sess..."
         _upd_t0="$(date +%s)"
         _upd_ok=true
@@ -14531,18 +14634,32 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             error "  --stop failed for $_upd_sess"
             _upd_ok=false
         fi
+        # The --start output goes to a temp file, not /dev/null, only so a
+        # refusal can be named below; it is never printed. A file is still not
+        # a terminal, so the client's tty pre-pass stays off, as before.
+        _upd_why=""
+        _upd_start_log="$(mktemp)"
         if [ "$_upd_ok" = "true" ] \
-           && ! SANDY_UPDATE_RESTART=1 "$_sandy_self" --start --workspace "$_upd_ws" >/dev/null 2>&1; then
-            error "  --start failed for $_upd_sess"
+           && ! SANDY_UPDATE_RESTART=1 "$_sandy_self" --start --workspace "$_upd_ws" >"$_upd_start_log" 2>&1; then
+            # Both refusals of an update restart (2.9.0): the client's check
+            # before forking, and the supervisor's gate when the approval
+            # changed after that check. Either way the session is stopped.
+            if grep -qE 'An approval is pending for|will not drop these keys' "$_upd_start_log" 2>/dev/null; then
+                _upd_why="approval pending"
+                error "  --start failed for $_upd_sess: approval pending (it changed after the update checked it), so the session is stopped, not restarted without it. Approve once from a terminal: run sandy (or sandy --start) in $_upd_ws."
+            else
+                error "  --start failed for $_upd_sess"
+            fi
             _upd_ok=false
         fi
+        rm -f "$_upd_start_log" 2>/dev/null || true
         _upd_t1="$(date +%s)"
         _upd_elapsed=$((_upd_t1 - _upd_t0))
         if [ "$_upd_ok" = "true" ]; then
             info "  $_upd_sess restarted in ${_upd_elapsed}s."
             _upd_restarted+=("$_upd_sess (${_upd_elapsed}s)")
         else
-            _upd_failed+=("$_upd_sess")
+            _upd_failed+=("$_upd_sess${_upd_why:+ ($_upd_why)}")
         fi
     done
 
@@ -14562,7 +14679,11 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         printf '  %s\n' "$_upd_f"
     done
 
-    if [ "${#_upd_failed[@]}" -gt 0 ]; then
+    if [ "$_upd_appr_n" -gt 0 ]; then
+        printf 'Approval pending: %d (skipped; approve once from a terminal)\n' "$_upd_appr_n"
+    fi
+
+    if [ "${#_upd_failed[@]}" -gt 0 ] || [ "$_upd_appr_n" -gt 0 ]; then
         exit 1
     fi
     exit 0
@@ -15064,6 +15185,17 @@ _resolve_passive_privileged_approval() {
 
     # Headless / non-interactive: fail closed.
     if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
+        # An --update-sessions restart (2.9.0) must not come up without keys
+        # the session ran with: its client and the orchestrator checked just
+        # before, so a set that is pending HERE changed after those checks.
+        # Refuse the launch (fatal marker: the client exits 6 at once and
+        # --update-sessions reports the session as failed) rather than drop.
+        if [ "${SANDY_UPDATE_RESTART:-0}" = "1" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
+            echo "[sandy] ERROR: an --update-sessions restart will not drop these keys — not starting." >&2
+            echo "[sandy] Launch sandy interactively once from this directory to approve, then start it again." >&2
+            _sandy_daemon_fatal
+            exit 1
+        fi
         echo "[sandy] Non-interactive session — dropping these keys." >&2
         echo "[sandy] Launch sandy interactively once from this directory to approve." >&2
         echo "[sandy]" >&2

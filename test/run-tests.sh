@@ -30504,6 +30504,310 @@ unset -f _s247_run
 rm -rf "$_S247_D"
 unset _S247_INTEG _S247_D _S247_N
 
+section "§248: --update-sessions skips a session whose workspace approval is pending, instead of rebuilding and restarting it on the host's choice (2.9.0)"
+# ============================================================
+# Every --update-sessions child runs with no terminal, so an unanswered gate
+# fails closed: a workspace SANDY_AGENT=codex (wider than the host default,
+# claude) is dropped, and that session would be rebuilt and restarted as a
+# claude session with the warning lost in a discarded log. The guard asks the
+# same report `sandy --approvals` gives and skips such a session, naming the
+# gate and the key names (never values), then goes on with the others. Three
+# daemon sessions behind a stub docker: A (no config), W (codex, NOT approved)
+# and P (codex, approved), driven through the REAL dispatcher and children.
+_S248_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S248_D/bin" "$_S248_D/sh/approvals" "$_S248_D/wsA" "$_S248_D/wsW/.sandy" "$_S248_D/wsP/.sandy"
+printf 'SANDY_AGENT=codex\nSANDY_CODEX_AUTH=oauth\n' > "$_S248_D/wsW/.sandy/config"
+printf 'SANDY_AGENT=codex\n' > "$_S248_D/wsP/.sandy/config"
+_s248_h() { printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}'; }
+printf '%s\n' "$(_s248_h 'SANDY_AGENT=codex')" > "$_S248_D/sh/approvals/passive-$(_s248_h "$_S248_D/wsP" | cut -c1-16).list"
+cat > "$_S248_D/bin/docker" <<'DOCK'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        printf 'cidA|sessA|%s|sandy-claude-code\n' "$S235_D/wsA"
+        printf 'cidW|sessW|%s|sandy-codex\n' "$S235_D/wsW"
+        printf 'cidP|sessP|%s|sandy-codex\n' "$S235_D/wsP"
+        exit 0 ;;
+    build)
+        _p=""; _t=""
+        for _a in "$@"; do [ "$_p" = -t ] && _t="$_a"; _p="$_a"; done
+        printf '%s\n' "$_t" >> "$S235_D/builds.log"
+        exit 0 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        _f=""; _n=""; shift 2
+        while [ $# -gt 0 ]; do case "$1" in -f) shift; _f="$1" ;; *) _n="$1" ;; esac; shift; done
+        [ -n "$_f" ] && echo "sha256:current-$_n"
+        exit 0 ;;
+    inspect) exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+DOCK
+cat > "$_S248_D/bin/curl" <<'CURL'
+#!/bin/sh
+case "$*" in *deb.debian.org*|*registry.npmjs.org*) exit 0 ;; esac
+exit 1
+CURL
+chmod +x "$_S248_D/bin/docker" "$_S248_D/bin/curl"
+_sleep_stub "$_S248_D/bin" "$_S248_D/sleep.log" 0.05
+# _s248_run SANDY [args...]: one --update-sessions with that sandy; sets _S248_RC.
+_s248_run() {
+    local _sb="$1"; shift
+    : > "$_S248_D/builds.log"
+    _S248_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S248_D" && env PATH="$_S248_D/bin:$PATH" HOME="$_S248_D" SANDY_HOME="$_S248_D/sh" S235_D="$_S248_D" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$_sb" --update-sessions "$@" </dev/null >"$_S248_D/out" 2>&1
+    ) || _S248_RC=$?
+}
+_s248_plan() { grep -E "^$1 " "$_S248_D/out" | awk '{$1=$1; print}' | sed -E 's/^[^ ]+ [^ ]+ [^ ]+ [^ ]+ //'; }
+# Mutant: the approval check never reports pending (both the refresh check
+# and the pre-restart check).
+_S248_MUT="$_S248_D/sandy.mut"
+sed 's/^    \[ "\$_rc" -eq 2 \] || return 1$/    return 1/' "$SANDY_SCRIPT" > "$_S248_MUT"
+chmod +x "$_S248_MUT"
+_S248_MUTOK=0; ! cmp -s "$SANDY_SCRIPT" "$_S248_MUT" && _S248_MUTOK=1
+_s248_run "$SANDY_SCRIPT" --dry-run
+_S248_RC1="$_S248_RC"; _S248_OUT1="$(cat "$_S248_D/out")"
+_S248_W1="$(_s248_plan sessW)"; _S248_A1="$(_s248_plan sessA)"; _S248_P1="$(_s248_plan sessP)"
+check "§248(1) the unapproved session W is skipped as 'approval pending' and never refreshed, while A and the approved P are refreshed and planned as before (rc=$_S248_RC1; W: $_S248_W1 | A: $_S248_A1 | P: $_S248_P1)" \
+    bash -c 'test "$1" = 0 && test "$2" = "skip (approval pending)" && case "$3" in "skip (approval pending)") exit 1 ;; esac && case "$4" in "skip (approval pending)") exit 1 ;; esac \
+             && ! grep -q "Refreshing images for sessW" <<<"$5" && grep -q "Refreshing images for sessA" <<<"$5" && grep -q "Refreshing images for sessP" <<<"$5"' \
+    _ "$_S248_RC1" "$_S248_W1" "$_S248_A1" "$_S248_P1" "$_S248_OUT1"
+_S248_WARN="$(grep -F 'sessW: approval pending' "$_S248_D/out" || true)"
+check "§248(2) the warning names the gate and both key NAMES, says to approve once from a terminal, and carries no value (got: $_S248_WARN)" \
+    bash -c 'grep -q "passive_privileged: SANDY_AGENT, SANDY_CODEX_AUTH" <<<"$1" && grep -q "Approve once from a terminal" <<<"$1" && ! grep -qE "=codex|oauth" <<<"$1"' _ "$_S248_WARN"
+_s248_run "$SANDY_SCRIPT" --yes
+_S248_RC2="$_S248_RC"; _S248_N2="$(grep -c 'Nothing to restart' "$_S248_D/out" || true)"
+rm -f "$_S248_D/wsW/.sandy/config"
+_s248_run "$SANDY_SCRIPT" --yes
+_S248_RC3="$_S248_RC"
+check "§248(3) a real run that restarts nothing still exits 1 while a session was skipped for a pending approval, so cron sees it; with that workspace's gated keys gone it exits 0 (rc pending/clear: $_S248_RC2/$_S248_RC3)" \
+    bash -c 'test "$1" = 1 && test "$2" = 1 && test "$3" = 0' _ "$_S248_RC2" "$_S248_N2" "$_S248_RC3"
+printf 'SANDY_AGENT=codex\nSANDY_CODEX_AUTH=oauth\n' > "$_S248_D/wsW/.sandy/config"
+_s248_run "$_S248_MUT" --dry-run
+_S248_WM="$(_s248_plan sessW)"
+check "§248(4) mutation: with the guard disabled the same fleet refreshes W and plans it like any other session, so (1)-(3) can fail (mutant applied: $_S248_MUTOK; W: $_S248_WM)" \
+    bash -c 'test "$1" = 1 && grep -q "Refreshing images for sessW" "$2" && case "$3" in "skip (approval pending)") exit 1 ;; esac' _ "$_S248_MUTOK" "$_S248_D/out" "$_S248_WM"
+# (5) The warning's summary is built only from fixed shapes: hostile gate or
+# key names in a report (a key with shell text, a KEY=VALUE, an unknown gate)
+# are dropped, never echoed; real ones survive. The REAL helper, extracted.
+_S248_SUM="$(bash -c 'eval "$(sed -n "/^_sandy_update_pending_summary() {/,/^}/p" "$1")"
+    _sandy_update_pending_summary "{\"unresolved\":[\"passive_privileged\",\"x\$(id)\",\"symlinks\"],\"gates\":[{\"gate\":\"passive_privileged\",\"status\":\"pending\",\"hash\":\"h\",\"approval_file\":\"/a/b\",\"approved_by\":null,\"approved_at\":null,\"if_unanswered\":\"keys_dropped\",\"keys\":[\"SANDY_AGENT\",\"evil; rm -rf\",\"X=1\",\"SANDY_CODEX_AUTH\"],\"sources\":[\".sandy/config\"]},{\"gate\":\"symlinks\",\"status\":\"refused\"}]}"' _ "$SANDY_SCRIPT" 2>&1)"
+check "§248(5) the summary keeps the known gates and well-formed key names and drops hostile ones (got: $_S248_SUM)" \
+    test "$_S248_SUM" = "passive_privileged: SANDY_AGENT, SANDY_CODEX_AUTH; symlinks"
+# (6) Step 6 asks again just before it stops a session. W starts with no
+# gated key, so the refresh check passes; the stub's container inspect (the
+# staleness probe, after every refresh) then writes a gated SANDY_AGENT into
+# W's config, as an edit in that window would, and reports W stale. W must
+# be skipped before any --stop, the run must exit 1, and a mutant without
+# the pre-restart check must reach "Restarting sessW". The restart children
+# are bounded by a watchdog so a mutant cannot hang the suite.
+_S248_E="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S248_E/bin" "$_S248_E/sh" "$_S248_E/wsW/.sandy"
+cat > "$_S248_E/bin/docker" <<'DOCK'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        case "$*" in *label=sandy.daemon=true*) printf 'cidW|sessW|%s|sandy-codex\n' "$S235_E/wsW" ;; esac
+        exit 0 ;;
+    inspect)
+        case "$*" in
+            *"{{.Image}}|{{.Config.Image}}"*cidW*)
+                [ -f "$S235_E/edited" ] || { printf 'SANDY_AGENT=codex\n' > "$S235_E/wsW/.sandy/config"; : > "$S235_E/edited"; }
+                echo "sha256:old|sandy-codex"; exit 0 ;;
+        esac
+        exit 1 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        echo "sha256:current"; exit 0 ;;
+    build) exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+DOCK
+printf '#!/bin/sh\nexit 1\n' > "$_S248_E/bin/curl"
+chmod +x "$_S248_E/bin/docker" "$_S248_E/bin/curl"
+_S248_MUT6="$_S248_E/sandy.mut6"
+sed 's/if _sandy_update_approval_pending "\$_upd_sess" "\$_upd_ws" "restart"; then/if false; then/' "$SANDY_SCRIPT" > "$_S248_MUT6"
+chmod +x "$_S248_MUT6"
+_S248_MUT6OK=0; ! cmp -s "$SANDY_SCRIPT" "$_S248_MUT6" && _S248_MUT6OK=1
+# _s248_e SANDY: one --update-sessions --yes over W; sets _S248_ERC.
+_s248_e() {
+    rm -f "$_S248_E/edited" "$_S248_E/wsW/.sandy/config" "$_S248_E/rc"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        # The status is captured with `|| _r=$?`: this subshell runs under the
+        # suite's set -e, which would end it before the rc file is written.
+        _r=0
+        cd "$_S248_E" && env PATH="$_S248_E/bin:$PATH" HOME="$_S248_E" SANDY_HOME="$_S248_E/sh" S235_E="$_S248_E" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$1" --update-sessions --yes </dev/null >"$_S248_E/out" 2>&1 || _r=$?
+        echo "$_r" > "$_S248_E/rc"
+    ) &
+    local _pid=$! _n=0
+    while [ ! -f "$_S248_E/rc" ] && [ "$_n" -lt 600 ]; do command sleep 0.1; _n=$((_n + 1)); done
+    [ -f "$_S248_E/rc" ] || { pkill -P "$_pid" 2>/dev/null || true; kill "$_pid" 2>/dev/null || true; }
+    wait "$_pid" 2>/dev/null || true
+    _S248_ERC="$(cat "$_S248_E/rc" 2>/dev/null || echo timeout)"
+}
+_s248_e "$SANDY_SCRIPT"
+_S248_ERC1="$_S248_ERC"; _S248_EOUT1="$(cat "$_S248_E/out")"
+_s248_e "$_S248_MUT6"
+_S248_EOUT2="$(cat "$_S248_E/out")"
+check "§248(6) a gated key that appears after the refresh still stops the restart: W is refreshed, judged stale, then skipped with 'skipping its restart' before any --stop, and the run exits 1; the mutant without the pre-restart check restarts it (rc=$_S248_ERC1; mutant applied: $_S248_MUT6OK)" \
+    bash -c 'test "$1" = 1 && grep -q "Refreshing images for sessW" <<<"$2" && grep -q "sessW: approval pending .*skipping its restart" <<<"$2" && ! grep -q "Restarting sessW" <<<"$2" && grep -q "Approval pending: 1" <<<"$2" \
+             && test "$3" = 1 && grep -q "Restarting sessW" <<<"$4"' _ "$_S248_ERC1" "$_S248_EOUT1" "$_S248_MUT6OK" "$_S248_EOUT2"
+rm -rf "$_S248_E"
+unset _S248_E _S248_MUT6 _S248_MUT6OK _S248_ERC _S248_ERC1 _S248_EOUT1 _S248_EOUT2 _S248_SUM
+unset -f _s248_e
+# (7) The update restart's own --start refuses an unresolved approval
+# rather than starting with the key dropped: the gate input can change
+# after the orchestrator's last check. Run --start directly as the
+# orchestrator does (SANDY_UPDATE_RESTART=1, no terminal) over a workspace
+# with an unapproved gated key: exit 6 with the refusal named, and no
+# supervisor is forked to reach its config gate at all. The mutant without
+# the client refusal forks one; since (8)'s supervisor refusal it does not
+# drop the key either, but it gets as far as refusing it there, which this
+# client check exists to avoid.
+_S248_F="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S248_F/bin" "$_S248_F/sh" "$_S248_F/ws/.sandy"
+printf 'SANDY_AGENT=codex\n' > "$_S248_F/ws/.sandy/config"
+cat > "$_S248_F/bin/docker" <<'DOCK'
+#!/usr/bin/env bash
+case "$1" in ps|inspect) exit 0 ;; run) exit 1 ;; esac
+exit 0
+DOCK
+printf '#!/bin/sh\nexit 1\n' > "$_S248_F/bin/curl"
+chmod +x "$_S248_F/bin/docker" "$_S248_F/bin/curl"
+_S248_MUT7="$_S248_F/sandy.mut7"
+sed 's/^    if \[ "\${SANDY_UPDATE_RESTART:-}" = "1" \] && \[ -z "\${SANDY_AGENT_OVERRIDE:-}" \] \\$/    if false \\/' "$SANDY_SCRIPT" > "$_S248_MUT7"
+chmod +x "$_S248_MUT7"
+_S248_MUT7OK=0; ! cmp -s "$SANDY_SCRIPT" "$_S248_MUT7" && _S248_MUT7OK=1
+# _s248_f SANDY: one update-restart --start; sets _S248_FRC and _S248_FLOG
+# (how many lines of the daemon log show a supervisor at the config gate:
+# "dropping these keys" or "will not drop these keys").
+_s248_f() {
+    _S248_FRC=0
+    rm -rf "$_S248_F/sh"; mkdir -p "$_S248_F/sh"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S248_F/ws" && env PATH="$_S248_F/bin:$PATH" HOME="$_S248_F" SANDY_HOME="$_S248_F/sh" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 SANDY_UPDATE_RESTART=1 bash "$1" --start --workspace "$_S248_F/ws" </dev/null >"$_S248_F/out" 2>&1
+    ) || _S248_FRC=$?
+    _S248_FLOG="$(find "$_S248_F/sh" -name '*daemon*.log' -exec cat {} + 2>/dev/null | grep -cE 'dropping these keys|will not drop these keys' || true)"
+}
+_s248_f "$SANDY_SCRIPT"
+_S248_FRC1="$_S248_FRC"; _S248_FLOG1="$_S248_FLOG"; _S248_FOUT1="$(cat "$_S248_F/out")"
+_s248_f "$_S248_MUT7"
+_S248_FRC2="$_S248_FRC"; _S248_FLOG2="$_S248_FLOG"
+pkill -f "$_S248_F/" 2>/dev/null || true
+check "§248(7) the update restart's --start refuses an unresolved approval before forking: exit 6 with the refusal named, and no supervisor reaches the config gate; the mutant without the client refusal forks one that does (rc=$_S248_FRC1 at-gate=$_S248_FLOG1; mutant applied: $_S248_MUT7OK at-gate=$_S248_FLOG2)" \
+    bash -c 'test "$1" = 6 && test "$2" = 0 && grep -q "An approval is pending for .* not restarting the daemon without it" <<<"$3" && test "$4" = 1 && test "$5" -ge 1' \
+    _ "$_S248_FRC1" "$_S248_FLOG1" "$_S248_FOUT1" "$_S248_MUT7OK" "$_S248_FLOG2"
+rm -rf "$_S248_F"
+unset _S248_F _S248_MUT7 _S248_MUT7OK _S248_FRC _S248_FLOG _S248_FRC1 _S248_FLOG1 _S248_FOUT1 _S248_FRC2 _S248_FLOG2
+unset -f _s248_f
+# (8) The last window: a gated key that appears AFTER every check, when the
+# restarted supervisor re-reads the workspace config. The stub's `docker info`
+# (the preflight each sandy process runs before loading config) writes the
+# key only when called by the supervisor (SANDY_DAEMON_SUPERVISOR=1 in its
+# environment), so the orchestrator's checks and the --start client's check
+# all see a clean workspace, deterministically. The supervisor must refuse
+# (fatal marker, never "dropping these keys"), and --update-sessions must
+# name the cause and exit 1. The mutant without the supervisor refusal drops
+# the key and goes on to launch.
+_S248_G="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S248_G/bin" "$_S248_G/sh" "$_S248_G/wsW/.sandy"
+cat > "$_S248_G/bin/docker" <<'DOCK'
+#!/usr/bin/env bash
+case "$1" in
+    info)
+        if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = 1 ] && [ ! -f "$S235_G/edited" ]; then
+            printf 'SANDY_AGENT=codex\n' > "$S235_G/wsW/.sandy/config"; : > "$S235_G/edited"
+        fi
+        exit 0 ;;
+    ps)
+        # The session is listed until --stop stops it, so --stop finds one to
+        # stop and the --start after it finds none already running.
+        [ -f "$S235_G/stopped" ] && exit 0
+        case "$*" in
+            *label=sandy.workspace_path=*) printf 'cidW\n' ;;
+            *label=sandy.daemon=true*) printf 'cidW|sessW|%s|sandy-claude-code\n' "$S235_G/wsW" ;;
+        esac
+        exit 0 ;;
+    inspect)
+        case "$*" in *"{{.Image}}|{{.Config.Image}}"*cidW*) echo "sha256:old|sandy-claude-code"; exit 0 ;; esac
+        exit 1 ;;
+    image)
+        [ "$2" = inspect ] || exit 0
+        echo "sha256:current"; exit 0 ;;
+    build) exit 0 ;;
+    stop|kill|rm) : > "$S235_G/stopped"; exit 0 ;;
+    run) exit 1 ;;
+esac
+exit 0
+DOCK
+printf '#!/bin/sh\nexit 1\n' > "$_S248_G/bin/curl"
+chmod +x "$_S248_G/bin/docker" "$_S248_G/bin/curl"
+_S248_MUT8="$_S248_G/sandy.mut8"
+sed 's/^        if \[ "\${SANDY_UPDATE_RESTART:-0}" = "1" \] && \[ "\${SANDY_DAEMON_SUPERVISOR:-0}" = "1" \]; then$/        if false; then/' "$SANDY_SCRIPT" > "$_S248_MUT8"
+chmod +x "$_S248_MUT8"
+_S248_MUT8OK=0; ! cmp -s "$SANDY_SCRIPT" "$_S248_MUT8" && _S248_MUT8OK=1
+# _s248_g SANDY: one --update-sessions --yes over W, bounded by a watchdog;
+# sets _S248_GRC and _S248_GDROP (the "dropping these keys" lines in any
+# daemon log, i.e. a supervisor that started without the key).
+_s248_g() {
+    rm -rf "$_S248_G/sh" "$_S248_G/edited" "$_S248_G/stopped" "$_S248_G/wsW/.sandy/config" "$_S248_G/rc"; mkdir -p "$_S248_G/sh"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        _r=0
+        cd "$_S248_G" && env PATH="$_S248_G/bin:$PATH" HOME="$_S248_G" SANDY_HOME="$_S248_G/sh" S235_G="$_S248_G" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$1" --update-sessions --yes </dev/null >"$_S248_G/out" 2>&1 || _r=$?
+        echo "$_r" > "$_S248_G/rc"
+    ) &
+    local _pid=$! _n=0
+    while [ ! -f "$_S248_G/rc" ] && [ "$_n" -lt 600 ]; do command sleep 0.1; _n=$((_n + 1)); done
+    [ -f "$_S248_G/rc" ] || { pkill -P "$_pid" 2>/dev/null || true; kill "$_pid" 2>/dev/null || true; }
+    wait "$_pid" 2>/dev/null || true
+    _S248_GRC="$(cat "$_S248_G/rc" 2>/dev/null || echo timeout)"
+    _S248_GDROP="$(find "$_S248_G/sh" -name '*daemon*.log' -exec cat {} + 2>/dev/null | grep -c 'dropping these keys' || true)"
+    _S248_GREF="$(find "$_S248_G/sh" -name '*daemon*.log' -exec cat {} + 2>/dev/null | grep -c 'will not drop these keys' || true)"
+}
+_s248_g "$SANDY_SCRIPT"
+_S248_GRC1="$_S248_GRC"; _S248_GDROP1="$_S248_GDROP"; _S248_GREF1="$_S248_GREF"; _S248_GOUT1="$(cat "$_S248_G/out")"
+_S248_GHOOK1=0; [ -f "$_S248_G/edited" ] && _S248_GHOOK1=1
+_s248_g "$_S248_MUT8"
+_S248_GDROP2="$_S248_GDROP"
+pkill -f "$_S248_G/" 2>/dev/null || true
+check "§248(8) a gated key that appears only when the restarted supervisor reads the config is refused there, not dropped: fatal, the run names 'approval pending' and exits 1; the mutant without the supervisor refusal starts one that drops it (hook fired: $_S248_GHOOK1; rc=$_S248_GRC1 refused=$_S248_GREF1 dropped=$_S248_GDROP1; mutant applied: $_S248_MUT8OK dropped=$_S248_GDROP2)" \
+    bash -c 'test "$1" = 1 && test "$2" = 1 && test "$3" -ge 1 && test "$4" = 0 && grep -q "Restarting sessW" <<<"$5" && grep -q -- "--start failed for sessW: approval pending" <<<"$5" && grep -q "sessW (approval pending)" <<<"$5" \
+             && test "$6" = 1 && test "$7" -ge 1' \
+    _ "$_S248_GHOOK1" "$_S248_GRC1" "$_S248_GREF1" "$_S248_GDROP1" "$_S248_GOUT1" "$_S248_MUT8OK" "$_S248_GDROP2"
+rm -rf "$_S248_G"
+unset _S248_G _S248_MUT8 _S248_MUT8OK _S248_GRC _S248_GDROP _S248_GREF _S248_GRC1 _S248_GDROP1 _S248_GREF1 _S248_GOUT1 _S248_GHOOK1 _S248_GDROP2
+unset -f _s248_g
+rm -rf "$_S248_D"
+unset _S248_D _S248_RC _S248_RC1 _S248_RC2 _S248_RC3 _S248_N2 _S248_OUT1 _S248_W1 _S248_A1 _S248_P1 _S248_WARN _S248_MUT _S248_MUTOK _S248_WM
+unset -f _s248_run _s248_plan _s248_h
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
