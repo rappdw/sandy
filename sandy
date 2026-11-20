@@ -3121,7 +3121,7 @@ REFLECTION_API_KEY|secret|||2.9.0|experimental|Reflection AI API key for the Mir
 XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container.
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
-SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
+SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'); a single trailing comma is accepted and dropped (2.9.1), so the launch, the container and the session marker see 'claude' for 'claude,'. 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
 SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
@@ -16589,6 +16589,14 @@ for _a in "${_SANDY_AGENTS[@]}"; do
         *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, mirror, or comma-separated combo)" >&2; exit 1 ;;
     esac
 done
+# `read -ra` drops ONE trailing empty field, so `claude,` validated as
+# [claude] while SANDY_AGENT itself kept the comma: no single-agent image
+# matched it, and `_sandy_agent_has ""` matched its `,,`. Every consumer from
+# here on reads the validated list, rejoined. The ordered SANDY_AGENT gate and
+# the approval pending list ran earlier, in the config loader, on the raw
+# KEY=value (so an approval recorded for it is unchanged), and the gate's own
+# `read -ra` already compared it as this same set.
+SANDY_AGENT="$(IFS=,; printf '%s' "${_SANDY_AGENTS[*]}")"
 # Mirror runs alone (#463, decision 1): it is not installed in sandy-full, so a
 # 0.1.0 beta's release churn and PyPI install stay out of the image every
 # combo user shares. Refuse rather than launch a pane whose binary is absent.
@@ -16631,7 +16639,8 @@ else
     esac
 fi
 # Helper: check if a specific agent is in the resolved agent list
-_sandy_agent_has() { case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
+# An empty name is never "in" the list, however SANDY_AGENT is spelled.
+_sandy_agent_has() { [ -n "$1" ] || return 1; case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
 # #428: a login session runs exactly the agent it logs in. `sandy --login`
 # passes --agent itself; this catches the internal variable set by hand.
 if [ -n "${SANDY_LOGIN_AGENT:-}" ] && [ "$SANDY_AGENT" != "$SANDY_LOGIN_AGENT" ]; then
@@ -23345,7 +23354,9 @@ done < <(_sandy_protected_dirs)
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     [ -d "$WORK_DIR/$_pd" ] || continue
-    if _sandy_agent_has "$(_sandy_overlay_detect_agent "$_pd")"; then
+    # An entry that names no agent (.claude/skills) is never overlaid.
+    _pd_agent="$(_sandy_overlay_detect_agent "$_pd")"
+    if [ -n "$_pd_agent" ] && _sandy_agent_has "$_pd_agent"; then
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     else
         # Exists but no overlay this launch: writes go straight to the host,
