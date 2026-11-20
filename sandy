@@ -397,14 +397,32 @@ else
     RED='' GREEN='' YELLOW='' NC=''
 fi
 
-info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
-error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
-# The same lines for text that carries a path or other outside data: printed
-# literally, never through echo -e, so a backslash in a workspace name is not
-# collapsed and a "\e[31m" in it is not turned into a terminal escape.
-error_lit() { printf '%b[sandy]%b %s\n' "$RED" "$NC" "$*" >&2; }
-warn_lit()  { printf '%b[sandy]%b %s\n' "$YELLOW" "$NC" "$*"; }
+# #547: the message is printed with %s, never through `echo -e` or as part of
+# a printf format, so a backslash sequence in it (backslash-033, backslash-n,
+# backslash-c, ...) is printed as typed: a workspace name, a session label or
+# a build log line cannot become a terminal escape, and a backslash in a path
+# is not collapsed. Only the colour codes go through %b. A caller that wants
+# a line break passes a real newline or makes two calls. %s stops escape
+# INTERPRETATION only: raw control bytes in the argument still reach the
+# terminal, so text a container, a build or an agent wrote goes through
+# _sandy_term_text first.
+info()  { printf '%b[sandy]%b %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[sandy]%b %s\n' "$YELLOW" "$NC" "$*"; }
+error() { printf '%b[sandy]%b %s\n' "$RED" "$NC" "$*" >&2; }
+# Before #547 only these two printed the message literally. They are now the
+# same as error and warn, kept so existing callers and test stubs still work.
+error_lit() { error "$@"; }
+warn_lit()  { warn "$@"; }
+# Outside text (a container-written file, a build log line, an agent's output)
+# reduced to printable ASCII before it is printed on the host terminal: every
+# other byte, newlines included, becomes `?`. Deleting only C0 and DEL would
+# let UTF-8 C1 controls through (U+009B CSI and U+009D OSC are the bytes
+# 0xC2 0x9B and 0xC2 0x9D), which a UTF-8 terminal honours like ESC [ and ESC ].
+# The em dash sandy itself writes into the lines a child logs becomes `-`
+# first, so they stay readable. _sandy_term_text takes its arguments (one
+# line); _sandy_term_lines filters a stream and keeps its newlines.
+_sandy_term_text() { local _t="$*"; printf '%s' "${_t//—/-}" | LC_ALL=C tr -c '\040-\176' '?'; }
+_sandy_term_lines() { LC_ALL=C sed 's/—/-/g' | LC_ALL=C tr -c '\040-\176\n' '?'; }
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 # #493: give the terminal back in a usable state after an interactive client
@@ -7151,7 +7169,7 @@ _sandy_accounts() {
 # path; empty or gone means sandy --stop cannot reach it at all (it resolves
 # the path first), so the advice says how to get there. Paths go through %q so
 # the printed command round-trips when pasted into a shell; callers print the
-# result with error_lit/warn_lit, never error()/warn() (echo -e would undo %q).
+# result with error or warn, which print it with %s (#547), so %q survives.
 _sandy_live_session_advice() {
     local _w="${1:-}"
     if [ -n "$_w" ] && [ -d "$_w" ]; then
@@ -15158,9 +15176,9 @@ _sandy_ew_failure_text() {
     printf '%s' "$_v" | LC_ALL=C tr -c '\040-\176' '?'
 }
 # Print a `failed` verdict's message on stderr. The text is agent-controlled,
-# so it is printed as a printf %s ARGUMENT, never through error(): that is
-# `echo -e`, which would turn a literal backslash-033 back into a real ESC
-# after _sandy_ew_failure_text removed the control bytes.
+# so it is printed as a printf %s ARGUMENT (error() also does this since
+# #547; before, it was `echo -e`, which turned a literal backslash-033 back
+# into a real ESC after _sandy_ew_failure_text removed the control bytes).
 _sandy_ew_report() {
     printf "${RED:-}[sandy]${NC:-} %s\n" "A feature entry exited during its startup window: $(_sandy_ew_failure_text "$1")" >&2
 }
@@ -15216,7 +15234,8 @@ _sandy_cs_start_check() {
         [ "$slug" = launch ] && continue
         [ -n "$slug" ] || continue
         if [ "$st" != up ]; then
-            error "Named Claude session '$name' ($slug) is not up: $st${reason:+ - $reason}"
+            # Every field was written by the container (#547).
+            error "$(_sandy_term_text "Named Claude session '$name' ($slug) is not up: $st${reason:+ - $reason}")"
             bad=1
         fi
     done <<< "$out"
@@ -15989,36 +16008,65 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         # "--update-sessions hangs on one session" bug. With /dev/null the child's
         # stdin is non-interactive, so the approval fails closed (drops the keys,
         # which the build doesn't need) and the refresh proceeds.
-        { ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1
-          echo "$?" > "$_upd_done"; } &
+        #
+        # #546: the group inherits `set -e`, so a bare `( … ); echo "$?" > marker`
+        # exited on a failed child before writing the marker, and the poll below
+        # waited forever. The rc is captured with `|| _upd_rc=$?` instead, and a
+        # TERM or HUP still writes a (failing) marker. The marker is written to
+        # a temp name and renamed, so the poll never reads a half-written one.
+        { _upd_rc=0
+          trap '_upd_rc=143; printf "%s\n" "$_upd_rc" > "$_upd_done.tmp"; mv -f "$_upd_done.tmp" "$_upd_done"; exit "$_upd_rc"' TERM HUP
+          ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1 || _upd_rc=$?
+          printf '%s\n' "$_upd_rc" > "$_upd_done.tmp"
+          mv -f "$_upd_done.tmp" "$_upd_done"; } &
         _upd_build_pid=$!
         _upd_hb=0
+        _upd_gone=0
         while [ ! -f "$_upd_done" ]; do
             sleep 1
             [ -f "$_upd_done" ] && break
             _upd_hb=$((_upd_hb + 1))
+            # The bound (#546): a build may legitimately run for many minutes,
+            # so time is not capped. What is caught is the group ending without
+            # a marker (killed with SIGKILL, or a regression of the capture
+            # above): bash's own job table, never `kill -0`, says it is no
+            # longer running, and 3s later there is still no marker.
+            jobs -pr > "$_upd_build_log.jobs" 2>/dev/null || true
+            if grep -qx "$_upd_build_pid" "$_upd_build_log.jobs" 2>/dev/null; then
+                _upd_gone=0
+            else
+                _upd_gone=$((_upd_gone + 1))
+                if [ "$_upd_gone" -ge 3 ] && [ ! -f "$_upd_done" ]; then
+                    error "  The image refresh for $_upd_sess ended without reporting a result; counting it as a failed build."
+                    break
+                fi
+            fi
             if [ $((_upd_hb % 20)) -eq 0 ]; then
-                _upd_phase="$(tail -n 1 "$_upd_build_log" 2>/dev/null | sed -E 's/^\[sandy\] +//; s/\.\.\.[[:space:]]*$//')"
+                # The child's last log line is build output: printable ASCII
+                # only, so it cannot drive the terminal (#547).
+                _upd_phase="$(_sandy_term_text "$(tail -n 1 "$_upd_build_log" 2>/dev/null | sed -E 's/^\[sandy\] +//; s/\.\.\.[[:space:]]*$//' || true)")"
                 info "  ...still refreshing $_upd_sess (${_upd_hb}s${_upd_phase:+: $_upd_phase})"
             fi
         done
+        rm -f "$_upd_build_log.jobs" 2>/dev/null || true
         wait "$_upd_build_pid" 2>/dev/null || true
         # B8 G7: a child that skipped (or recorded) a failed agent rebuild
         # succeeds, so its warning would otherwise stay in the captured log.
         # Only sandy's own line counts: anchored at "[sandy]", and the LAST one,
         # since the child writes it after any docker build output. The text is
-        # printed with %s, control characters stripped: neither it nor the
+        # printed with %s, reduced to printable ASCII: neither it nor the
         # session label is ever interpreted.
         _upd_note="$(grep -E '^\[sandy\] +(Skipping the agent image rebuild|Not retrying this build)' "$_upd_build_log" 2>/dev/null | tail -n 1 | sed -E 's/^\[sandy\] +//' || true)"
         if [ -n "$_upd_note" ]; then
-            printf "${YELLOW}[sandy]${NC} %s\n" "$(printf '  %s: %s' "$_upd_sess" "$_upd_note" | LC_ALL=C tr -d '\000-\037\177')"
+            warn "$(_sandy_term_text "  $_upd_sess: $_upd_note")"
         fi
         if [ "$(cat "$_upd_done" 2>/dev/null || echo 1)" != "0" ]; then
             error "  Build failed for $_upd_sess — tail of output:"
-            tail -n 20 "$_upd_build_log" | sed 's/^/[sandy]   /' >&2
+            # Build output, printable ASCII per line (#547).
+            tail -n 20 "$_upd_build_log" | _sandy_term_lines | sed 's/^/[sandy]   /' >&2
             _upd_build_failed[$_upd_i]=1
         fi
-        rm -f "$_upd_build_log" "$_upd_done" 2>/dev/null || true
+        rm -f "$_upd_build_log" "$_upd_done" "$_upd_done.tmp" 2>/dev/null || true
     done
 
     # Steps 3+4 — staleness check, then (only when --idle-for was given) the

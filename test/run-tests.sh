@@ -4680,8 +4680,10 @@ section "§76: --update-sessions refresh emits a progress heartbeat (no silent m
 # hung. The refresh must background the child, poll a done-marker (not kill -0,
 # which reads a reaped child as alive), and emit an elapsed heartbeat.
 _S76="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-check "refresh runs the child build in the background with a done-marker" \
-    bash -c 'grep -qF "echo \"\$?\" > \"\$_upd_done\"" "$1"' -- "$_S76"
+# The marker is written whatever the child's exit status (#546); §254 runs a
+# failing child and asserts the run ends.
+check "refresh runs the child build in the background with a done-marker, its rc captured so a failure cannot skip the write" \
+    bash -c 'grep -qF "2>&1 || _upd_rc=\$?" "$1" && grep -qF "mv -f \"\$_upd_done.tmp\" \"\$_upd_done\"; } &" "$1"' -- "$_S76"
 check "refresh polls the done-marker (not kill -0 on a reap-prone child)" \
     bash -c 'grep -qF "while [ ! -f \"\$_upd_done\" ]; do" "$1"' -- "$_S76"
 check "refresh emits an elapsed-time progress heartbeat" \
@@ -24679,7 +24681,8 @@ check "§204(8b) ...an explicit value still wins over it, and no claimant falls 
     "$(_s204_csi _SANDY_CS_ACTIVE=1 _SANDY_CS_CROSS=liaison SANDY_CROSS_SESSION_INBOUND=hold)" "$(_s204_csi _SANDY_CS_ACTIVE=1)"
 
 # --- (9) --start readiness: exit 9 when a declared session is not up -----------
-_S204_SC="$(sed -n '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
+# With _sandy_term_text, which it prints the container-written fields through (#547).
+_S204_SC="$(sed -n -e '/^_sandy_term_text()/p' -e '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
 mkdir -p "$_S204_D/bin9"
 # The stub RUNS the script --start sends into the container (the launch-id
 # match lives there), against a fixture file in place of the in-container path.
@@ -31946,7 +31949,7 @@ check "§244(3) --version still prints the version whatever follows it, and touc
 # `sandy --stop --workspace` hint survives a shell round trip for a path with
 # a space and a backslash: echo -e (error()) would collapse the %q backslashes
 # and the pasted command would name another directory.
-# Mutation: print the hint with error instead of error_lit and (4b) fails.
+# Mutation: restore echo -e in error() (see §254) and (4b) fails.
 _S244_WS="$_S244_D/ws one\\back"
 mkdir -p "$_S244_WS"
 _S244_WS="$(cd "$_S244_WS" && pwd -P)"
@@ -32857,6 +32860,107 @@ check "§247(8) the runner calls the summary writer after the final line, guarde
 unset -f _s247_run
 rm -rf "$_S247_D"
 unset _S247_INTEG _S247_D _S247_N
+
+# ============================================================
+section "§254: --update-sessions ends when a session's image refresh fails (#546), and info/warn/error never turn message text into terminal escapes (#547)"
+# ============================================================
+# #546: the refresh child ran as `{ ( … ); echo "$?" > marker; } &` under the
+# inherited `set -e`, so a failing child ended the group before the marker was
+# written and the poll waited forever. #547: info/warn/error printed with
+# `echo -e`, so a literal backslash-033 in a message became a real ESC, and
+# the --update-sessions heartbeat printed the child's last build-log line
+# through info.
+# Fixture: one daemon session (docker ps stub) whose --build-only child fails
+# at its first docker build. That build first writes a payload to the log:
+# real ESC and C1 (U+009B) bytes plus a literal backslash-033 sequence, then
+# waits long enough for one heartbeat. Colours are off (stdout is a file), so
+# no ESC byte may appear anywhere in the output.
+# Mutations: drop `|| _upd_rc=$?` and (1) fails (the bound reports the missing
+# marker); remove the bound as well and the run hangs, (1) fails; print the
+# heartbeat phase without _sandy_term_text and (2) fails; restore echo -e in
+# info/warn/error and (4) fails; let _sandy_term_text keep bytes outside
+# printable ASCII and (5) fails. (3) runs a copy with the capture removed and
+# proves the bound alone ends the run (mutation: remove the bound, (3) fails).
+_S254_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S254_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S254_D/bin" "$_S254_D/home/.sandy" "$_S254_D/ws" "$_S254_D/cwd"
+_S254_REALSLEEP="$(command -v sleep)"
+cat > "$_S254_D/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    ps) printf 'cid254|s254-session|%s|sandy-claude-code\n' "$S254_WS"; exit 0 ;;
+    info) exit 0 ;;
+    build)
+        printf 'step 1/9 \033]0;PWNED\007 c1:\302\233 lit:\\033]0;X\\007\n' >&2
+        "$S254_SLEEP" "${S254_BUILD_SECS:-0}"
+        exit 1 ;;
+esac
+exit 1
+STUB
+chmod +x "$_S254_D/bin/docker"
+# sandy's `sleep 1` poll waits 0.05s, so 20 polls (one heartbeat) take ~1s.
+printf '#!/usr/bin/env bash\nexec %q 0.05\n' "$_S254_REALSLEEP" > "$_S254_D/bin/sleep"
+chmod +x "$_S254_D/bin/sleep"
+# _s254_run TAG SCRIPT BUILD_SECS: run --update-sessions --yes with a clean
+# environment (no inherited SANDY_*), at most 60s; TAG.rc is written only when
+# it ended by itself, TAG.timeout when it had to be killed.
+_s254_run() {
+    local _tag="$1" _script="$2" _secs="$3" _n=0 _pid
+    rm -f "$_S254_D/$_tag.rc" "$_S254_D/$_tag.timeout"
+    ( cd "$_S254_D/cwd" && _rc=0 && env -i HOME="$_S254_D/home" SANDY_HOME="$_S254_D/home/.sandy" \
+        PATH="$_S254_D/bin:/usr/local/bin:/usr/bin:/bin" TMPDIR="${TMPDIR:-/tmp}" TERM=dumb S254_WS="$_S254_D/ws" \
+        S254_SLEEP="$_S254_REALSLEEP" S254_BUILD_SECS="$_secs" \
+        bash "$_script" --update-sessions --yes </dev/null >"$_S254_D/$_tag.out" 2>&1 || _rc=$?
+      echo "$_rc" > "$_S254_D/$_tag.rc" ) &
+    _pid=$!
+    while [ ! -f "$_S254_D/$_tag.rc" ] && [ "$_n" -lt 600 ]; do
+        "$_S254_REALSLEEP" 0.1; _n=$((_n + 1))
+    done
+    if [ ! -f "$_S254_D/$_tag.rc" ]; then
+        : > "$_S254_D/$_tag.timeout"
+        pkill -P "$_pid" 2>/dev/null || true
+        kill "$_pid" 2>/dev/null || true
+    fi
+    wait "$_pid" 2>/dev/null || true
+}
+_s254_run fixed "$_S254_SANDY" 4
+check "§254(1) a failing refresh child ends the run: it exits 0 (the documented contract: a failed build is reported and skipped), names the session in \"Build failed for\", plans it as skip (build failed), and the done-marker path reported it (no \"ended without reporting\") (mutations: drop || _upd_rc=\$?; also drop the bound and the run hangs)" \
+    bash -c '[ ! -e "$1.timeout" ] && [ "$(cat "$1.rc")" = 0 ] && grep -q "Build failed for s254-session" "$1.out" && grep "^s254-session " "$1.out" | grep -q "skip (build failed)" && ! grep -q "ended without reporting" "$1.out" || { ls "$1".*; cat "$1.rc" "$1.out" 2>/dev/null; exit 1; }' _ "$_S254_D/fixed"
+check "§254(2) the heartbeat prints the build-log line it read, reduced to printable ASCII: the output has no ESC or C1 byte, and the payload text is there with its literal backslash sequence intact (mutation: print the phase without _sandy_term_text)" \
+    bash -c 'grep -q "still refreshing s254-session (.*PWNED" "$1.out" && grep -qF "lit:\\033]0;X\\007" "$1.out" && [ "$(LC_ALL=C tr -dc "\\033\\233" < "$1.out" | wc -c | tr -d " ")" = 0 ] || { cat -v "$1.out"; exit 1; }' _ "$_S254_D/fixed"
+# (3) The bound on its own: a copy with the rc capture removed (the #546 bug
+# restored) must still end, and say why.
+sed 's# </dev/null >"\$_upd_build_log" 2>&1 || _upd_rc=\$?$# </dev/null >"$_upd_build_log" 2>\&1#' "$_S254_SANDY" > "$_S254_D/sandy-nocap"
+chmod +x "$_S254_D/sandy-nocap"
+_S254_CAPDIFF="$(diff "$_S254_SANDY" "$_S254_D/sandy-nocap" 2>/dev/null | grep -c '^>' || true)"
+_s254_run nocap "$_S254_D/sandy-nocap" 0
+check "§254(3) with the rc capture removed (the copy differs by exactly one line: $_S254_CAPDIFF), the poll bound still ends the run, says the refresh ended without reporting a result, and reports the build as failed (mutation: remove the bound)" \
+    bash -c '[ "$2" = 1 ] && [ ! -e "$1.timeout" ] && [ "$(cat "$1.rc")" = 0 ] && grep -q "The image refresh for s254-session ended without reporting a result" "$1.out" && grep -q "Build failed for s254-session" "$1.out" || { ls "$1".*; cat "$1.out" 2>/dev/null; exit 1; }' _ "$_S254_D/nocap" "$_S254_CAPDIFF"
+# (4)/(5) The helpers themselves, cut out of sandy (info() through
+# _sandy_term_lines), with the colours on and off.
+awk '/^info\(\)  \{/{on=1} on{print} /^_sandy_term_lines\(\)/{exit}' "$_S254_SANDY" > "$_S254_D/helpers.sh"
+_s254_helpers() {
+    # $1 = on|off. Prints every helper's output for the payload on stdout.
+    bash -c '
+        set -euo pipefail
+        if [ "$1" = on ]; then RED="\033[0;31m" GREEN="\033[0;32m" YELLOW="\033[1;33m" NC="\033[0m"; else RED="" GREEN="" YELLOW="" NC=""; fi
+        . "$2"
+        p="x \\033]0;PWNED\\007 \\e[31m \\n \\c y"
+        { info "$p"; warn "$p"; error "$p"; warn_lit "$p"; error_lit "$p"; } 2>&1
+    ' _ "$1" "$_S254_D/helpers.sh"
+}
+_s254_helpers on > "$_S254_D/h.on" 2>&1 || true
+_s254_helpers off > "$_S254_D/h.off" 2>&1 || true
+# With colours on, only the colour codes may carry ESC: remove those exact
+# sequences and nothing escape-like may be left.
+LC_ALL=C sed -e "s/$(printf '\033')\[0;3[12]m//g; s/$(printf '\033')\[1;33m//g; s/$(printf '\033')\[0m//g" "$_S254_D/h.on" > "$_S254_D/h.on.msg"
+check "§254(4) info, warn, error, warn_lit and error_lit print a message with backslash-033, -e, -n and -c sequences as typed, with no ESC byte from the message, colours on and off ($(grep -c . "$_S254_D/helpers.sh" || true) helper lines cut out; mutation: restore echo -e)" \
+    bash -c 'for f in "$1/h.off" "$1/h.on.msg"; do [ "$(grep -cxF "[sandy] x \\033]0;PWNED\\007 \\e[31m \\n \\c y" "$f")" = 5 ] && [ "$(LC_ALL=C tr -dc "\\033" < "$f" | wc -c | tr -d " ")" = 0 ] || { cat -v "$f"; exit 1; }; done; [ "$(LC_ALL=C tr -dc "\\033" < "$1/h.on" | wc -c | tr -d " ")" -ge 10 ] || { echo "colours were not on"; cat -v "$1/h.on"; exit 1; }' _ "$_S254_D"
+check "§254(5) _sandy_term_text turns ESC, BEL, C1 and newline bytes into ? and the em dash into -, and _sandy_term_lines keeps the line breaks (mutation: delete only C0 controls)" \
+    bash -c '. "$1"; a="$(_sandy_term_text "$(printf "a\033]0;X\007b\302\233c\nd — e")")"; b="$(printf "l1 \033[31m\nl2 —\n" | _sandy_term_lines)"; [ "$a" = "a?]0;X?b??c?d - e" ] && [ "$b" = "$(printf "l1 ?[31m\nl2 -")" ] || { printf "%s\n%s\n" "$a" "$b" | cat -v; exit 1; }' _ "$_S254_D/helpers.sh"
+unset -f _s254_run _s254_helpers
+rm -rf "$_S254_D"
+unset _S254_SANDY _S254_D _S254_REALSLEEP _S254_CAPDIFF
 
 # BEGIN SUMMARY
 # ============================================================
