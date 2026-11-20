@@ -42,7 +42,7 @@ Run `ant auth login` on the host, not in the container — the browser callback 
 ## Running Gemini CLI (`SANDY_AGENT=gemini`)
 
 > **Deprecated in 2.10.0; removal in sandy 3.0.0.** Antigravity CLI (`agy`)
-> replaces Gemini CLI and lands in sandy 3.0.0. Every launch that includes
+> replaces Gemini CLI; its support is planned for sandy 3.0.0. Every launch that includes
 > `gemini` (alone, in a combo, or through `all`) prints one warning saying so.
 > `GEMINI_MODEL`, `SANDY_GEMINI_AUTH` and `SANDY_GEMINI_EXTENSIONS` go with the
 > agent; `GEMINI_API_KEY` stays (Antigravity uses it), and so do the `.gemini/`
@@ -62,8 +62,9 @@ Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI
 > subscriptions; paid API keys, Vertex AI and Gemini Code Assist
 > Standard/Enterprise still work. When the credential sandy selects is the
 > Google-account OAuth file (no `GEMINI_API_KEY`, or `SANDY_GEMINI_AUTH=oauth`),
-> the launch warns and suggests `GEMINI_API_KEY` or Vertex AI now, or Antigravity
-> CLI in 3.0.0. It does not refuse: a Code Assist Standard/Enterprise login still
+> the launch warns that a personal account is no longer served and suggests
+> `GEMINI_API_KEY` or Vertex AI (gcloud ADC). Antigravity CLI support is planned
+> for sandy 3.0.0. It does not refuse: a Code Assist Standard/Enterprise login still
 > works through that file.
 
 > **OAuth eligibility can fail independently of credential refresh.** Some

@@ -4363,41 +4363,49 @@ _sandy_emit_schema() {
     printf ']'
 
     # agents — each with image, features, credential probe order
+    # and (2.10.0) stability: stable | experimental | deprecated, the config-key
+    # vocabulary; deprecated = announced in README's ## Deprecated table.
     printf ',"agents":['
     printf '{'
     _json_kv name '"claude"'; printf ','; _json_kv image '"sandy-claude-code"'
     printf ','; _json_kv features '["skills","channels_telegram","channels_discord","remote","synthkit"]'
     printf ','; _json_kv credentials '{"probe_order":["CLAUDE_CODE_OAUTH_TOKEN","host_credentials_file","ANTHROPIC_API_KEY"]}'
+    printf ','; _json_kv stability '"stable"'
     printf '}'
     printf ','
     printf '{'
     _json_kv name '"gemini"'; printf ','; _json_kv image '"sandy-gemini-cli"'
     printf ','; _json_kv features '["synthkit_toml","extensions"]'
     printf ','; _json_kv credentials '{"probe_order":["GEMINI_API_KEY","host_tokens_json","host_adc"]}'
+    printf ','; _json_kv stability '"deprecated"'
     printf '}'
     printf ','
     printf '{'
     _json_kv name '"codex"'; printf ','; _json_kv image '"sandy-codex"'
     printf ','; _json_kv features '["skills_context"]'
     printf ','; _json_kv credentials '{"probe_order":["OPENAI_API_KEY","sandbox_auth_json","host_auth_json"]}'
+    printf ','; _json_kv stability '"stable"'
     printf '}'
     printf ','
     printf '{'
     _json_kv name '"opencode"'; printf ','; _json_kv image '"sandy-opencode"'
     printf ','; _json_kv features '["local_llm_passthrough","provider_choice"]'
     printf ','; _json_kv credentials '{"probe_order":["provider_env_keys","host_auth_json"]}'
+    printf ','; _json_kv stability '"stable"'
     printf '}'
     printf ','
     printf '{'
     _json_kv name '"grok"'; printf ','; _json_kv image '"sandy-grok"'
     printf ','; _json_kv features '[]'
     printf ','; _json_kv credentials '{"probe_order":["XAI_API_KEY","host_grok_session"]}'
+    printf ','; _json_kv stability '"stable"'
     printf '}'
     printf ','
     printf '{'
     _json_kv name '"mirror"'; printf ','; _json_kv image '"sandy-mirror"'
     printf ','; _json_kv features '[]'
     printf ','; _json_kv credentials '{"probe_order":["REFLECTION_API_KEY","sandbox_saved_key","host_saved_key"]}'
+    printf ','; _json_kv stability '"experimental"'
     printf '}'
     printf ']'
 
@@ -10171,7 +10179,7 @@ if [[ "${1:-}" == "--login" ]]; then
         claude)   error "--login claude: not needed. Sandy reads Claude's credential from the host at every launch: log in with 'claude' (/login) on the host, or set SANDY_CLAUDE_AUTH/an API key."; exit 1 ;;
         mirror)   error "--login mirror: not needed. Set REFLECTION_API_KEY, or launch 'sandy --agent mirror' interactively and paste the key at Mirror's prompt; it is saved in this sandbox (~/.mirror is a rw sandbox mount)."; exit 1 ;;
         grok)     error "--login grok: not needed. Run 'grok login' inside a sandy session; ~/.grok is a rw sandbox mount, so it persists (or set XAI_API_KEY)."; exit 1 ;;
-        gemini)   error "--login gemini: not supported. Authenticate on the host (gemini, or gcloud ADC) or set GEMINI_API_KEY; sandy reads them at each launch."; exit 1 ;;
+        gemini)   error "--login gemini: not supported. Set GEMINI_API_KEY, or run 'gcloud auth application-default login' on the host (Vertex AI); sandy reads them at each launch. A Google-account login (run 'gemini' on the host) works only for Gemini Code Assist Standard/Enterprise."; exit 1 ;;
         opencode) error "--login opencode: not supported. Set the provider's API key, or run 'opencode auth login' on the host; sandy mounts its auth.json."; exit 1 ;;
         *)        error "--login: unknown agent '$_lg_agent' (supported: codex)"; exit 1 ;;
     esac
@@ -22318,14 +22326,15 @@ load_gemini_credentials() {
     # The credential the agent will actually use is the Google-account OAuth
     # login (an API key or ADC would have been selected first). Since
     # 2026-06-18 Google no longer serves Gemini CLI to personal accounts
-    # (free, Google AI Pro/Ultra), so this login fails for most people while
-    # a Gemini Code Assist Standard/Enterprise login still works: warn, never
-    # refuse.
+    # (free, Google AI Pro/Ultra), while a Gemini Code Assist
+    # Standard/Enterprise login still works through the same file. Sandy
+    # cannot tell the two apart, so the warning is conditional and the launch
+    # is never refused.
     if [ "$GEMINI_SELECTED_AUTH" = "oauth-personal" ]; then
-        warn "Gemini is using your Google-account login (~/.gemini OAuth). Since 2026-06-18 Google no longer serves Gemini CLI to personal Google accounts (free, Google AI Pro/Ultra); only Gemini Code Assist Standard/Enterprise logins still work. Set GEMINI_API_KEY or use Vertex AI (SANDY_GEMINI_AUTH=adc) now, or move to Antigravity CLI when it lands in sandy 3.0.0."
+        warn "Gemini will use your host Google-account login (~/.gemini OAuth). If this is a personal Google account (free, Google AI Pro/Ultra), Gemini CLI no longer serves it (since 2026-06-18): set GEMINI_API_KEY or use Vertex AI (gcloud ADC). Gemini Code Assist Standard/Enterprise logins still work. Antigravity CLI support is planned for sandy 3.0.0."
     fi
     if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "$GEMINI_CRED_TMPDIR" ] && [ -z "$GEMINI_ADC_MOUNT" ]; then
-        warn "No Gemini credentials found. Set GEMINI_API_KEY, run 'gemini auth' on host, or run 'gcloud auth application-default login'"
+        warn "No Gemini credentials found. Set GEMINI_API_KEY, or run 'gcloud auth application-default login' on the host (Vertex AI). A Google-account login ('gemini' on the host) works only for Gemini Code Assist Standard/Enterprise; Google no longer serves personal accounts."
     fi
     _gemini_write_auth_type
 }
@@ -22518,7 +22527,7 @@ if _sandy_agent_has gemini; then
     # Announced in README ## Deprecated (2.10.0, removal 3.0.0). Once per
     # launch: the --start approval pre-pass exits long before this point, and
     # introspection never reaches it.
-    warn "SANDY_AGENT=gemini (Gemini CLI, also via --agent gemini or 'all') is deprecated and will be removed in sandy 3.0.0; Antigravity CLI replaces it (see README ## Deprecated)."
+    warn "The gemini agent (Gemini CLI) is deprecated and will be removed in sandy 3.0.0; Antigravity CLI, planned for 3.0.0, replaces it. This launch selected it through SANDY_AGENT, --agent or 'all' (see README ## Deprecated)."
     load_gemini_credentials
     _sandy_stage_commit "$SANDBOX_DIR/gemini/settings.json"
 fi

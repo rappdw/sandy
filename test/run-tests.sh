@@ -14177,31 +14177,48 @@ check "§138(4) every key listed as deprecated still EXISTS in sandy — a liste
 # Anything else -- a bare minor, a removal inside the same major, a removal
 # naming a minor -- is a row added outside the rule. Cells are split on the
 # table's pipes after the escaped ones used inside cells are set aside.
-# _s138_bad_since TABLE prints one line per offending row's since cell and, on
-# the last line, "rows=N" (the rows it judged), so a parse that sees nothing is
-# visible rather than passing.
+# _s138_bad_since TABLE [MAJOR.MINOR] prints one line per offending row's since
+# cell and, on the last line, "rows=N" (the rows it judged), so a parse that
+# sees nothing is visible rather than passing. Two more judgements, each its
+# own line prefix:
+#   removed-early: a row whose first cell records "REMOVED in A.B.C" while its
+#                  since cell schedules "(removal: N.0.0)" with A below N --
+#                  a minor-announced entry removed inside its own major (5d).
+#   future:        with MAJOR.MINOR given (SANDY_VERSION's), a since cell
+#                  naming a later release than this tree is.
 _s138_bad_since() {
-    printf '%s\n' "$1" | awk '
+    printf '%s\n' "$1" | awk -v cur="${2:-}" '
         /^\| / && !/^\| deprecated \|/ {
             line = $0; gsub(/\\\|/, "\001", line)
             n = split(line, f, "|")
             if (n < 4) { print "unparsed: " $0; next }
             c = f[3]; gsub(/^[ \t]+|[ \t]+$/, "", c); rows++
-            if (c ~ /^[0-9]+\.0\.0$/) next
-            if (c ~ /^[0-9]+\.[0-9]+\.[0-9]+ \(exception\)$/) next
-            if (c ~ /^[0-9]+\.[0-9]+\.[0-9]+ \(removal: [0-9]+\.0\.0\)$/) {
-                split(c, v, "."); split(substr(c, index(c, "removal: ") + 9), r, ".")
-                if (r[1] + 0 > v[1] + 0) next
+            ok = 0; rm = 0
+            split(c, v, ".")
+            if (c ~ /^[0-9]+\.0\.0$/) ok = 1
+            else if (c ~ /^[0-9]+\.[0-9]+\.[0-9]+ \(exception\)$/) ok = 1
+            else if (c ~ /^[0-9]+\.[0-9]+\.[0-9]+ \(removal: [0-9]+\.0\.0\)$/) {
+                split(substr(c, index(c, "removal: ") + 9), r, ".")
+                if (r[1] + 0 > v[1] + 0) { ok = 1; rm = r[1] + 0 }
             }
-            print c
+            if (!ok) { print c; next }
+            if (rm && match(f[2], /REMOVED in [0-9]+\.[0-9]+\.[0-9]+/)) {
+                split(substr(f[2], RSTART + 11, RLENGTH - 11), a, ".")
+                if (a[1] + 0 < rm) print "removed-early: " c
+            }
+            if (cur != "") {
+                split(cur, k, ".")
+                if (v[1] + 0 > k[1] + 0 || (v[1] + 0 == k[1] + 0 && v[2] + 0 > k[2] + 0)) print "future: " c
+            }
         }
         END { print "rows=" rows + 0 }'
 }
-_S138_BAD="$(_s138_bad_since "$_S138_TABLE")"
+_S138_CUR="$(sed -n 's/^SANDY_VERSION="\([0-9]*\.[0-9]*\)\..*/\1/p' "$_S138_SANDY")"
+_S138_BAD="$(_s138_bad_since "$_S138_TABLE" "$_S138_CUR")"
 _S138_ROWS="$(printf '%s\n' "$_S138_BAD" | awk -F= '/^rows=/ {print $2}')"
 _S138_BAD="$(printf '%s\n' "$_S138_BAD" | awk '!/^rows=/' | tr '\n' ';')"
-check "§138(5) every Deprecated row was added under the rule: its since cell is an X.0.0, an '(exception)', or 'X.Y.Z (removal: N.0.0)' with N above X (judged ${_S138_ROWS:-0} rows; offending:${_S138_BAD:- none})" \
-    bash -c '[ -z "$1" ] && [ "${2:-0}" -ge 15 ]' _ "$_S138_BAD" "$_S138_ROWS"
+check "§138(5) every Deprecated row was added under the rule: its since cell is an X.0.0, an '(exception)', or 'X.Y.Z (removal: N.0.0)' with N above X, no later than this tree's ${_S138_CUR:-?}, and no row is REMOVED before the major it scheduled (judged ${_S138_ROWS:-0} rows; offending:${_S138_BAD:- none})" \
+    bash -c '[ -z "$1" ] && [ "${2:-0}" -ge 15 ] && [ -n "$3" ]' _ "$_S138_BAD" "$_S138_ROWS" "$_S138_CUR"
 check "§138(5b) ...and the real table carries a minor-announced row in that shape, so the third branch is exercised by it (the gemini agent, 2.10.0)" \
     bash -c 'printf "%s\n" "$1" | grep -qF "| 2.10.0 (removal: 3.0.0) |"' _ "$_S138_TABLE"
 # (5c) the judge itself, against rows the real table does not have: each bad
@@ -14224,8 +14241,24 @@ _S138_FIXOUT="$(_s138_bad_since "$_S138_FIX")"
 _S138_WANT="$(printf '%s\n' "2.10.0" "2.10.0 (removal: 2.0.0)" "2.10.0 (removal: 3.1.0)" "2.10.0 (removal: 1.0.0)" "2.10.1" "rows=9")"
 check "§138(5c) the since-cell judge reports every bad shape (bare minor or patch, removal in the same or an earlier major, removal naming a minor) and no good one, escaped pipes included (mutation: accept any minor addition; got: $(printf '%s' "$_S138_FIXOUT" | tr '\n' ';'))" \
     test "$_S138_FIXOUT" = "$_S138_WANT"
+# (5d) removal timing and since against this release, the same way: a
+# minor-announced row struck as REMOVED inside its own major is reported, one
+# removed in (or after) the major it named is not, a REMOVED marker on a
+# major-announced row is not judged by this rule at all, and with the tree at
+# 2.10 a 2.11.0 since is reported as future.
+_S138_FIX="$(printf '%s\n' \
+    '| ~~`EARLY`~~ **— REMOVED in 2.11.0** | 2.10.0 (removal: 3.0.0) | x |' \
+    '| ~~`ON_TIME`~~ **— REMOVED in 3.0.0** | 2.10.0 (removal: 3.0.0) | x |' \
+    '| ~~`LATE`~~ **— REMOVED in 3.2.0** | 2.10.0 (removal: 3.0.0) | x |' \
+    '| ~~`MAJOR_ROW`~~ **— REMOVED in 2.2.0** | 2.0.0 | x |' \
+    '| `NOW` | 2.10.0 (removal: 3.0.0) | x |' \
+    '| `FUTURE` | 2.11.0 (removal: 3.0.0) | x |')"
+_S138_FIXOUT="$(_s138_bad_since "$_S138_FIX" 2.10)"
+_S138_WANT="$(printf '%s\n' "removed-early: 2.10.0 (removal: 3.0.0)" "future: 2.11.0 (removal: 3.0.0)" "rows=6")"
+check "§138(5d) the judge reports a minor-announced row REMOVED before the major it scheduled, and a since later than this release, and nothing else (mutations: drop either judgement; got: $(printf '%s' "$_S138_FIXOUT" | tr '\n' ';'))" \
+    test "$_S138_FIXOUT" = "$_S138_WANT"
 unset -f _s138_bad_since
-unset _S138_BAD _S138_ROWS _S138_FIX _S138_FIXOUT _S138_WANT
+unset _S138_BAD _S138_ROWS _S138_FIX _S138_FIXOUT _S138_WANT _S138_CUR
 
 unset _S138_SANDY _S138_README _S138_TABLE _S138_MISSING _S138_FOUND _S138_DEPR _S138_STALE _s138_line _s138_key _s138_row _s138_k
 
@@ -28925,7 +28958,7 @@ unset _S249_B _S249_PATH _S249_ENV _S249_C _S249_W _S249_S _S249_REC _S249_R _S2
 unset -f _s249_n
 
 # ============================================================
-section "§251: the gemini agent is deprecated (2.10.0, removal 3.0.0): every launch that includes it warns once, a Google-account OAuth login warns that personal accounts are no longer served, and introspection prints neither"
+section "§253: the gemini agent is deprecated (2.10.0, removal 3.0.0): every launch that includes it warns once, a Google-account OAuth login warns that personal accounts are no longer served, and introspection prints neither"
 # ============================================================
 # Real foreground launches through the A6 stubs (-p, egress off, offline), so
 # what is asserted is what a user sees, not the presence of a warn line in the
@@ -28933,74 +28966,92 @@ section "§251: the gemini agent is deprecated (2.10.0, removal 3.0.0): every la
 # README's table. The consumer-OAuth warning must fire only when the credential
 # sandy SELECTS is the host OAuth file: an API key beside the file is selected
 # first in auto mode, and ADC alone is another account type.
-_S251_DEP="is deprecated and will be removed in sandy 3.0.0; Antigravity CLI replaces it"
-_S251_OAU="no longer serves Gemini CLI to personal Google accounts"
-_s251_seed_oauth() {   # $1 = CASE: a host Gemini OAuth login in that case's HOME
+_S253_DEP="is deprecated and will be removed in sandy 3.0.0; Antigravity CLI, planned for 3.0.0, replaces it"
+_S253_OAU="If this is a personal Google account (free, Google AI Pro/Ultra), Gemini CLI no longer serves it"
+_s253_seed_oauth() {   # $1 = CASE: a host Gemini OAuth login in that case's HOME
     mkdir -p "$_A6_DIR/$1/.gemini"
     printf '%s\n' '{"access_token":"fixture-a","refresh_token":"fixture-r"}' > "$_A6_DIR/$1/.gemini/oauth_creds.json"
 }
-_s251_seed_oauth s251-oauth; _s251_seed_oauth s251-both; _s251_seed_oauth s251-intro
-mkdir -p "$_A6_DIR/s251-adc/.config/gcloud"
-printf '{}\n' > "$_A6_DIR/s251-adc/.config/gcloud/application_default_credentials.json"
-_a6_bg s251-key   _a6_launch s251-key   SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6
-_a6_bg s251-codex _a6_launch s251-codex SANDY_AGENT=codex SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6
-_a6_bg s251-combo _a6_launch s251-combo SANDY_AGENT=codex,gemini SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6 GEMINI_API_KEY=sk-fixture-a6
-_a6_bg s251-oauth _a6_launch s251-oauth SANDY_AGENT=gemini
-_a6_bg s251-both  _a6_launch s251-both  SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6
-_a6_bg s251-adc   _a6_launch s251-adc   SANDY_AGENT=gemini
-_s251_n() { grep -cF -- "$1" "$_A6_DIR/$2/out" | tr -d ' ' || true; }   # $1 = text  $2 = CASE
+_s253_seed_oauth s253-oauth; _s253_seed_oauth s253-both; _s253_seed_oauth s253-intro
+mkdir -p "$_A6_DIR/s253-adc/.config/gcloud"
+printf '{}\n' > "$_A6_DIR/s253-adc/.config/gcloud/application_default_credentials.json"
+_a6_bg s253-key   _a6_launch s253-key   SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6
+_a6_bg s253-codex _a6_launch s253-codex SANDY_AGENT=codex SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6
+_a6_bg s253-combo _a6_launch s253-combo SANDY_AGENT=codex,gemini SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6 GEMINI_API_KEY=sk-fixture-a6
+_a6_bg s253-oauth _a6_launch s253-oauth SANDY_AGENT=gemini
+_a6_bg s253-both  _a6_launch s253-both  SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6
+_a6_bg s253-adc   _a6_launch s253-adc   SANDY_AGENT=gemini
+_s253_n() { grep -cF -- "$1" "$_A6_DIR/$2/out" | tr -d ' ' || true; }   # $1 = text  $2 = CASE
 
-_a6_join s251-key
-[ "$_A6_RC" = 0 ] || _a6_diag "§251(1) gemini API-key launch" s251-key
-check "§251(1) a gemini launch prints the deprecation warning exactly once, naming the removal release and the replacement (rc $_A6_RC, count $(_s251_n "$_S251_DEP" s251-key); mutations: drop the warning; emit it again from the credential loader)" \
-    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ] && [ -n "$3" ]' _ "$_A6_RC" "$(_s251_n "$_S251_DEP" s251-key)" "$(_a6_agent_args s251-key)"
-check "§251(2) ...and with GEMINI_API_KEY selected it prints no personal-account warning (count $(_s251_n "$_S251_OAU" s251-key); mutation: warn on any Gemini credential)" \
-    test "$(_s251_n "$_S251_OAU" s251-key)" = 0
-_a6_join s251-codex
-[ "$_A6_RC" = 0 ] || _a6_diag "§251(3) codex launch" s251-codex
-check "§251(3) a codex launch prints neither warning (rc $_A6_RC; mutation: warn unconditionally)" \
+_a6_join s253-key
+[ "$_A6_RC" = 0 ] || _a6_diag "§253(1) gemini API-key launch" s253-key
+check "§253(1) a gemini launch prints the deprecation warning exactly once, naming the removal release and the replacement (rc $_A6_RC, count $(_s253_n "$_S253_DEP" s253-key); mutations: drop the warning; emit it again from the credential loader)" \
+    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ] && [ -n "$3" ]' _ "$_A6_RC" "$(_s253_n "$_S253_DEP" s253-key)" "$(_a6_agent_args s253-key)"
+check "§253(2) ...and with GEMINI_API_KEY selected it prints no personal-account warning (count $(_s253_n "$_S253_OAU" s253-key); mutation: warn on any Gemini credential)" \
+    test "$(_s253_n "$_S253_OAU" s253-key)" = 0
+_a6_join s253-codex
+[ "$_A6_RC" = 0 ] || _a6_diag "§253(3) codex launch" s253-codex
+check "§253(3) a codex launch prints neither warning (rc $_A6_RC; mutation: warn unconditionally)" \
     bash -c '[ "$1" = 0 ] && [ "$2" = 0 ] && [ "$3" = 0 ] && [ -n "$4" ]' _ "$_A6_RC" \
-    "$(_s251_n "$_S251_DEP" s251-codex)" "$(_s251_n "$_S251_OAU" s251-codex)" "$(_a6_agent_args s251-codex)"
-_a6_join s251-combo
-[ "$_A6_RC" = 0 ] || _a6_diag "§251(4) codex,gemini launch" s251-combo
-check "§251(4) a combo that includes gemini prints the deprecation warning exactly once too (rc $_A6_RC, count $(_s251_n "$_S251_DEP" s251-combo))" \
-    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ]' _ "$_A6_RC" "$(_s251_n "$_S251_DEP" s251-combo)"
-_a6_join s251-oauth
-[ "$_A6_RC" = 0 ] || _a6_diag "§251(5) gemini OAuth-file launch" s251-oauth
-check "§251(5) when the selected Gemini credential is the host's Google-account OAuth file, the launch warns once that personal accounts are no longer served, suggests GEMINI_API_KEY / Vertex and Antigravity, and is NOT refused (rc $_A6_RC, count $(_s251_n "$_S251_OAU" s251-oauth); mutations: drop the warning; refuse the launch)" \
-    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ] && grep -F -- "$3" "$4" | grep -q "GEMINI_API_KEY" && grep -F -- "$3" "$4" | grep -q "Vertex" && grep -F -- "$3" "$4" | grep -q "Antigravity" && [ -n "$5" ]' \
-    _ "$_A6_RC" "$(_s251_n "$_S251_OAU" s251-oauth)" "$_S251_OAU" "$_A6_DIR/s251-oauth/out" "$(_a6_agent_args s251-oauth)"
-_a6_join s251-both
-check "§251(6) an API key beside the OAuth file is the selected credential, so no personal-account warning (rc $_A6_RC, count $(_s251_n "$_S251_OAU" s251-both); mutation: key the warning on the file's presence instead of the selection)" \
-    bash -c '[ "$1" = 0 ] && [ "$2" = 0 ] && grep -q "Loaded Gemini OAuth credentials" "$3"' _ "$_A6_RC" "$(_s251_n "$_S251_OAU" s251-both)" "$_A6_DIR/s251-both/out"
-_a6_join s251-adc
-check "§251(7) ADC alone (Vertex) is not a personal Google account either (rc $_A6_RC, count $(_s251_n "$_S251_OAU" s251-adc))" \
-    bash -c '[ "$1" = 0 ] && [ "$2" = 0 ] && grep -q "Application Default Credentials" "$3"' _ "$_A6_RC" "$(_s251_n "$_S251_OAU" s251-adc)" "$_A6_DIR/s251-adc/out"
+    "$(_s253_n "$_S253_DEP" s253-codex)" "$(_s253_n "$_S253_OAU" s253-codex)" "$(_a6_agent_args s253-codex)"
+_a6_join s253-combo
+[ "$_A6_RC" = 0 ] || _a6_diag "§253(4) codex,gemini launch" s253-combo
+check "§253(4) a combo that includes gemini prints the deprecation warning exactly once too (rc $_A6_RC, count $(_s253_n "$_S253_DEP" s253-combo))" \
+    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ]' _ "$_A6_RC" "$(_s253_n "$_S253_DEP" s253-combo)"
+_a6_join s253-oauth
+[ "$_A6_RC" = 0 ] || _a6_diag "§253(5) gemini OAuth-file launch" s253-oauth
+check "§253(5) when the selected Gemini credential is the host's Google-account OAuth file, the launch warns once, conditionally (IF a personal account), that personal accounts are no longer served, says Code Assist Standard/Enterprise still works, suggests GEMINI_API_KEY / Vertex (gcloud ADC, not the deprecated SANDY_GEMINI_AUTH) and Antigravity, and is NOT refused (rc $_A6_RC, count $(_s253_n "$_S253_OAU" s253-oauth); mutations: drop the warning; refuse the launch)" \
+    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ] && _l="$(grep -F -- "$3" "$4")" && case "$_l" in *GEMINI_API_KEY*"Vertex AI (gcloud ADC)"*"Code Assist Standard/Enterprise"*Antigravity*) ;; *) exit 1 ;; esac && case "$_l" in *SANDY_GEMINI_AUTH*) exit 1 ;; esac && [ -n "$5" ]' \
+    _ "$_A6_RC" "$(_s253_n "$_S253_OAU" s253-oauth)" "$_S253_OAU" "$_A6_DIR/s253-oauth/out" "$(_a6_agent_args s253-oauth)"
+_a6_join s253-both
+check "§253(6) an API key beside the OAuth file is the selected credential, so no personal-account warning (rc $_A6_RC, count $(_s253_n "$_S253_OAU" s253-both); mutation: key the warning on the file's presence instead of the selection)" \
+    bash -c '[ "$1" = 0 ] && [ "$2" = 0 ] && grep -q "Loaded Gemini OAuth credentials" "$3"' _ "$_A6_RC" "$(_s253_n "$_S253_OAU" s253-both)" "$_A6_DIR/s253-both/out"
+_a6_join s253-adc
+check "§253(7) ADC alone (Vertex) is not a personal Google account either (rc $_A6_RC, count $(_s253_n "$_S253_OAU" s253-adc))" \
+    bash -c '[ "$1" = 0 ] && [ "$2" = 0 ] && grep -q "Application Default Credentials" "$3"' _ "$_A6_RC" "$(_s253_n "$_S253_OAU" s253-adc)" "$_A6_DIR/s253-adc/out"
 
 # (8) introspection never reaches the credential block: with gemini selected
 # and a host OAuth login present, the three introspection commands print
 # neither warning on stdout or stderr, so a consumer parsing their stdout
 # sees exactly what it saw before the deprecation.
-_S251_IERR=""
-mkdir -p "$_A6_DIR/s251-intro/ws/.sandy"
-printf 'SANDY_AGENT=gemini\n' > "$_A6_DIR/s251-intro/ws/.sandy/config"
-for _s251_cmd in --print-schema --print-state --validate-config; do
-    if [ "$_s251_cmd" = --validate-config ]; then
-        _a6_launch s251-intro SANDY_AGENT=gemini -- "$_s251_cmd" "$_A6_DIR/s251-intro/ws/.sandy/config"
+_S253_IERR=""
+mkdir -p "$_A6_DIR/s253-intro/ws/.sandy"
+printf 'SANDY_AGENT=gemini\n' > "$_A6_DIR/s253-intro/ws/.sandy/config"
+for _s253_cmd in --print-schema --print-state --validate-config; do
+    if [ "$_s253_cmd" = --validate-config ]; then
+        _a6_launch s253-intro SANDY_AGENT=gemini -- "$_s253_cmd" "$_A6_DIR/s253-intro/ws/.sandy/config"
     else
-        _a6_launch s251-intro SANDY_AGENT=gemini -- "$_s251_cmd"
+        _a6_launch s253-intro SANDY_AGENT=gemini -- "$_s253_cmd"
     fi
-    _s251_rc="$_A6_RC"
-    if grep -qF -e "$_S251_DEP" -e "$_S251_OAU" "$_A6_DIR/s251-intro/out"; then
-        _S251_IERR="$_S251_IERR $_s251_cmd:warned"
+    _s253_rc="$_A6_RC"
+    if grep -qF -e "$_S253_DEP" -e "$_S253_OAU" "$_A6_DIR/s253-intro/out"; then
+        _S253_IERR="$_S253_IERR $_s253_cmd:warned"
     fi
-    [ -s "$_A6_DIR/s251-intro/out" ] || _S251_IERR="$_S251_IERR $_s251_cmd:empty"
-    [ "$_s251_rc" = 0 ] || _S251_IERR="$_S251_IERR $_s251_cmd:rc=$_s251_rc"
+    [ -s "$_A6_DIR/s253-intro/out" ] || _S253_IERR="$_S253_IERR $_s253_cmd:empty"
+    [ "$_s253_rc" = 0 ] || _S253_IERR="$_S253_IERR $_s253_cmd:rc=$_s253_rc"
 done
-check "§251(8) --print-schema, --print-state and --validate-config print neither warning for a gemini workspace with a host OAuth login, and each produced output (problems:${_S251_IERR:- none}; mutation: warn at agent resolution)" \
-    test -z "$_S251_IERR"
-unset _S251_DEP _S251_OAU _S251_IERR _s251_cmd _s251_rc
-unset -f _s251_seed_oauth _s251_n
+check "§253(8) --print-schema, --print-state and --validate-config print neither warning for a gemini workspace with a host OAuth login, and each produced output (problems:${_S253_IERR:- none}; mutation: warn at agent resolution)" \
+    test -z "$_S253_IERR"
+
+# (9) the deprecation is visible in introspection too: every --print-schema
+# agents[] object carries stability (2.10.0, additive), gemini's is
+# "deprecated", and no other agent's is -- the README table announces gemini
+# alone.
+_a6_launch s253-intro -- --print-schema
+_S253_AG="$(python3 -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+print(",".join(a["name"] + "=" + a.get("stability", "MISSING") for a in d["agents"]))' "$_A6_DIR/s253-intro/out" 2>&1 || true)"
+_S253_AGOK=0
+printf '%s\n' "$_S253_AG" | tr ',' '\n' | awk -F= '
+    NF != 2 || $2 !~ /^(stable|experimental|deprecated)$/ { bad = 1 }
+    $1 == "gemini" { g = ($2 == "deprecated") }
+    $1 != "gemini" && $2 == "deprecated" { bad = 1 }
+    END { exit (bad || !g || NR < 6) }' || _S253_AGOK=1
+check "§253(9) --print-schema agents[] carries stability on every agent, deprecated for gemini only, each value in the config-key vocabulary (got: ${_S253_AG:-none}; mutations: drop the field from one agent; mark gemini stable)" \
+    test "$_S253_AGOK" = 0
+unset _S253_AG _S253_AGOK
+unset _S253_DEP _S253_OAU _S253_IERR _s253_cmd _s253_rc
+unset -f _s253_seed_oauth _s253_n
 
 # Every background launch was joined by the check that reads it: a .pid left
 # under .bg is a case started whose check never ran.
