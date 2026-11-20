@@ -147,8 +147,9 @@ _sleep_stub() {
 # --- Independent checks run side by side (§202, §224, §242) -----------------
 # _bg_run KEY CMD [ARG...] starts CMD in the background, at most _BG_JOBS at
 # once, and keeps its output and exit status under KEY. CMD is what a check
-# would have run (or a fixture step a check reads), never `check` itself: the
-# counters live in this shell. _bg_join KEY waits for it and sets _BG_RC to
+# would have run (or a fixture step a check reads), never `check` itself (the
+# counters live in this shell), and never `exit` (the job would record no
+# status, and its check would fail as lost). _bg_join KEY waits for it and sets _BG_RC to
 # its status, or "lost" when the job died before recording one. A check then
 # runs `_bg_result KEY`, which prints that output and returns that status, so
 # check() sees what it would have seen running CMD itself; a lost job fails
@@ -194,13 +195,20 @@ _bg_reap() {
     for p in ${_BG_PIDS[@]+"${_BG_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
     _BG_PIDS=()
 }
-_bg_kill() {
-    local p
-    for p in ${_BG_PIDS[@]+"${_BG_PIDS[@]}"}; do
+_bg_kill() {   # only jobs never joined and still without a status: a pid
+    local f p      # already reaped may since belong to another process
+    [ -n "$_BG_DIR" ] || return 0
+    for f in "$_BG_DIR"/*.pid; do
+        [ -f "$f" ] && [ ! -f "${f%.pid}.rc" ] || continue
+        p="$(cat "$f" 2>/dev/null || true)"
+        case "$p" in ''|*[!0-9]*) continue ;; esac
+        # The job's own children, then the job (no setsid on macOS, so no
+        # process group of its own to signal; deeper descendants finish on
+        # their own, each under its own bound).
         pkill -TERM -P "$p" 2>/dev/null || true
         kill -TERM "$p" 2>/dev/null || true
     done
-    [ -z "$_BG_DIR" ] || rm -rf "$_BG_DIR"
+    rm -rf "$_BG_DIR"
 }
 
 # _path_farm DEST [TOOL...]: fill DEST with a symlink to every executable file
@@ -24022,7 +24030,7 @@ def apply(source, case, agents='codex', engine='auto', load_only=False):
             text += '\ncommand() { if [ "$*" = "-v node" ]; then return 1; fi; builtin command "$@"; }\n'
         call = '_sandy_fm_load "$1/features/f" fixture' if load_only else '_sandy_fm_apply "$1/features" fixture /workspace "$2" 1'
         return subprocess.run(['bash', '-c', text + '\n' + call,
-                               '_', str(root), agents], capture_output=True, text=True, timeout=10)
+                               '_', str(root), agents], capture_output=True, text=True, timeout=30)
 
 def refusals(source, engine='auto'):
     for case in negative:
@@ -29404,6 +29412,15 @@ _s224_wait_for() {
     done
     return 1
 }
+# _s224_wait_line FILE LINE: poll (up to 5 s) for LINE in FILE.
+_s224_wait_line() {
+    local _i=0
+    while [ "$_i" -lt 100 ]; do
+        grep -qxF "$2" "$1" 2>/dev/null && return 0
+        sleep 0.05; _i=$((_i + 1))
+    done
+    return 1
+}
 # _s224_wait_helpers N: poll (up to 20 s) until git has N helpers for github.com.
 _s224_wait_helpers() {
     local _i=0 _h
@@ -29416,7 +29433,9 @@ _s224_wait_helpers() {
 }
 # The host side's launches (16)-(18) and (14)'s walk, which waits out its 3 s
 # bound, start in the background while (1)-(5)'s logins sleep, and are joined
-# before (6): every later case is timed or sampled, and runs alone as before.
+# before (6), from which every case runs alone as before. (14) is timed but
+# runs beside them: its bound is 10 s (the walk is cut at 3 s; an unbounded
+# one takes 20 s), so the load of the launches cannot fail it.
 # The three launches each have their own CASE dir. The walk runs in a run dir
 # of its own (HOME, logs, a workspace like (13)'s; the same stub bin), its two
 # result files moved to where (14) reads them, and with TOKMAP blank (only the
@@ -29587,7 +29606,7 @@ WANT
     _s224_run ghdir "$_S224_GH" GH_ACCOUNTS=bob:x224b,alice:x224a GIT_TOKEN=x224a SANDY_GH_ACTIVE=alice GH_CONFIG_DIR="$_S224_D/home/custom-gh" S224_UMASK=077
     _S224_SEED=""
     _s224_wait_for "switch alice" || true
-    sleep 0.3
+    _s224_wait_line "$_S224_D/home/custom-gh/hosts.yml" "user: alice" || true
     check "§224(9d) a GH_CONFIG_DIR set beforehand is respected: the result lands there, with the chosen account active, and nowhere else; the hosts.yml already there keeps its own entry and its 0600 mode, and config.yml its 0644 (the stage starts from a mode-preserving copy)" \
         bash -c 'f="$1/home/custom-gh/hosts.yml"; grep -qx "user: alice" "$f" && grep -qx "acct other x224o" "$f" && [ "$(ls -l "$f" | cut -c1-10)" = "-rw-------" ] && [ "$(ls -l "$1/home/custom-gh/config.yml" | cut -c1-10)" = "-rw-r--r--" ] && [ ! -e "$1/home/.config/gh" ] && [ "$(cd "$1/home" && ls -A | grep -v "^.gitconfig$")" = custom-gh ]' _ "$_S224_D"
     _s224_run notok "$_S224_GH" SANDY_SSH=token
@@ -29630,7 +29649,7 @@ check "§224(13) the walk is depth-bounded: an addon at depth 10 is not looked a
 _s224_bg_join
 mv -f "$_S224_D/natslow-run/natslow.secs" "$_S224_D/natslow-run/natslow.out" "$_S224_D/" 2>/dev/null || true
 check "§224(14) a walk that does not finish is abandoned after about 3 s, silently, and the launch goes on (took $(cat "$_S224_D/natslow.secs")s)" \
-    bash -c '[ "$(cat "$1/natslow.secs")" -le 6 ] && [ ! -s "$1/natslow.out" ]' _ "$_S224_D"
+    bash -c '[ "$(cat "$1/natslow.secs")" -le 10 ] && [ ! -s "$1/natslow.out" ]' _ "$_S224_D"
 # The LFS probe never descends into node_modules (a package's own
 # .gitattributes is not the workspace's, and that walk was the probe's cost);
 # the workspace's own .gitattributes is still read. A logging grep records
@@ -29665,7 +29684,7 @@ _bg_reap
 unset -f _s224_host _s224_natslow _s224_bg_start _s224_bg_join
 rm -rf "$_S224_D"
 unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
-unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
+unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_line _s224_wait_helpers _s224_addon
 
 # ============================================================
 section "§233: --update-sessions --rebuild rebuilds each shared image once, not once per session (B8 G5)"
