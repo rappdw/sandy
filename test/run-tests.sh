@@ -28163,7 +28163,10 @@ _S248_R="$( { [ "$(cat "$_S248_W/.git/commondir" 2>/dev/null | tr '\n' ' ')" = "
 check "§248(p2) a seeded commondir the session rewrote is kept and reported (mutation: drop the content check before removal; rc $_A6_RC; ${_S248_R:-ok})" \
     test -z "$_S248_R"
 _S248_C=s248-seedi; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='rm -f .git/commondir; printf ".\n" > .git/commondir' PATH="$_S248_PATH"
+_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='printf ".\n" > .git/commondir.new; mv -f .git/commondir.new .git/commondir' PATH="$_S248_PATH"
+# The replacement is renamed over the seed, so it is a different inode while
+# both exist. rm-then-create may get the freed inode number back (ext4 on CI
+# runners does), and then it is, by design, indistinguishable from the seed.
 check "§248(p3) a seeded commondir replaced by another file (even one holding .) is not removed (mutation: drop the inode check before removal; rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && [ "$(cat "$2" 2>/dev/null)" = . ]' _ "$_A6_RC" "$_S248_W/.git/commondir"
 _S248_C=s248-seedg; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"; rm -f "$_S248_G/commondir"
