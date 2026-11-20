@@ -36,6 +36,8 @@
 # Prints PASS/FAIL per assertion plus raw evidence; exits non-zero on any
 # FAIL. Paste the whole output back. Uses a cheap model where it can
 # (RIG_CLAUDE_MODEL, RIG_CODEX_MODEL). RIG_AGENTS limits the agents.
+# RIG_PTY_DEADLINE (default 180 s) bounds each pty launch; a launch that
+# overruns is killed and counts as a FAIL ("timeout").
 set -uo pipefail
 
 SANDY="${SANDY:-$(cd "$(dirname "$0")/../.." && pwd)/sandy}"
@@ -113,29 +115,43 @@ prompt_pane() {   # $1 = text: type it into the daemon's pane, then Enter
     "$SANDY" --exec --workspace "$WS" -- tmux send-keys -t sandy Enter >/dev/null 2>&1
 }
 install_entry() {   # $1 = seconds before the entry exits 3
+    # A NEW file per entry time, never a rewrite: on macOS file sharing a
+    # container reads a host-replaced file at its old length (#400, #549),
+    # so a longer script came back cut short (`exit ` with no status, rc 0).
+    local _e="payload/fail-$1" _t
     mkdir -p "$FEAT/payload"
-    printf '#!/bin/sh\nsleep %s\nexit 3\n' "$1" > "$FEAT/payload/fail"
-    chmod +x "$FEAT/payload/fail"
-    cat > "$FEAT/feature.json" <<'MANIFEST'
-{ "sandboxes": {"include": ["*"]}, "agents": {"include": ["*"]},
-  "mounts": [ { "name": "payload", "from": "payload" } ],
-  "entry": "payload/fail" }
-MANIFEST
+    if [ ! -e "$FEAT/$_e" ]; then
+        _t="$(mktemp "$FEAT/payload/.fail.XXXXXX")"
+        printf '#!/bin/sh\nsleep %s\nexit 3\n' "$1" > "$_t"
+        chmod +x "$_t" && mv "$_t" "$FEAT/$_e"
+    fi
+    _t="$(mktemp "$FEAT/.feature.XXXXXX")"
+    printf '{ "sandboxes": {"include": ["*"]}, "agents": {"include": ["*"]},\n  "mounts": [ { "name": "payload", "from": "payload" } ],\n  "entry": "%s" }\n' "$_e" > "$_t"
+    mv "$_t" "$FEAT/feature.json"
 }
 # One interactive launch on a pty; prints "<rc> <message seen after tmux>".
 pty_launch() {
     python3 - "$SANDY" "$WS" <<'PY'
-import os, pty, select, subprocess, sys
+import os, pty, select, signal, subprocess, sys, time
 sandy, ws = sys.argv[1], sys.argv[2]
 master, slave = pty.openpty()
 p = subprocess.Popen(["bash", sandy], stdin=slave, stdout=slave, stderr=slave, cwd=ws,
-                     env={**os.environ, "TERM": "xterm"})
+                     env={**os.environ, "TERM": "xterm"}, start_new_session=True)
 os.close(slave)
-out = b""
+# Overall deadline (#549): the per-read 120 s alone let a launch that kept
+# printing, or never closed the pty, hang the rig.
+deadline = time.monotonic() + float(os.environ.get("RIG_PTY_DEADLINE", "180"))
+out = b""; timed_out = False
 while True:
-    r, _, _ = select.select([master], [], [], 120)
+    left = deadline - time.monotonic()
+    if left <= 0:
+        timed_out = True; break
+    r, _, _ = select.select([master], [], [], min(left, 120))
     if not r:
-        p.kill(); break
+        timed_out = time.monotonic() >= deadline
+        if not timed_out:
+            continue
+        break
     try:
         chunk = os.read(master, 65536)
     except OSError:
@@ -143,7 +159,18 @@ while True:
     if not chunk:
         break
     out += chunk
-rc = p.wait(timeout=30)
+if timed_out:
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        pass
+try:
+    rc = p.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL); rc = p.wait()
+if timed_out:
+    print(rc, "timeout")
+    sys.exit(0)
 text = out.decode(errors="replace")
 tail = text.rsplit("\x1b[?1049l", 1)[-1]
 print(rc, "after-tmux" if "within 5s of starting" in tail else "message-missing-after-tmux")
