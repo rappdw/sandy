@@ -14974,7 +14974,10 @@ if [ "$SANDY_STOP" = "true" ]; then
     _sandy_stop_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_stop_container" 2>/dev/null || true)"
 
     if [ -n "$_sandy_stop_pid" ] && [ "$_sandy_stop_pid" -eq "$_sandy_stop_pid" ] 2>/dev/null \
-       && kill -0 "$_sandy_stop_pid" 2>/dev/null; then
+       && _sandy_supervisor_alive "$_sandy_stop_pid"; then
+        # _sandy_supervisor_alive, not a bare kill -0: after a reboot the
+        # label's pid may belong to an unrelated process, which must never be
+        # sent TERM (the direct teardown below is the right path then).
         # Live supervisor (the common case): SIGNAL it — its own TERM trap
         # (_sandy_on_signal 143, installed near the lock) runs the SAME
         # cleanup() every interactive session uses (docker rm -f, proxy +
@@ -14994,7 +14997,7 @@ if [ "$SANDY_STOP" = "true" ]; then
         # --start of the same workspace found the lock still held.
         while [ "$_sandy_stop_waited" -lt "$_sandy_stop_timeout_s" ]; do
             _sandy_stop_still="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
-            [ -z "$_sandy_stop_still" ] && ! kill -0 "$_sandy_stop_pid" 2>/dev/null && break
+            [ -z "$_sandy_stop_still" ] && ! _sandy_supervisor_alive "$_sandy_stop_pid" && break
             sleep 1
             _sandy_stop_waited=$((_sandy_stop_waited + 1))
         done
@@ -15002,7 +15005,7 @@ if [ "$SANDY_STOP" = "true" ]; then
             error "Daemon session did not stop within ${_sandy_stop_timeout_s}s (supervisor pid $_sandy_stop_pid)."
             exit 5
         fi
-        if kill -0 "$_sandy_stop_pid" 2>/dev/null; then
+        if _sandy_supervisor_alive "$_sandy_stop_pid"; then
             warn "The agent stopped, but supervisor pid $_sandy_stop_pid is still finishing its teardown; until it exits, a --start of this workspace finds the workspace locked."
         fi
         info "Daemon session stopped."

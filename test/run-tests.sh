@@ -28215,6 +28215,21 @@ _S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
     [ ! -e "$_S248_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
 check "§248(q2) --stop of it warns, reports the file changed since the snapshot, and clears the locks, reading the session label before the container is removed (mutation: no call in --stop; label read after docker rm; ${_S248_R:-ok})" \
     test -z "$_S248_R"
+# (q2b) the daemon_pid label names a LIVE process that is not this
+# workspace's supervisor (a pid reused after a reboot): --stop must not signal
+# it, and must take the direct teardown instead.
+_S248_C=s248-daereuse; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+bash -c 'trap "echo TERM > \"$1\"; exit 0" TERM; while :; do sleep 1; done' unrelated-proc "$_A6_DIR/$_S248_C/termed" </dev/null >/dev/null 2>&1 &
+_S248_OTHER=$!
+_a6_launch "$_S248_C" A6_OS=Darwin S248_DPID="$_S248_OTHER" S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" S248_GONE="$_A6_DIR/$_S248_C/gone" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S248_W"
+sleep 1
+_S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    [ ! -e "$_A6_DIR/$_S248_C/termed" ] || echo "the unrelated process was sent TERM"
+    kill -0 "$_S248_OTHER" 2>/dev/null || echo "the unrelated process is gone"
+    grep -qF "no live supervisor" "$_A6_DIR/$_S248_C/out" || echo "no direct teardown"; } 2>&1)" || true
+kill "$_S248_OTHER" 2>/dev/null || true; wait "$_S248_OTHER" 2>/dev/null || true
+check "§248(q2b) --stop whose daemon_pid label names a live but unrelated process does not signal it and tears down directly (mutation: bare kill -0 picks the supervisor branch; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
 _S248_C=s248-daelive; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
 # A stand-in supervisor: a live process whose command line is a --start for
 # this workspace (what _sandy_supervisor_alive looks for).

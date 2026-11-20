@@ -426,9 +426,13 @@ class ProductionContracts(unittest.TestCase):
         bin_dir.mkdir()
         agent, exited = self.root / "agent-present", self.root / "supervisor-exited"
         agent.touch()
+        # Its command line is a real supervisor's (`sandy --start --workspace
+        # WS`): --stop signals only a pid that _sandy_supervisor_alive
+        # recognises, never whatever process now holds the label's pid.
         supervisor = subprocess.Popen(
-            ["bash", "-c", 'trap \'rm -f "$1"; sleep 2; touch "$2"; exit 0\' TERM; while :; do sleep 0.1; done',
-             "fake-supervisor", str(agent), str(exited)])
+            ["bash", "-c", 'trap \'rm -f "$AGENT_FILE"; sleep 2; touch "$EXITED_FILE"; exit 0\' TERM; while :; do sleep 0.1; done',
+             "sandy", "--start", "--workspace", str(self.ws.resolve())],
+            env={**os.environ, "AGENT_FILE": str(agent), "EXITED_FILE": str(exited)})
         self.addCleanup(lambda: supervisor.poll() is None and supervisor.kill())
         # A real supervisor is disowned, so init reaps it; reap this one the
         # same way, or kill -0 keeps seeing a zombie.
