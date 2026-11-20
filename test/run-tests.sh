@@ -30811,8 +30811,8 @@ unset -f _s249_g
 # and the stub rm, when it is asked to remove that marker, first waits (up to
 # 3s) for it to exist. In the fixed order the rm runs before any fork, finds
 # no marker, and the readiness loop sees the one the fork writes: exit 6. The
-# mutant (clear after the fork, the r4.2 order) removes the fresh marker, and
-# the loop runs out (sleep stubbed): exit 8.
+# mutant (clear after the fork, the order before this fix) removes the fresh
+# marker, and the loop runs out (sleep stubbed): exit 8.
 _S249_H="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S249_H/bin" "$_S249_H/sh" "$_S249_H/ws"
 _S249_RM="$(command -v rm)"
