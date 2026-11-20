@@ -197,7 +197,7 @@ The keys most people use:
 | Agent | `SANDY_AGENT=` | Signs in with |
 |---|---|---|
 | Claude Code | `claude` (default) | Your Claude login from the host (Pro, Max, Team, Enterprise), a long-lived token, an API key, or an Anthropic Console profile |
-| Gemini CLI | `gemini` | `GEMINI_API_KEY`, your Google login, or gcloud credentials |
+| Gemini CLI (**deprecated** in 2.10.0, removal in 3.0.0; Antigravity CLI, planned for sandy 3.0.0, replaces it, see [Deprecated](#deprecated)) | `gemini` | `GEMINI_API_KEY`, or gcloud / Vertex AI credentials. A Google-account login works only for Gemini Code Assist Standard/Enterprise: since 2026-06-18 Google no longer serves Gemini CLI to free or Google AI Pro/Ultra accounts, and sandy warns when it would use one |
 | OpenAI Codex CLI | `codex` | `OPENAI_API_KEY`, or a ChatGPT login kept per project (`sandy --login codex`, 2.8.0) |
 | OpenCode | `opencode` | Any provider's API key, or a local model on your network (`SANDY_LOCAL_LLM_HOST`) |
 | Grok Build | `grok` | `XAI_API_KEY`, or `grok login` |
@@ -224,13 +224,13 @@ Also: the [threat model](docs/security/THREAT_MODEL.md), the full [specification
 
 ## Deprecated
 
-Everything here not struck through still works. Each entry was announced in the major release named, and **may be removed in any later `X.Y.0`** — so if you depend on one, plan the move rather than waiting for it to break.
+Everything here not struck through still works. An entry announced in a major release (its *since* column names an `X.0.0`) **may be removed in any later `X.Y.0`**; an entry announced in a minor under the rule below names its removal release (`2.10.0 (removal: 3.0.0)`) and stays until then; a `2.5.0 (exception)` row follows the exception described below. Either way, if you depend on one, plan the move rather than waiting for it to break.
 
-Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release, and nothing is ever removed that was not listed here first. Reading this section after a major upgrade tells you everything that may disappear during that line.
+Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release, or in a minor when its removal is scheduled **no earlier than the next `X.0.0`** — such rows say so in the *since* column, as `2.10.0 (removal: 3.0.0)`. Nothing is ever removed that was not listed here first, and nothing announced in a minor disappears during the major it was announced in. Reading this section after a major upgrade tells you everything that may disappear during that line; reading it after a minor upgrade tells you what the next major will take away.
 
 An entry may also be **withdrawn** in any release — it is struck through and marked *kept*. Withdrawal is allowed in a minor because it **strictly reduces** what you have to plan for: it retracts a threat rather than creating one, which is the opposite of what the add-only rule guards against.
 
-**One written exception (2.5.0, #382):** a surface may be announced here in a *minor* only if it was shaped around a single consumer's protocol (it fails the consumer-boundary test in `CLAUDE.md`) **and** every known consumer is named and has released its migration off it before removal. Such rows say `2.5.0 (exception)` in the *since* column, and every one that sandy can detect in use **warns at launch** for at least one minor before removal, because this list alone cannot reach someone who does not read it. Anything else still waits for a major. The exception's first use — the relay-era surfaces below — completed on exactly that timeline: announced 2.5.0, removed 2.6.0.
+**One written exception (2.5.0, #382):** a surface may be announced here in a *minor* only if it was shaped around a single consumer's protocol (it fails the consumer-boundary test in `CLAUDE.md`) **and** every known consumer is named and has released its migration off it before removal. Such rows say `2.5.0 (exception)` in the *since* column, and every one that sandy can detect in use **warns at launch** for at least one minor before removal, because this list alone cannot reach someone who does not read it. Anything else waits for a major: it is announced in an `X.0.0`, or announced in a minor with its removal scheduled no earlier than the next `X.0.0`. The exception's first use — the relay-era surfaces below — completed on exactly that timeline: announced 2.5.0, removed 2.6.0.
 
 | deprecated | since | use instead |
 |---|---|---|
@@ -251,7 +251,11 @@ An entry may also be **withdrawn** in any release — it is struck through and m
 | ~~`SANDY_CROSS_SESSION_INBOUND`: the relay-conditional unset default (`cross_session_inbound_source: "relay-legacy"`)~~ **— REMOVED in 2.6.0** | 2.5.0 (exception) | declare `"receives": ["cross_session"]` in the feature's manifest (2.4.0, #380), or set the key explicitly. The key itself is **not** deprecated — only this way of defaulting it was, and it is now removed. An entry alone now resolves `refuse` |
 | ~~`SANDY_HANDOFF_RELAY` as the internal channel a manifest `entry` travels through~~ **— REMOVED in 2.6.0** | 2.5.0 (exception) | the per-feature entry plumbing (`SANDY_FEATURE_ENTRIES`), which every adopted entry now travels through identically — there is no longer a single designated entry for this variable to carry. Already a hard error as a configuration key since 2.2.0; this row was about the internal variable, which is now gone too |
 | ~~`/usr/local/bin/sandy-handoff-sessions`~~ **— REMOVED in 2.6.0** | 2.5.0 (exception) | a consumer's own copy, built on the published pane-identity contract (`SPECIFICATION.md`, #378) |
+| the `gemini` agent (Gemini CLI): `SANDY_AGENT=gemini`, `--agent gemini`, `gemini` inside a combo, and `gemini` as a member of the `all` alias. Warns at every launch that includes it | 2.10.0 (removal: 3.0.0) | Antigravity CLI (`agy`), which replaces Gemini CLI; its support is planned for sandy 3.0.0. `GEMINI_API_KEY` is **not** deprecated (Antigravity uses it), and the `.gemini/` workspace protections stay. Since 2026-06-18 Google no longer serves Gemini CLI to personal Google accounts (free, Google AI Pro/Ultra), so a launch that would use the host's Google-account login also warns; an API key, Vertex AI and Gemini Code Assist Standard/Enterprise still work |
+| `GEMINI_MODEL` | 2.10.0 (removal: 3.0.0) | goes with the `gemini` agent above |
+| `SANDY_GEMINI_AUTH` | 2.10.0 (removal: 3.0.0) | goes with the `gemini` agent above |
+| `SANDY_GEMINI_EXTENSIONS` | 2.10.0 (removal: 3.0.0) | goes with the `gemini` agent above |
 
 Removals are loud where sandy can see them: a removed config key is a hard error naming its replacement, a removed mechanism warns first, and a removed introspection field bumps `schema_version`.
 
-*(For maintainers: a deprecation warning in `sandy` names the deprecated thing **first**, before any replacement — `run-tests.sh` §138 reads the first `SANDY_*` token on the line and requires it to appear in the table above, so a deprecation added in code but never announced here fails the suite.)*
+*(For maintainers: a deprecation warning in `sandy` must contain the `SANDY_*` name of the deprecated thing, and its **first** `SANDY_*` token must be that name, before any replacement — `run-tests.sh` §138 reads the first `SANDY_*` token on the line and requires it to appear in the table above, so a deprecation added in code but never announced here fails the suite. A warning may lead with prose ("The gemini agent … is deprecated") as long as the first `SANDY_*` token is the deprecated name, here `SANDY_AGENT` via the `SANDY_AGENT=gemini` row.)*

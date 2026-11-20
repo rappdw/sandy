@@ -206,7 +206,8 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
       "features": ["skills", "channels_telegram", "channels_discord", "remote", "synthkit"],
       "credentials": {
         "probe_order": ["CLAUDE_CODE_OAUTH_TOKEN", "host_credentials_file", "ANTHROPIC_API_KEY"]
-      }
+      },
+      "stability": "stable"
     },
     {
       "name": "gemini",
@@ -214,7 +215,8 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
       "features": ["synthkit_toml", "extensions"],
       "credentials": {
         "probe_order": ["GEMINI_API_KEY", "host_tokens_json", "host_adc"]
-      }
+      },
+      "stability": "deprecated"
     },
     {
       "name": "codex",
@@ -222,7 +224,8 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
       "features": ["skills_context"],
       "credentials": {
         "probe_order": ["OPENAI_API_KEY", "sandbox_auth_json", "host_auth_json"]
-      }
+      },
+      "stability": "stable"
     },
     {
       "name": "opencode",
@@ -230,7 +233,8 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
       "features": ["local_llm_passthrough", "provider_choice"],
       "credentials": {
         "probe_order": ["provider_env_keys", "host_auth_json"]
-      }
+      },
+      "stability": "stable"
     },
     {
       "name": "grok",
@@ -238,7 +242,8 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
       "features": [],
       "credentials": {
         "probe_order": ["XAI_API_KEY", "host_grok_session"]
-      }
+      },
+      "stability": "stable"
     },
     {
       "name": "mirror",
@@ -246,7 +251,8 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
       "features": [],
       "credentials": {
         "probe_order": ["REFLECTION_API_KEY", "sandbox_saved_key", "host_saved_key"]
-      }
+      },
+      "stability": "experimental"
     }
   ],
   "protected_paths": {
@@ -279,6 +285,12 @@ Abridged from the real output of `sandy --print-schema` (2.9.1): every field sho
   }
 }
 ```
+
+> **`agents[].stability`** (2.10.0, additive): `stable` | `experimental` |
+> `deprecated`, the same vocabulary as a config key's `stability`. `deprecated`
+> means the agent is announced in README's `## Deprecated` table; `gemini` is
+> (2.10.0, removal in 3.0.0). `mirror` is `experimental`. An older sandy
+> omits the field; treat its absence as unknown, not as `stable`.
 
 > **Field-name note:** `protected_paths.dirs_always_mount` is a historical
 > *name* kept for schema stability (`schema_version` 1). Semantics since 0.13:
@@ -1100,6 +1112,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 
 ## Schema versioning
 
+- **`2.10.0`:** additive, so `schema_version` stays `4`. No field is removed or reshaped. Every `--print-schema` `agents[]` object gains `stability` (`stable` | `experimental` | `deprecated`; see the note under `--print-schema`), and `gemini` reports `deprecated`. Three config keys move from `stability: stable` to `deprecated`: `GEMINI_MODEL`, `SANDY_GEMINI_AUTH` and `SANDY_GEMINI_EXTENSIONS`. README's `## Deprecated` table announces them and the `gemini` agent under the 2.10.0 rule that allows an announcement in a minor when removal is scheduled no earlier than the next major (`2.10.0 (removal: 3.0.0)`; `decisions/2026-11-20-deprecation-in-a-minor.md`). `GEMINI_API_KEY` is not deprecated.
 - **`2.8.0` (#444):** `manifest.top_level_keys` gains `submounts`; the `manifest` object gains `submount_keys` (`["parent", "path", "from", "mode", "agents"]`), the closed input shape for protected children of feature mounts. Both changes are additive, so `schema_version` stays `4`. Capability-gate on key membership, rather than the Sandy version. Existing mount introspection reports the resulting parent/child binds; no new state field is introduced.
 
 - **`2.8.0` (decision 3, 2026-10-05):** every config key object gains `base_type` (`string` | `bool` | `int`), derived from `type`; see "Config field types" above. Additive, so `schema_version` stays `4`.
@@ -1120,7 +1133,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 - **`2.4.0` (#380):** `manifest.top_level_keys` gains `receives`, and `--print-schema`'s `manifest` object gains a new field, `manifest.receives_values` (the closed set `receives` accepts — `["cross_session"]` today). One new field in the session marker, `cross_session_inbound_source` (`"explicit"` \| `"feature:<name>"` \| `"relay-legacy"` \| `"default"`, or JSON `null` mirroring `cross_session_inbound`'s own null convention — see §C.9 of SPECIFICATION.md). All additive, so `schema_version` stays `3`. It decouples `SANDY_CROSS_SESSION_INBOUND`'s unset default from the relay: the default now resolves `accept` iff a SELECTED feature manifest declares `"receives": ["cross_session"]`, with the pre-2.4.0 relay-conditional rule surviving, additive-only, as a DEPRECATED legacy path. (`#382` listed it in README's `## Deprecated` table in 2.5.0 and removed the legacy path in 2.6.0 — `cross_session_inbound_source` can no longer produce `"relay-legacy"`; an entry alone now resolves `refuse`.) No `--print-state` field — the marker is the record for this one, matching `agent_args`'s own precedent of `--print-state` not mirroring every marker field.
 - **`2.5.0` (#382):** no field is added, removed or reshaped, so `schema_version` stays `3`. README's `## Deprecated` table now **announces** `relay{}` (every field, in the marker and in `--print-state`) under the written minor-deprecation exception; its replacement is `feature_entries.<name>` (2.4.0), where `relay_alias: true` marks the entry `relay{}` describes. `cross_session_inbound_source: "relay-legacy"` still appears in 2.5.0, but the rule behind it is deprecated and now warns at launch. **Done in 2.6.0**: `relay{}`, `relay_alias` and `disabled_by` are removed, `schema_version` moves to `4` — see the `2.6.0` (#382) entry above.
 - Current: `schema_version: 4` (moved to `2` in 2.0.0 and to `3` in 2.2.0 — entries below — and to `4` in 2.6.0 — the entry above). `--print-schema`, `--print-state`, `--validate-config` and `--print-version` all emit the same number.
-- **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal` | `deprecated`; `deprecated` marks a key announced in README's `## Deprecated` table, which may be removed in a later minor; a key already removed, whose use is a hard error, keeps its row and this value), `description`, `sources`, `base_type` (since 2.8.0, always present), and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
+- **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal` | `deprecated`; `deprecated` marks a key announced in README's `## Deprecated` table, which may be removed in a later minor or, for a row announced in a minor, no earlier than the `N.0.0` it names; a key already removed, whose use is a hard error, keeps its row and this value), `description`, `sources`, `base_type` (since 2.8.0, always present), and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
 - **`2.4.0` (#219)**: one new `config.passive_keys` entry, `SANDY_OFFLINE`, one new `cli_flags` entry, `--no-update-check`, and one new field in the session marker, `offline` (bool). Additive, so `schema_version` stays `3`. Probe `SANDY_OFFLINE`'s presence in `passive_keys` to learn whether this sandy honours it — an older sandy forwards an unknown `--no-update-check` to the agent instead of rejecting it.
 - **`2.0.0` — `schema_version` moves to `2`, the first bump.** Not additive: `sandboxes[].features` keeps its name and changes its SOURCE. It reported `$SANDBOX_DIR/features/<name>` markers (1.15.0); it now reports which features a sandbox was **selected** for by each feature's own manifest, evaluated at every launch. A consumer that kept parsing the field would silently have a different question answered, which is worse than a break, so the version says so. `feature_problems` likewise becomes `"<feature>: <why this sandbox was not selected>"`.
 
