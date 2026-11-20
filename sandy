@@ -2873,13 +2873,23 @@ _sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
 
 # True when pid $1 is a live sandy supervisor for $WORK_DIR: alive, and its
 # command line is a `sandy --start` for this workspace (a pid reused after a
-# reboot is someone else's). `ps -o command=` is POSIX (GNU and BSD alike);
-# without ps, kill -0 alone decides.
+# reboot is someone else's). Linux reads /proc/<pid>/cmdline; elsewhere
+# `ps -ww -o command=` (GNU and BSD alike); with neither, kill -0 alone decides.
 _sandy_supervisor_alive() {
     local _c
     kill -0 "$1" 2>/dev/null || return 1
-    command -v ps >/dev/null 2>&1 || return 0
-    _c="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+    # The exact argv where the kernel exposes it (Linux /proc: NUL-separated,
+    # unaffected by locale); otherwise ps -ww, because ps honours an exported
+    # COLUMNS and would cut a long workspace path off, making a live
+    # supervisor look dead (and --stop then tears down underneath it).
+    if [ -r "/proc/$1/cmdline" ]; then
+        _c="$(tr '\000' ' ' < "/proc/$1/cmdline" 2>/dev/null)" || return 1
+        _c="${_c% }"
+    elif command -v ps >/dev/null 2>&1; then
+        _c="$(ps -ww -o command= -p "$1" 2>/dev/null)" || return 1
+    else
+        return 0
+    fi
     case "$_c" in *" --start"*) ;; *) return 1 ;; esac
     # The workspace as a whole argument (followed by a space or the end), so
     # /x/ws is not taken for /x/ws2.
@@ -14593,7 +14603,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
                     # a zombie, so a fixed entry actually gets relaunched.
                     _sandy_d6_sup="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_existing" 2>/dev/null)" || _sandy_d6_sup=""
                     case "$_sandy_d6_sup" in ''|*[!0-9]*) _sandy_d6_sup="" ;; esac
-                    if [ -n "$_sandy_d6_sup" ] && kill -0 "$_sandy_d6_sup" 2>/dev/null; then
+                    if [ -n "$_sandy_d6_sup" ] && _sandy_supervisor_alive "$_sandy_d6_sup"; then
                         _sandy_ew_report "$_sandy_d6_out"
                         error "The daemon session for $WORK_DIR is being torn down; run 'sandy --start' again once the entry is fixed."
                         exit 6
@@ -14883,7 +14893,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         if [ -n "$_sandy_daemon_container" ]; then
             _sandy_fail_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_container" 2>/dev/null)" || _sandy_fail_pid=""
             error "Tearing down the failed session..."
-            if [ -n "$_sandy_fail_pid" ] && kill -0 "$_sandy_fail_pid" 2>/dev/null; then
+            if [ -n "$_sandy_fail_pid" ] && _sandy_supervisor_alive "$_sandy_fail_pid"; then
                 kill -TERM "$_sandy_fail_pid" 2>/dev/null || true
             else
                 docker rm -f "$_sandy_daemon_container" >/dev/null 2>&1 || true
@@ -14974,7 +14984,10 @@ if [ "$SANDY_STOP" = "true" ]; then
     _sandy_stop_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_stop_container" 2>/dev/null || true)"
 
     if [ -n "$_sandy_stop_pid" ] && [ "$_sandy_stop_pid" -eq "$_sandy_stop_pid" ] 2>/dev/null \
-       && kill -0 "$_sandy_stop_pid" 2>/dev/null; then
+       && _sandy_supervisor_alive "$_sandy_stop_pid"; then
+        # _sandy_supervisor_alive, not a bare kill -0: after a reboot the
+        # label's pid may belong to an unrelated process, which must never be
+        # sent TERM (the direct teardown below is the right path then).
         # Live supervisor (the common case): SIGNAL it — its own TERM trap
         # (_sandy_on_signal 143, installed near the lock) runs the SAME
         # cleanup() every interactive session uses (docker rm -f, proxy +
@@ -14994,7 +15007,7 @@ if [ "$SANDY_STOP" = "true" ]; then
         # --start of the same workspace found the lock still held.
         while [ "$_sandy_stop_waited" -lt "$_sandy_stop_timeout_s" ]; do
             _sandy_stop_still="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
-            [ -z "$_sandy_stop_still" ] && ! kill -0 "$_sandy_stop_pid" 2>/dev/null && break
+            [ -z "$_sandy_stop_still" ] && ! _sandy_supervisor_alive "$_sandy_stop_pid" && break
             sleep 1
             _sandy_stop_waited=$((_sandy_stop_waited + 1))
         done
@@ -15002,7 +15015,7 @@ if [ "$SANDY_STOP" = "true" ]; then
             error "Daemon session did not stop within ${_sandy_stop_timeout_s}s (supervisor pid $_sandy_stop_pid)."
             exit 5
         fi
-        if kill -0 "$_sandy_stop_pid" 2>/dev/null; then
+        if _sandy_supervisor_alive "$_sandy_stop_pid"; then
             warn "The agent stopped, but supervisor pid $_sandy_stop_pid is still finishing its teardown; until it exits, a --start of this workspace finds the workspace locked."
         fi
         info "Daemon session stopped."
@@ -15016,6 +15029,10 @@ if [ "$SANDY_STOP" = "true" ]; then
         # and (maybe) a now-stale #14 lock.
         info "Stopping daemon session (no live supervisor — direct teardown)..."
         _sandy_unsupervised_daemon_protect "$_sandy_stop_container" stop
+        # Read the session label while the container still exists: after
+        # `docker rm -f` an inspect finds nothing, and the lock reap, the macOS
+        # unlock and the commondir cleanup below all need it.
+        _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
         _sandy_stop_ok=true
         # docker stop (not just rm -f) first: it marks the container
         # intentionally-stopped, which is what defeats `--restart
@@ -15033,7 +15050,6 @@ if [ "$SANDY_STOP" = "true" ]; then
         # #14: that means the lock is corrupt, not provably stale, and is left
         # for the user to inspect manually) — this is best-effort, so leaving a
         # residual lock here doesn't fail the --stop itself.
-        _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
         if [ -n "$_sandy_stop_session" ]; then
             _sandy_stop_lock="$SANDY_HOME/sandboxes/.${_sandy_stop_session}.lock"
             # Same predicate and same check-rename-recheck removal as the

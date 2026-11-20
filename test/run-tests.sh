@@ -28186,10 +28186,11 @@ _S248_DB="$_A6_DIR/s248dbin"; mkdir -p "$_S248_DB"
   printf 'case "$*" in\n'
   printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
   printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
-  printf '    *sandy.session*) echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *sandy.session*) if [ -n "${S248_GONE:-}" ] && [ -e "$S248_GONE" ]; then echo "Error: No such object" >&2; exit 1; fi; echo "$S248_SESS"; exit 0 ;;\n'
   printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
   printf '    *State.Running*) echo true; exit 0 ;;\n'
-  printf '    exec*|stop*|"rm -f c0ffee"*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf '    "rm -f c0ffee"*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; if [ -n "${S248_GONE:-}" ]; then : > "$S248_GONE"; fi; exit 0 ;;\n'
+  printf '    exec*|stop*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
   printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S248_DB/docker"
 chmod +x "$_S248_DB/docker"
 _S248_C=s248-dae; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"
@@ -28204,14 +28205,43 @@ check "§248(q1) --attach to a daemon container with no live supervisor warns, r
     test -z "$_S248_R"
 chflags_stub_unlock() { grep -vxF "$1" "$_A6_DIR/$_S248_C/flags" > "$_A6_DIR/$_S248_C/flags.t" || true; mv "$_A6_DIR/$_S248_C/flags.t" "$_A6_DIR/$_S248_C/flags"; }
 chflags_stub_unlock "$_S248_W/.envrc"; printf 'tampered\n' >> "$_S248_W/.envrc"
-_a6_launch "$_S248_C" "${_S248_DENV[@]}" -- --stop --workspace "$_S248_W"
+# S248_GONE: like real Docker, the container (and so its labels) is gone once
+# `docker rm -f` has run, so --stop must read sandy.session before removing it.
+_a6_launch "$_S248_C" "${_S248_DENV[@]}" S248_GONE="$_A6_DIR/$_S248_C/gone" -- --stop --workspace "$_S248_W"
 _S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
     grep -qF "has no live supervisor" "$_A6_DIR/$_S248_C/out" || echo "no warning"
     [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .envrc ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"
     [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"
     [ ! -e "$_S248_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
-check "§248(q2) --stop of it warns, reports the file changed since the snapshot, and clears the locks (mutation: no call in --stop; ${_S248_R:-ok})" \
+check "§248(q2) --stop of it warns, reports the file changed since the snapshot, and clears the locks, reading the session label before the container is removed (mutation: no call in --stop; label read after docker rm; ${_S248_R:-ok})" \
     test -z "$_S248_R"
+# (q2b) the daemon_pid label names a LIVE process that is not this
+# workspace's supervisor (a pid reused after a reboot): --stop must not signal
+# it, and must take the direct teardown instead.
+_S248_C=s248-daereuse; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
+# Its argv even has --start and a --workspace, for ANOTHER workspace, so both
+# halves of the match are exercised.
+bash -c 'trap "echo TERM > \"$1\"; exit 0" TERM; while :; do sleep 1; done' unrelated-proc "$_A6_DIR/$_S248_C/termed" --start --workspace "$_S248_W-other" </dev/null >/dev/null 2>&1 &
+_S248_OTHER=$!
+_a6_launch "$_S248_C" A6_OS=Darwin S248_DPID="$_S248_OTHER" S248_SESS="$(basename "$_S248_S")" S248_MOUNTS="$_A6_DIR/$_S248_C/mounts" S248_GONE="$_A6_DIR/$_S248_C/gone" PATH="$_S248_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S248_W"
+sleep 1
+_S248_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    [ ! -e "$_A6_DIR/$_S248_C/termed" ] || echo "the unrelated process was sent TERM"
+    kill -0 "$_S248_OTHER" 2>/dev/null || echo "the unrelated process is gone"
+    grep -qF "no live supervisor" "$_A6_DIR/$_S248_C/out" || echo "no direct teardown"; } 2>&1)" || true
+kill "$_S248_OTHER" 2>/dev/null || true; wait "$_S248_OTHER" 2>/dev/null || true
+check "§248(q2b) --stop whose daemon_pid label names a live but unrelated process does not signal it and tears down directly (mutation: bare kill -0 picks the supervisor branch; ${_S248_R:-ok})" \
+    test -z "$_S248_R"
+# (q2c) a live supervisor with a long workspace path is still recognised when
+# COLUMNS is exported (ps truncates to it unless -ww; Linux reads /proc, so
+# the ps half of this is exercised on macOS).
+_S248_LONG="$_A6_DIR/s248-long/$(printf 'd%.0s' $(seq 1 120))/ws"; mkdir -p "$_S248_LONG"
+bash -c 'while :; do sleep 1; done' sandy --start --workspace "$_S248_LONG" </dev/null >/dev/null 2>&1 &
+_S248_SUP=$!
+_S248_R="$(COLUMNS=40 WORK_DIR="$_S248_LONG" bash -c 'export COLUMNS; eval "$(sed -n "/^_sandy_supervisor_alive()/,/^}$/p" "$1")"; if _sandy_supervisor_alive "$2"; then echo alive; else echo dead; fi; WORK_DIR="$WORK_DIR-x"; if _sandy_supervisor_alive "$2"; then echo alive; else echo dead; fi' _ "$SCRIPT" "$_S248_SUP" 2>&1 | tr '\n' ' ')" || true
+kill "$_S248_SUP" 2>/dev/null || true; wait "$_S248_SUP" 2>/dev/null || true
+check "§248(q2c) a live supervisor with a 120+ character workspace path is recognised under an exported COLUMNS=40, and not for another workspace (mutation: ps without -ww; got: $_S248_R)" \
+    test "$_S248_R" = "alive dead "
 _S248_C=s248-daelive; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
 # A stand-in supervisor: a live process whose command line is a --start for
 # this workspace (what _sandy_supervisor_alive looks for).
@@ -30113,7 +30143,9 @@ check "§235(W10a) a second --start while the running session is still in its wi
     bash -c '[ "$(cat "$1/rc")" = 0 ] && [ "$(cat "$1/elapsed")" -ge 2 ] && grep -q "already running" "$1/out" && ! grep -q "^nohup" "$1/log" || { cat "$1/rc" "$1/elapsed" "$1/out"; exit 1; }' _ "$_S235_D/w10a"
 # A stand-in live supervisor: its own process, never this suite's shell, since
 # a regression that reaps would --stop (TERM) whatever pid the label names.
-sleep 60 & _S235_SUP=$!
+# Its argv is a real supervisor's (sandy --start --workspace WS): a live pid
+# counts as the supervisor only then (_sandy_supervisor_alive).
+bash -c 'while :; do sleep 1; done' sandy --start --workspace "$_S235_D/w10b/ws" </dev/null >/dev/null 2>&1 & _S235_SUP=$!
 S226_C_SUP_PID=$_S235_SUP _s235_client w10b "$(printf 'failed\tsandy-entry w\t3\tsandy-entry w exited 3 within 5s')" 1
 kill "$_S235_SUP" 2>/dev/null || true; wait "$_S235_SUP" 2>/dev/null || true; unset _S235_SUP
 check "§235(W10b) a second --start while the running session's window has failed: exit 6 with the message, and starts nothing" \
