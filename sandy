@@ -14386,8 +14386,13 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         # "--update-sessions hangs on one session" bug. With /dev/null the child's
         # stdin is non-interactive, so the approval fails closed (drops the keys,
         # which the build doesn't need) and the refresh proceeds.
-        { ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1
-          echo "$?" > "$_upd_done"; } &
+        # The child's status is captured with `|| _upd_crc=$?`, never read from
+        # `$?` after the fact: this group runs under the script's `set -e`, so a
+        # failing child would end it before the done-marker is written, and the
+        # loop below would wait for it forever (the "...still refreshing" hang).
+        { _upd_crc=0
+          ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1 || _upd_crc=$?
+          echo "$_upd_crc" > "$_upd_done"; } &
         _upd_build_pid=$!
         _upd_hb=0
         while [ ! -f "$_upd_done" ]; do

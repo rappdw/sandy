@@ -4604,8 +4604,8 @@ section "§76: --update-sessions refresh emits a progress heartbeat (no silent m
 # hung. The refresh must background the child, poll a done-marker (not kill -0,
 # which reads a reaped child as alive), and emit an elapsed heartbeat.
 _S76="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-check "refresh runs the child build in the background with a done-marker" \
-    bash -c 'grep -qF "echo \"\$?\" > \"\$_upd_done\"" "$1"' -- "$_S76"
+check "refresh runs the child build in the background with a done-marker (written even when the child fails; §246 runs it)" \
+    bash -c 'grep -qF "echo \"\$_upd_crc\" > \"\$_upd_done\"" "$1"' -- "$_S76"
 check "refresh polls the done-marker (not kill -0 on a reap-prone child)" \
     bash -c 'grep -qF "while [ ! -f \"\$_upd_done\" ]; do" "$1"' -- "$_S76"
 check "refresh emits an elapsed-time progress heartbeat" \
@@ -30503,6 +30503,68 @@ check "§247(8) the runner calls the summary writer after the final line, guarde
 unset -f _s247_run
 rm -rf "$_S247_D"
 unset _S247_INTEG _S247_D _S247_N
+
+section "§246: --update-sessions reports a session whose refresh fails, instead of waiting for it forever"
+# ============================================================
+# The refresh child runs in a background group that writes its exit status to
+# a done-marker, and the loop waits for that file. The group runs under the
+# script's set -e, so reading the status after the child (child; echo "$?")
+# ended the group before the echo when the child failed: no marker, and the
+# loop printed "...still refreshing" every 20s forever. Run the real
+# dispatcher over one session whose workspace makes the --build-only child
+# fail (SANDY_RELAY is a hard error), under a watchdog, and mutation-test it by
+# reading the status after the child again.
+_S246_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S246_D/bin" "$_S246_D/wsX/.sandy"
+printf 'SANDY_RELAY=1\n' > "$_S246_D/wsX/.sandy/config"
+cat > "$_S246_D/bin/docker" <<'DOCK'
+#!/usr/bin/env bash
+case "$1" in
+    ps) printf 'cidX|sessX|%s|sandy-claude-code\n' "$S246_D/wsX"; exit 0 ;;
+    image) echo sha256:x; exit 0 ;;
+esac
+exit 0
+DOCK
+printf '#!/bin/sh\nexit 1\n' > "$_S246_D/bin/curl"
+chmod +x "$_S246_D/bin/docker" "$_S246_D/bin/curl"
+_S246_MUT="$_S246_D/sandy.mut"
+cp "$SANDY_SCRIPT" "$_S246_D/sandy.fixed"; chmod +x "$_S246_D/sandy.fixed"
+sed 's/ 2>&1 || _upd_crc=\$?$/ 2>\&1; _upd_crc=$?/' "$SANDY_SCRIPT" > "$_S246_MUT"
+chmod +x "$_S246_MUT"
+_S246_MUTOK=0; ! cmp -s "$SANDY_SCRIPT" "$_S246_MUT" && grep -qF ' 2>&1; _upd_crc=$?' "$_S246_MUT" && _S246_MUTOK=1
+# _s246_run SANDY NAME: one --update-sessions --dry-run under a 30s watchdog.
+# Leaves NAME.rc (the exit status, or hung) and NAME.out.
+_s246_run() {
+    local _sb="$1" _n="$2" _pid _t=0 _rc=0
+    rm -rf "$_S246_D/sh-$_n"; mkdir -p "$_S246_D/sh-$_n"
+    (
+        cd "$_S246_D" && env -i PATH="$_S246_D/bin:/usr/bin:/bin" HOME="$_S246_D" SANDY_HOME="$_S246_D/sh-$_n" \
+            S246_D="$_S246_D" SANDY_EGRESS=off SANDY_OFFLINE=1 \
+            bash "$_sb" --update-sessions --dry-run </dev/null >"$_S246_D/$_n.out" 2>&1
+    ) &
+    _pid=$!
+    while kill -0 "$_pid" 2>/dev/null && [ "$_t" -lt 120 ]; do sleep 0.25; _t=$((_t + 1)); done
+    if kill -0 "$_pid" 2>/dev/null; then
+        # Every process of the run has a path under $_S246_D on its command
+        # line (the copied script), and the suite's own shell does not.
+        pkill -TERM -f "$_S246_D/sandy\." 2>/dev/null || true
+        kill "$_pid" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null || true
+        echo hung > "$_S246_D/$_n.rc"
+    else
+        wait "$_pid" || _rc=$?
+        echo "$_rc" > "$_S246_D/$_n.rc"
+    fi
+}
+_s246_run "$_S246_D/sandy.fixed" fixed
+_s246_run "$_S246_MUT" mut
+check "§246(1) a failing refresh child is reported (Build failed for sessX) and the run ends instead of waiting forever (result: $(cat "$_S246_D/fixed.rc"))" \
+    bash -c '[ "$(cat "$1/fixed.rc")" != hung ] && grep -q "Refreshing images for sessX" "$1/fixed.out" && grep -q "Build failed for sessX" "$1/fixed.out" || { cat "$1/fixed.rc"; tail -5 "$1/fixed.out"; exit 1; }' _ "$_S246_D"
+check "§246(2) mutation: reading the status after the child, which set -e never reaches when the child fails, makes the same run wait forever (mutant applied: $_S246_MUTOK, result: $(cat "$_S246_D/mut.rc"))" \
+    bash -c '[ "$2" = 1 ] && [ "$(cat "$1/mut.rc")" = hung ] && grep -q "still refreshing sessX" "$1/mut.out" && ! grep -q "Build failed for sessX" "$1/mut.out"' _ "$_S246_D" "$_S246_MUTOK"
+rm -rf "$_S246_D"
+unset _S246_D _S246_MUT _S246_MUTOK
+unset -f _s246_run
 
 # BEGIN SUMMARY
 # ============================================================
