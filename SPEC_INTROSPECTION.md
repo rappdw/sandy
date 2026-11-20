@@ -3,7 +3,6 @@
 **Status**: Draft
 **Target**: sandy 0.12.0 (new minor — introduces a public schema contract)
 **Author**: Design doc for `sandy-ui` integration
-**Related**: [SPEC_SANDY_UI.md](SPEC_SANDY_UI.md)
 
 ## Motivation
 
@@ -87,12 +86,14 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 ### `--print-schema`
 
+Abridged from the real output of `sandy --print-schema` (2.9.0-dev): every field shown is one the command emits, with the values it emits, but each list keeps only a few of its entries, `protected_paths.files` is cut at `"..."`, and long `description` strings end in ` ...`. Run the command for the full document.
+
 ```json
 {
   "schema_version": 4,
   "sandy": {
-    "version": "2.4.0",
-    "commit": "abc1234",
+    "version": "2.9.0-dev",
+    "commit": "2f4bb20",
     "sandbox_min_compat": "2.0.0"
   },
   "config": {
@@ -101,16 +102,20 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
         "name": "SANDY_SSH",
         "type": "enum",
         "choices": ["token", "agent"],
+        "base_type": "string",
         "default": "token",
         "since": "0.1.0",
         "stability": "stable",
-        "description": "SSH authentication mode for git. 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent into the container.",
+        "description": "SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.",
         "sources": ["home_config", "home_secrets", "env"],
         "passive_approval_required": true
       },
       {
         "name": "ANTHROPIC_API_KEY",
         "type": "secret",
+        "base_type": "string",
+        "since": "0.1.0",
+        "stability": "stable",
         "description": "Anthropic API key for Claude Code. Not required when using Claude Max OAuth.",
         "sources": ["home_config", "home_secrets", "env"],
         "passive_approval_required": true
@@ -118,25 +123,33 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
     ],
     "passive_keys": [
       {
+        "name": "SANDY_AGENT",
+        "type": "agent_combo",
+        "base_type": "string",
+        "default": "claude",
+        "since": "0.9.0",
+        "stability": "stable",
+        "description": "Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). ...",
+        "sources": ["home_config", "workspace_config", "env"]
+      },
+      {
         "name": "SANDY_MODEL",
         "type": "string",
-        "pattern": "^[a-zA-Z0-9._-]+$",
+        "base_type": "string",
         "default": "claude-opus-5",
+        "pattern": "^[a-zA-Z0-9._-]+$",
+        "since": "0.1.0",
+        "stability": "stable",
         "description": "Model ID for the Claude agent.",
         "sources": ["home_config", "workspace_config", "env"]
       },
       {
         "name": "SANDY_CPUS",
         "type": "int",
-        "min": 1,
-        "default": 2,
-        "sources": ["home_config", "workspace_config", "env"]
-      },
-      {
-        "name": "SANDY_AGENT",
-        "type": "agent_combo",
-        "default": "claude",
-        "description": "Comma-separated agent list. 'all' is an alias for 'claude,gemini,codex,opencode'.",
+        "base_type": "int",
+        "since": "0.1.0",
+        "stability": "stable",
+        "description": "CPU limit for container (default: auto-detected).",
         "sources": ["home_config", "workspace_config", "env"]
       }
     ],
@@ -144,12 +157,18 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       {
         "name": "SANDY_AUTO_APPROVE_PRIVILEGED",
         "type": "bool",
-        "description": "Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt ... It does NOT bypass the dangerous-symlink gate, deliberately ... Intended for CI / test harnesses only.",
+        "base_type": "bool",
+        "since": "0.11.2",
+        "stability": "internal",
+        "description": "Bypass TWO of the three launch approval gates: ...",
         "sources": ["env"]
       },
       {
         "name": "SANDY_DEBUG_CLEANUP",
         "type": "bool",
+        "base_type": "bool",
+        "since": "0.11.4",
+        "stability": "internal",
         "description": "Print session-stub cleanup diagnostics on exit.",
         "sources": ["env"]
       }
@@ -159,29 +178,25 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
     {
       "name": "--rebuild",
       "type": "flag",
-      "description": "Force rebuild of sandy images.",
-      "conflicts_with": []
-    },
-    {
-      "name": "--print",
-      "short": "-p",
-      "type": "string",
-      "arg_name": "PROMPT",
-      "description": "Headless / one-shot mode. Pass the prompt as the argument.",
-      "conflicts_with": ["--continue"]
-    },
-    {
-      "name": "--continue",
-      "short": "-c",
-      "type": "flag",
-      "description": "Resume the most recent Claude session (claude agent only).",
-      "conflicts_with": ["--print"]
+      "description": "Force rebuild of sandy images."
     },
     {
       "name": "--remote",
       "type": "flag",
-      "description": "Run as a remote-controlled session (claude agent only).",
+      "description": "Run as a remote-controlled Claude session.",
       "agents": ["claude"]
+    },
+    {
+      "name": "--agent",
+      "type": "string",
+      "arg_name": "LIST",
+      "description": "Agent(s) for this run (overrides SANDY_AGENT)."
+    },
+    {
+      "name": "--version",
+      "short": "-v",
+      "type": "flag",
+      "description": "Show version. The short form -v means this only as the sole argument; with any other argument -v is verbose."
     }
   ],
   "agents": [
@@ -206,7 +221,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "image": "sandy-codex",
       "features": ["skills_context"],
       "credentials": {
-        "probe_order": ["OPENAI_API_KEY", "host_auth_json"]
+        "probe_order": ["OPENAI_API_KEY", "sandbox_auth_json", "host_auth_json"]
       }
     },
     {
@@ -216,34 +231,51 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "credentials": {
         "probe_order": ["provider_env_keys", "host_auth_json"]
       }
+    },
+    {
+      "name": "grok",
+      "image": "sandy-grok",
+      "features": [],
+      "credentials": {
+        "probe_order": ["XAI_API_KEY", "host_grok_session"]
+      }
+    },
+    {
+      "name": "mirror",
+      "image": "sandy-mirror",
+      "features": [],
+      "credentials": {
+        "probe_order": ["REFLECTION_API_KEY", "sandbox_saved_key", "host_saved_key"]
+      }
     }
   ],
   "protected_paths": {
-    "files": [".bashrc", ".bash_profile", ".zshrc", ".envrc", ".npmrc", "..."],
+    "files": [".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", "..."],
     "git_files": [".git/config", ".gitmodules", ".git/packed-refs"],
-    "dirs_always_mount": [".git/hooks", ".git/info", ".vscode", ".idea", ".circleci", ".devcontainer", ".github/workflows"],
+    "dirs_always_mount": [".git/hooks", ".git/info", ".vscode", ".idea", ".circleci", ".devcontainer", ".claude/hooks", ".sandy", ".mirror", ".github/workflows"],
     "dirs_workflow_edit_conditional": [".github/workflows"]
   },
   "skill_packs": [
     {
       "name": "gstack",
-      "repo": "garrytan/gstack",
-      "description": "28 Claude Code skills (QA, review, ship, browse) + headless Chromium"
+      "repo": "https://github.com/garrytan/gstack"
     }
   ],
+  "manifest": {
+    "top_level_keys": ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives", "submounts", "agent_wrapper"],
+    "mount_keys": ["name", "from", "mode", "export"],
+    "submount_keys": ["parent", "path", "from", "mode", "agents"],
+    "receives_values": ["cross_session"],
+    "agent_args_compose": [
+      {"agent": "claude", "flag": "--append-system-prompt-file", "policy": "concat"},
+      {"agent": "claude", "flag": "--append-subagent-system-prompt-file", "policy": "concat"},
+      {"agent": "claude", "flag": "--system-prompt-file", "policy": "report"}
+    ]
+  },
   "compatibility": {
     "current_schema_version": 4,
     "supported_schema_versions": [4],
     "deprecated_schema_versions": []
-  },
-  "manifest": {
-    "top_level_keys": ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives", "submounts"],
-    "submount_keys": ["parent", "path", "from", "mode", "agents"],
-    "mount_keys": ["name", "from", "mode", "export"],
-    "agent_args_compose": [
-      {"agent": "claude", "flag": "--append-system-prompt-file", "policy": "concat"},
-      {"agent": "claude", "flag": "--system-prompt-file", "policy": "report"}
-    ]
   }
 }
 ```
@@ -278,9 +310,9 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "created_at": "2026-04-15T10:00:00Z",
       "last_used_at": "2026-04-20T14:45:00Z",
       "size_bytes": null,
+      "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/feature-state/notify"}},
       "agents": ["claude"],
       "image": {"name": "sandy-claude-code", "id": "sha256:def...", "project_layer": false},
-      "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/feature-state/notify"}},
       "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false, "mirror": false},
       "features": ["notify"],
       "feature_problems": [],
@@ -315,6 +347,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "approved_at": "2026-04-16T09:30:00Z"
     }
   ],
+  "docker_reachable": true,
   "running_containers": [
     {
       "id": "abc123",
@@ -324,8 +357,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "sandbox": "zork-3dfda686",
       "daemon": true,
       "attached_clients": 1,
-      "image_stale": false,
-      "updated_at": "2026-04-20T13:30:00Z"
+      "updated_at": "2026-04-20T13:30:00Z",
+      "image_stale": false
     },
     {
       "id": "def456",
@@ -335,8 +368,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "sandbox": "quux-99999999",
       "daemon": false,
       "attached_clients": null,
-      "image_stale": true,
-      "updated_at": null
+      "updated_at": null,
+      "image_stale": true
     }
   ],
   "orphan_networks": 0,
@@ -484,8 +517,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > wants sizes; a consumer that does not want them should simply omit it.
 
 > **`workspace_path`** (per sandbox) is read from the `WORKSPACE.json` marker
-> sandy writes into each sandbox on launch; it is an empty string for a legacy
-> sandbox that predates the marker. It is a stable field of the contract — a
+> sandy writes into each sandbox on launch; it is JSON `null` (not `""`) for a
+> legacy sandbox that predates the marker, or whose marker has no usable path. It is a stable field of the contract — a
 > consumer (e.g. sandy-ui) may key its UI on it.
 
 > **`workspace_exists`** (per sandbox, added additively in `1.8.0`, #178 — no
@@ -493,12 +526,12 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > `--print-state` and `--print-state light` (unlike `size_bytes` above, this
 > costs zero extra process spawns — `[ -d ]` is a shell builtin): `true`/
 > `false` via a plain `[ -d "$workspace_path" ]` test when `workspace_path` is
-> non-empty; JSON `null` when `workspace_path` itself is empty (a legacy
+> known; JSON `null` when `workspace_path` itself is `null` (a legacy
 > sandbox with no `WORKSPACE.json` marker — unknowable whether the workspace
 > exists, so sandy never claims what it cannot prove, the same
 > fail-open-on-uncertainty rule the sandbox compat floor uses). This is the
-> field `sandy --remove-sandbox --orphans` sweeps on (see the CLAUDE.md
-> "`--remove-sandbox`" section) — `false` marks an orphaned sandbox whose
+> field `sandy --remove-sandbox --orphans` sweeps on (see the docs/DESIGN-NOTES.md
+> "`sandy --remove-sandbox`" section) — `false` marks an orphaned sandbox whose
 > workspace has moved, been renamed, or been deleted.
 >
 > Two residuals, stated rather than glossed:
@@ -526,7 +559,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > **`lock_held` / `lock_holder_pid` / `lock_holder_alive`** (per sandbox,
 > emitted identically in both modes). **One fact, three views**: the state of
 > this sandbox's workspace mutex, the lock `sandy` takes before a launch so
-> that only one sandy runs per workspace (CLAUDE.md "Concurrent launches").
+> that only one sandy runs per workspace (docs/DESIGN-NOTES.md "Concurrent launches").
 > **Read `lock_holder_alive`**; the other two are context for it.
 >
 > | `lock_held` | `lock_holder_pid` | `lock_holder_alive` | meaning |
@@ -614,7 +647,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > reading N files per sandbox is unbounded I/O relative to the light-mode
 > poll budget, and it would leak operator-placed argument values (which may
 > include things like MCP config paths) to every `--print-state` consumer.
-> See CLAUDE.md "Per-agent override" for the mechanism this field reports on.
+> See docs/DESIGN-NOTES.md "Per-agent override" for the mechanism this field reports on.
 
 > **`claude_sessions`** (per sandbox, added additively in `2.9.0`, no
 > `schema_version` bump). Named Claude sessions (`.sandy/sessions/*.md`; see
@@ -673,7 +706,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > a workspace **with** a `.sandy/Dockerfile` whose sandbox reports
 > `project_layer: false` launched on the agent image — the approval was
 > declined, or asked where nobody could answer (a non-TTY `--start`
-> supervisor), and sandy fell back. Compare `id` against `images[]` to tell
+> supervisor), and sandy fell back. Compare `id` against `installed_images[]` to tell
 > whether the tag has since moved. `null` only under the `marker` rule below,
 > or when the marker's `image` line is not in the shape sandy writes (a
 > hand-edited or corrupted marker), which is re-emitted as `null` rather than
@@ -745,8 +778,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 >   - `not_claude`: claude was not among the launched agents, so nothing is
 >     pinned. The cross-session surface does not exist in that sandbox.
 >   - `not_written`: claude was launched, but sandy refused both writes (a
->     symlinked or non-object settings file; see CLAUDE.md "Cross-session
->     inbound").
+>     symlinked or non-object settings file; see docs/DESIGN-NOTES.md
+>     "Cross-session inbound").
 >   - `unknown`: the marker's value is one sandy does not write, or a
 >     pre-1.13.0 marker records a null value without the `agents` needed to
 >     classify it.
@@ -894,29 +927,28 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 ### `--validate-config`
 
-Takes a path to a `.sandy/config`-style file. Emits:
+Takes a path to a `.sandy/config`-style file. Real output (paths and the path hash replaced) for a workspace file holding `SANDY_SKIP_PERMISSIONS=false`, `SANDY_SSH=agent`, `FOO_BAR=1`, `SANDY_CPUS=banana` and `SANDY_MODEL=claude-opus-5`:
 
 ```json
 {
   "schema_version": 4,
   "path": "/Users/drapp/dev/foo/zork/.sandy/config",
-  "source_tier": "workspace",
+  "source_tier": "passive",
   "errors": [],
   "warnings": [
-    {
-      "key": "SANDY_SKIP_PERMISSIONS",
-      "message": "privileged key set from workspace — requires explicit approval",
-      "severity": "warning"
-    }
+    {"key": "SANDY_SKIP_PERMISSIONS", "message": "weakens isolation / privileged key set from workspace — requires explicit approval", "severity": "warning"},
+    {"key": "SANDY_SSH", "message": "weakens isolation / privileged key set from workspace — requires explicit approval", "severity": "warning"}
   ],
   "unknown_keys": ["FOO_BAR"],
-  "privileged_keys_requiring_approval": ["SANDY_SSH"],
+  "privileged_keys_requiring_approval": ["SANDY_SKIP_PERMISSIONS", "SANDY_SSH"],
   "approval_status": "pending",
-  "approval_file_path": "/Users/drapp/.sandy/approvals/passive-abc123.list"
+  "approval_file_path": "/Users/drapp/.sandy/approvals/passive-<16 hex of the workspace path hash>.list"
 }
 ```
 
-Exit code: `0` on schemas that load cleanly (even with warnings), `1` on fatal errors (unparseable file, etc).
+`source_tier` is `privileged` for exactly `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`, and `passive` for any other path (including any other file under `$SANDY_HOME/`) (the tier the loader would give the file), never a source name such as `workspace`. Values are **not** type-checked: `SANDY_CPUS=banana` above produces no error or warning. The checks are key names (unknown keys) and the approval tier (privileged keys, and passive keys whose value is gated).
+
+Exit code: `0` whenever the file exists, whatever the warnings; `1` when it does not (with a JSON body whose `errors[]` names the missing file) and on a usage error (no PATH, see "Stream contract").
 
 ### `--print-version` (1.7.0, #159)
 
@@ -1143,7 +1175,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 
 - **`1.11.0` (#258)**: one new `sandboxes[]` field, `relay` (an object, emitted in BOTH modes), and one new `config_keys.passive` entry, `SANDY_RELAY`. Additive, so `schema_version` stays `1`. `relay.state` is one of `absent`, `started`, `failed`, `looping`, `disabled`; the counters come from a small fixed-size `$SANDBOX_DIR/handoff/relay/.state` file (`$SANDBOX_DIR/relay-state/.state` since 2.2.0, #353) the in-container supervisor rewrites — **not** from parsing `supervisor.log`, which is append-only and unbounded under a crash loop. **This is the only surface carrying LIVE relay state.** The session marker's `relay.slot` records launch INTENT and cannot record anything else: the marker is bind-mounted `:ro` and therefore written before `docker run`, while the relay starts in-container. A consumer asking "is the entry working?" must read `--print-state`, never the marker and never the deprecated `handoff_relay` boolean, which has always meant intent. Both are **diagnostics, not a security signal** — the state directory is mounted rw (`~/.handoff/relay` then, `/opt/sandy/relay-state` since 2.2.0), so the agent can write the state file.
 - **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS` value). In `1.10.0` the handoff tree became **on by default** (`SANDY_HANDOFF_DIRS` default `1`, `0` opts out), which narrows what the marker *means* — "forced on for this sandbox over any opt-out" rather than "enrolled" — but not the field's name, type, or source: still marker presence only, no bump. Consumers wanting to know whether a sandbox actually has the tree should check the container's mounts (`~/.handoff/{inbox,outbox,peer}`), not this field. *(The tree, the marker and this field were all removed in 2.2.0 — see the `schema_version: 3` entry above.)* Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag. In `1.8.0` (#176), one new `sandboxes[]` field: `size_bytes` (FULL MODE ONLY, always `null` in `--print-state light` — see above) — the allocated-disk-usage figure for each sandbox, computed via `du -skx`. Also in `1.8.0` (#178), one more `cli_flags` entry (`--remove-sandbox` — permanently delete a sandbox directory, with three mutually exclusive selectors: default/`--workspace PATH`, `--sandbox NAME`, `--orphans`; sub-options `--dry-run`/`--yes`) plus one new `sandboxes[]` field: `workspace_exists` (tri-state, emitted identically in BOTH `--print-state` modes since it costs no extra process spawn — see above). The existing `--workspace` `cli_flags` entry's description was also updated to name `--remove-sandbox` among the flags it honors, per the drift discipline #156 established. Also in `1.8.0` (#179), two new top-level `--print-state` fields: `host_id` and `host_id_source` (see above) — advisory host identity for multi-host fleet aggregation, sourced from `uname -n` by default with an env-only `SANDY_HOST_ID` override, emitted identically in both `--print-state` modes. `SANDY_HOST_ID` also appears as a new `env_only_keys` entry in `--print-schema`. Also in `1.8.0` (#210), one new `sandboxes[]` field: `agent_args_files` (an object of five fixed agent-name booleans — see above — reporting per-agent `$SANDBOX_DIR/agent-args.<agent>` operator-file presence, emitted identically in both `--print-state` modes). No new `cli_flags` entry — the existing `--remove-sandbox` and `--reset-sandbox` selectors are unchanged; the former now also names any `agent-args.<agent>` files it will destroy in its printed plan, and the latter preserves them unconditionally.
-- **Breaking changes** (an emitted field changes semantics or is removed): bump `schema_version`. Sandy emits only the current version — there is no parallel `--schema-version N` output, and `supported_schema_versions` lists exactly one value. The bump is the signal: it may move in a minor, and it is the only way a consumer learns a field is gone (CLAUDE.md "Versioning"). `2.0.0` (`features` changed source), `2.2.0` (the handoff and relay-slot removals) and `2.6.0` (`relay{}` and its two companion fields removed) are the three bumps so far.
+- **Breaking changes** (an emitted field changes semantics or is removed): bump `schema_version`. Sandy emits only the current version — there is no parallel `--schema-version N` output, and `supported_schema_versions` lists exactly one value. The bump is the signal: it may move in a minor, and it is the only way a consumer learns a field is gone (CLAUDE.md "Compatibility and versioning"). `2.0.0` (`features` changed source), `2.2.0` (the handoff and relay-slot removals) and `2.6.0` (`relay{}` and its two companion fields removed) are the three bumps so far.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 
 Clients should:
@@ -1283,7 +1315,7 @@ Additions to `test/run-tests.sh`:
 3. **Every key in `SANDY_PRIVILEGED_KEYS` appears in schema**
 4. **Every key in `SANDY_PASSIVE_KEYS` appears in schema**
 5. **No schema-listed key is missing from the case-statement dispatch** (the array refactor makes this trivially true)
-6. **`--validate-config` catches known-bad configs** (privileged key in passive source, unknown key, bad value)
+6. **`--validate-config` catches known-bad configs** (privileged key in passive source, unknown key, a passive key set to a gated value; values are not type-checked)
 7. **`--print-state` works with empty `$SANDY_HOME`** (returns empty arrays, not errors)
 8. **`--print-state` on a real sandbox reports correct metadata**
 9. **§91 (1.7.0, #156) parser↔cli_flags lockstep** — extracts every flag sandy's real parsers accept (fast-path if-dispatches + case labels) and diffs it against `cli_flags`, both directions, against a small hand-verified allowlist of sub-options/private/forwarded exceptions

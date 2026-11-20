@@ -51,11 +51,14 @@ starts a fresh session (with a supervisor still alive, it exits `6` instead).
 See
 [Installing a relay](features.md#installing-a-relay) for the two failure shapes.
 
-**Exit codes** — `--start`: `0` = ready, `6` = refused before launch (something needs a
-person at a terminal: an approval to answer, a missing or expired credential the
-agent would prompt for, a sandbox that needs migrating; the error names which),
-or (2.9.0; `7` before) a feature entry started and then exited inside its
-startup window, `7` = the container is crash-looping
+**Exit codes** — `--start`: `0` = ready, `1` = a usage error (`-p` with
+`--start`) or a failure not covered below, `6` = the launch was refused before
+the container was ready, and the error names the cause: most often an approval
+to answer, a missing or expired credential the agent would prompt for, or a
+sandbox below the compatibility floor, but also a config, feature,
+named-session or network-isolation error, or (2.9.0; `7` before) a feature
+entry that started and then exited inside its startup window, `7` = the
+container is crash-looping
 (including a feature entry that cannot start at all), `8` = timed out waiting
 for the session, `9` = a named Claude session (`.sandy/sessions/`) did not come
 up (the container is left running; see
@@ -63,7 +66,7 @@ up (the container is left running; see
 `--attach`: `0` = the session ended while you were attached,
 `3` = you detached cleanly and the session is still running, `4` = no such
 session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = stopped, `4` = no such session,
-`5` = teardown failed. `--stop` returns only after the session's supervisor has finished its teardown (proxy, networks, lock), so `--stop` or `--stop-all` followed straight away by `--start` is safe. So is starting several workspaces at once: a launch never removes another launch's proxy while that launch is still starting (#498).
+`5` = teardown failed. `--stop` waits up to 15s for the session's supervisor to finish its teardown (proxy, networks, lock). If the container is gone but the supervisor is still finishing, `--stop` warns and exits `0`, and a `--start` issued before it finishes finds the workspace locked; wait for the supervisor and retry. Starting several workspaces at once is safe: a launch never removes another launch's proxy while that launch is still starting (#498).
 
 This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
 session alive across a VSCode quit/relaunch.
@@ -114,7 +117,7 @@ sandy --update-sessions --rebuild --yes     # force a rebuild before checking st
 sandy --update-sessions --yes --workspace ~/dev/myproj   # scope to ONE session (per-session update)
 ```
 
-For each session it runs that workspace's own `sandy --build-only` (so image selection, skills, and any per-project Dockerfile are resolved the same way a normal launch would resolve them), compares the running container's image ID against the freshly-built one — for the agent container **and** its egress-proxy sidecar, so a proxy image refresh (the monthly base/stdlib refresh, or a proxy fix) reaches live sessions even when the agent image did not change; the plan says `restart (proxy stale)` for those — and, for anything stale, does `sandy --stop` followed by `sandy --start` for you. `--dry-run` still refreshes images (so the printed plan reflects reality) but never stops or starts anything. Without `--idle-for`, every stale session is a restart candidate; a TTY without `--yes` gets a y/N confirmation, and a non-interactive run without `--yes` refuses with exit `1` — pass `--yes` explicitly for cron/launchd. Exit `0` means everything is clean (including "nothing to do"); exit `1` means something failed or the non-interactive prompt was refused.
+For each session it runs that workspace's own `sandy --build-only` (so image selection, skills, and any per-project Dockerfile are resolved the same way a normal launch would resolve them), compares the running container's image ID against the freshly-built one — for the agent container **and** its egress-proxy sidecar, so a proxy image refresh (the monthly base/stdlib refresh, or a proxy fix) reaches live sessions even when the agent image did not change; the plan says `restart (proxy stale)` for those — and, for anything stale, does `sandy --stop` followed by `sandy --start` for you. `--dry-run` still refreshes images (so the printed plan reflects reality) but never stops or starts anything. Without `--idle-for`, every stale session is a restart candidate; a TTY without `--yes` gets a y/N confirmation, and a non-interactive run without `--yes` refuses with exit `1` — pass `--yes` explicitly for cron/launchd. Exit `0` unless a restart (`--stop` + `--start`) failed or there was something to restart and the run was non-interactive without `--yes` (both exit `1`; with nothing to restart, or under `--dry-run`, it exits `0`). A session whose image build fails is reported and skipped; it does not change the exit code.
 
 A cron/launchd recipe for a nightly quiet-hours refresh:
 
