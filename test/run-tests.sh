@@ -30418,6 +30418,92 @@ unset -f _s242_state _s242_spawns
 rm -rf "$_S242_D"
 unset _S242_FX _S242_UTF8 _S242_G _S242_L _S242_D _S242_DEAD _S242_M _S242_C _S242_P _S242_C1 _S242_C5 _S242_PER _S242_B _S242_T0 _S242_EL _S242_N _S242_WS _S242_WV
 
+section "§247: a skipped integration section is visible under GitHub Actions (annotation + job summary), a host-login section is N/A there, and nothing changes outside Actions (decision D11)"
+# The nightly integration run had only Claude credentials, so eight sections
+# skipped and the job still ended "All 48 tests passed (8 skipped)" and showed
+# green: nothing on the run page said codex, gemini, opencode and grok went
+# untested. skip() in test/run-integration-tests.sh is the one place a skip is
+# recorded; under GITHUB_ACTIONS=true it now also prints a ::warning annotation,
+# and the end of the run appends a coverage block to $GITHUB_STEP_SUMMARY.
+# Sections 9 and 10 (codex and gemini OAuth) need a login file that exists only
+# on a maintainer's host, so under Actions they are "not applicable in CI": no
+# warning, not counted as incomplete, still listed as N/A. A skip must never
+# turn the run red, so exit status and the final line are unchanged.
+#
+# This drives the runner's OWN block, extracted verbatim through the
+# SANDY_INTEG_COVERAGE sentinel pair (as §103 does for the section hook),
+# under set -euo pipefail + the ERR trap. GITHUB_ACTIONS and
+# GITHUB_STEP_SUMMARY are set or unset explicitly per scenario: CI runs this
+# suite under Actions, so an inherited value would decide the plain case.
+_S247_INTEG="$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
+_S247_D="$(mktemp -d)"
+sed -n '/BEGIN SANDY_INTEG_COVERAGE/,/END SANDY_INTEG_COVERAGE/p' "$_S247_INTEG" > "$_S247_D/cov.sh"
+check "§247(0) extracted the real coverage block (skip and the summary writer) from run-integration-tests.sh (mutation: a renamed sentinel empties the extraction and every check below is vacuous)" \
+    bash -c 'grep -q "^skip() {" "$1" && grep -q "^_integ_coverage_summary() {" "$1"' _ "$_S247_D/cov.sh"
+check "§247(0b) skip() is defined once in the runner, inside that block, so every skip reaches it (mutation: a second skip() later in the file silently bypasses the annotation)" \
+    bash -c '[ "$(grep -cE "^[[:space:]]*skip\(\) *\{" "$1")" -eq 1 ] && grep -q "^skip() {" "$2"' _ "$_S247_INTEG" "$_S247_D/cov.sh"
+
+cat > "$_S247_D/driver.sh" <<'S247DRIVER'
+#!/usr/bin/env bash
+# $1 block, $2 scenario: skips | none | badsummary
+set -euo pipefail
+trap 'printf "[err-trap] line %d: %s exited %d\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
+set -E
+PASS=0; FAIL=0; SKIP=0; ERRORS=()
+_SEC_COUNT=0; _SEC_STATES=()
+# shellcheck source=/dev/null
+. "$1"
+if [ "$2" != none ]; then
+    _CUR_SECTION_ID=2; skip "codex image build and headless (no OPENAI_API_KEY)"
+    _CUR_SECTION_ID=9; skip "codex OAuth read-only mount (no ~/.codex/auth.json)"
+    _CUR_SECTION_ID=10; skip "gemini OAuth (no ~/.gemini/oauth_creds.json or tokens.json)"
+    _CUR_SECTION_ID=12b; skip "grok 100% ready (no XAI_API_KEY)"
+fi
+_integ_coverage_summary
+printf 'REACHED_END SKIP=%s FAIL=%s\n' "$SKIP" "$FAIL"
+S247DRIVER
+
+# _s247_run NAME ACTIONS(true|unset) SUMMARY(path|unset) SCENARIO
+_s247_run() {
+    local rc=0
+    if [ "$2" = true ] && [ "$3" != unset ]; then
+        GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$3" bash "$_S247_D/driver.sh" "$_S247_D/cov.sh" "$4" >"$_S247_D/$1.out" 2>"$_S247_D/$1.err" || rc=$?
+    elif [ "$2" = true ]; then
+        env -u GITHUB_STEP_SUMMARY GITHUB_ACTIONS=true bash "$_S247_D/driver.sh" "$_S247_D/cov.sh" "$4" >"$_S247_D/$1.out" 2>"$_S247_D/$1.err" || rc=$?
+    else
+        env -u GITHUB_ACTIONS GITHUB_STEP_SUMMARY="$3" bash "$_S247_D/driver.sh" "$_S247_D/cov.sh" "$4" >"$_S247_D/$1.out" 2>"$_S247_D/$1.err" || rc=$?
+    fi
+    printf '%s\n' "$rc" > "$_S247_D/$1.rc"
+}
+_s247_run act true "$_S247_D/act.md" skips
+_s247_run plain unset "$_S247_D/plain.md" skips
+_s247_run none true "$_S247_D/none.md" none
+_s247_run bad true "$_S247_D/no-such-dir/summary.md" skips
+
+# Every scenario ran to its end, exit 0, no ERR-trap line, and SKIP counted
+# all four skips (N/A included): the final line reads exactly as before.
+for _S247_N in act plain bad; do
+    check "§247(1) $_S247_N: the driver ran to its end with exit 0, no ERR-trap line, SKIP=4 and FAIL=0 (a skip never turns the run red; N/A still counts in the final line's skip count)" \
+        bash -c '[ "$(cat "$1.rc")" = 0 ] && grep -q "^REACHED_END SKIP=4 FAIL=0$" "$1.out" && ! grep -q "err-trap" "$1.err" || { cat "$1.out" "$1.err"; exit 1; }' _ "$_S247_D/$_S247_N"
+done
+check "§247(2) under Actions a skipped key section prints a ::warning annotation naming the section and reason, with % escaped (mutation: drop the warning)" \
+    bash -c 'grep -qxF "::warning title=Integration coverage::section 2: skipped (codex image build and headless (no OPENAI_API_KEY))" "$1" && grep -qxF "::warning title=Integration coverage::section 12b: skipped (grok 100%25 ready (no XAI_API_KEY))" "$1" || { cat "$1"; exit 1; }' _ "$_S247_D/act.out"
+check "§247(3) under Actions the OAuth sections 9 and 10 print no ::warning, exactly two warnings print in all, and both read \"not applicable in CI\" (mutation: N/A treated as a skip)" \
+    bash -c '! grep -qE "^::warning.*section (9|10):" "$1" && [ "$(grep -c "^::warning" "$1")" -eq 2 ] && [ "$(grep -c "OAuth.*(not applicable in CI)" "$1")" -eq 2 ] || { cat "$1"; exit 1; }' _ "$_S247_D/act.out"
+check "§247(4) the job summary says coverage is incomplete, counts the two key skips (not the N/A ones), lists them, and lists the OAuth sections as N/A (mutation: count N/A as incomplete)" \
+    bash -c 'grep -qx "### Integration coverage incomplete" "$1" && grep -qx "2 skipped:" "$1" && grep -qxF -- "- section 2: codex image build and headless (no OPENAI_API_KEY)" "$1" && grep -qxF -- "- section 12b: grok 100% ready (no XAI_API_KEY)" "$1" && grep -qxF -- "- N/A: section 9: codex OAuth read-only mount (no ~/.codex/auth.json)" "$1" && grep -qxF -- "- N/A: section 10: gemini OAuth (no ~/.gemini/oauth_creds.json or tokens.json)" "$1" && [ "$(grep -c "^- section" "$1")" -eq 2 ] || { cat "$1"; exit 1; }' _ "$_S247_D/act.md"
+check "§247(5) outside Actions: no ::warning line, every skip keeps its \"(skipped)\" wording (OAuth included), and no summary file is written (mutation: emit warnings outside Actions)" \
+    bash -c '! grep -q "::warning" "$1.out" && ! grep -q "not applicable" "$1.out" && [ "$(grep -c "(skipped)" "$1.out")" -eq 4 ] && [ ! -e "$1.md" ] || { cat "$1.out"; exit 1; }' _ "$_S247_D/plain"
+check "§247(6) nothing skipped under Actions: the summary says \"Integration coverage: complete\" and no warning prints" \
+    bash -c '[ "$(cat "$1.rc")" = 0 ] && grep -qx "### Integration coverage: complete" "$1.md" && ! grep -q "incomplete" "$1.md" && ! grep -q "::warning" "$1.out" || { cat "$1.out" "$1.md"; exit 1; }' _ "$_S247_D/none"
+check "§247(7) an unwritable GITHUB_STEP_SUMMARY prints one note and the run still ends with exit 0 (a report about the run must never fail it)" \
+    bash -c 'grep -q "could not append the coverage block" "$1.out" && [ "$(cat "$1.rc")" = 0 ] || { cat "$1.out" "$1.err"; exit 1; }' _ "$_S247_D/bad"
+check "§247(8) the runner calls the summary writer after the final line, guarded with || true, and still ends on [ \"\$FAIL\" -eq 0 ] || exit 1 with the unchanged \"(%d skipped — see reasons above)\" wording (mutation: an unguarded call, or a skip that changes the exit)" \
+    bash -c 'grep -qx "_integ_coverage_summary || true" "$1" && [ "$(tail -n 1 "$1")" = "[ \"\$FAIL\" -eq 0 ] || exit 1" ] && grep -qF "printf \" (%d skipped — see reasons above)\" \"\$SKIP\"" "$1" && [ "$(grep -n "_integ_coverage_summary || true" "$1" | cut -d: -f1)" -gt "$(grep -m1 -n "All %d tests passed" "$1" | cut -d: -f1)" ]' _ "$_S247_INTEG"
+unset -f _s247_run
+rm -rf "$_S247_D"
+unset _S247_INTEG _S247_D _S247_N
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
