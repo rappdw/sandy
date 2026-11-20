@@ -258,4 +258,4 @@ An entry may also be **withdrawn** in any release — it is struck through and m
 
 Removals are loud where sandy can see them: a removed config key is a hard error naming its replacement, a removed mechanism warns first, and a removed introspection field bumps `schema_version`.
 
-*(For maintainers: a deprecation warning in `sandy` names the deprecated thing **first**, before any replacement — `run-tests.sh` §138 reads the first `SANDY_*` token on the line and requires it to appear in the table above, so a deprecation added in code but never announced here fails the suite.)*
+*(For maintainers: a deprecation warning in `sandy` must contain the `SANDY_*` name of the deprecated thing, and its **first** `SANDY_*` token must be that name, before any replacement — `run-tests.sh` §138 reads the first `SANDY_*` token on the line and requires it to appear in the table above, so a deprecation added in code but never announced here fails the suite. A warning may lead with prose ("The gemini agent … is deprecated") as long as the first `SANDY_*` token is the deprecated name, here `SANDY_AGENT` via the `SANDY_AGENT=gemini` row.)*
