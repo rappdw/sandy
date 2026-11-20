@@ -2904,10 +2904,11 @@ _sandy_supervisor_alive() {
 # reboot-time unlock, or never set). The next --attach and --start of that
 # workspace therefore warn, re-apply the macOS locks (the record is merged, so
 # locks still set stay sandy's) and, only when no launch snapshot exists, take
-# the content snapshot from the container's own :ro mounts. --stop warns, runs
-# the whole session-end report against whatever snapshot exists and records it
-# (the --stop dispatcher prints the record at its end, #554), then tears down
-# as before (which clears the locks and the seeded commondir files).
+# the content snapshot from the container's own :ro mounts. --stop warns, tears
+# down as before (which clears the locks and the seeded commondir files), and
+# once the container is gone runs the session-end report against whatever
+# snapshot exists and records it (_sandy_unsupervised_stop_report; the --stop
+# dispatcher prints the record at its end, #554).
 # $1 = container  $2 = attach|start|stop. Returns 0 always.
 _sandy_unsupervised_daemon_protect() {
     local _dpid _sess _sb _snap _src _dst
@@ -2922,16 +2923,10 @@ _sandy_unsupervised_daemon_protect() {
     warn "This daemon session (container ${1:0:12}) has no live supervisor: Docker restarted it after the supervisor ended (a reboot or a Docker restart)."
     warn "  Since then it has run without sandy's session-end checks, and on macOS possibly without its file locks."
     if [ "$2" = stop ]; then
-        # The whole session-end report, as the supervisor's cleanup would have
-        # run it, recorded rather than printed: --stop prints the record when
-        # its teardown is done (#554). The gitdir a .git file names is not
-        # derived again (see below), so only the top-level .git is walked for
-        # admin dirs and links; and the config is not loaded, so
-        # .github/workflows is watched even under SANDY_ALLOW_WORKFLOW_EDIT=1
-        # (a report, never a removal, so the cost is at most a line too many).
-        GITDIR_HOST=""
-        _sandy_session_end_report "$_sb" "$WORK_DIR" stop
-        rm -f "$_snap"
+        # The report runs once the container is stopped and removed, so a
+        # write made after the check cannot slip past it: the --stop
+        # dispatcher calls _sandy_unsupervised_stop_report with this sandbox.
+        _SANDY_UNSUP_STOP_SB="$_sb"
         return 0
     fi
     warn "  For a fully protected session: sandy --stop, then sandy --start."
@@ -3272,9 +3267,10 @@ _sandy_session_report_add() {
 # $3 = supervisor it is printed to the daemon log as before AND recorded; with
 # $3 = stop it is only recorded (--stop prints the record once it is done, so
 # printing it here too would show it twice). When it cannot be recorded it is
-# printed. Returns 0 always.
+# printed. $4 names the report function (default: the whole report,
+# _sandy_session_end_protected_report). Returns 0 always.
 _sandy_session_end_report() {
-    local _sb="$1" _wd="$2" _by="${3:-}" _t="" _um
+    local _sb="$1" _wd="$2" _by="${3:-}" _fn="${4:-_sandy_session_end_protected_report}" _t="" _um
     [ -n "$_sb" ] && [ -n "$_wd" ] && [ -f "$_sb/.protected-existed-at-launch" ] || return 0
     if [ -n "$_by" ] && [ -d "$_sb" ] && [ ! -L "$_sb" ]; then
         _um="$(umask)"; umask 077
@@ -3285,16 +3281,49 @@ _sandy_session_end_report() {
         if [ -n "$_by" ]; then
             printf "${YELLOW:-}[sandy]${NC:-} Could not record this session-end report in %s; it is printed here only.\n" "$_sb" >&2
         fi
-        _sandy_session_end_protected_report "$_sb" "$_wd" || true
+        "$_fn" "$_sb" "$_wd" || true
         return 0
     fi
-    _sandy_session_end_protected_report "$_sb" "$_wd" 2>"$_t" || true
+    "$_fn" "$_sb" "$_wd" 2>"$_t" || true
     if [ -s "$_t" ]; then
         if ! _sandy_session_report_add "$_sb" "$_t" "$_by" || [ "$_by" = supervisor ]; then
             cat "$_t" >&2
         fi
     fi
     rm -f "$_t"
+    return 0
+}
+# The content check alone (protected FILES whose contents changed): what a
+# snapshot that is not a launch's can support. $1 = sandbox  $2 = workspace.
+_sandy_session_end_content_report() {
+    local WORK_DIR="$2"
+    _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$1/.protected-existed-at-launch")" "$1/.protected-copies"
+    rm -f "$1/.protected-existed-at-launch"
+    return 0
+}
+# --stop's direct teardown of a supervisor-less daemon, once its container is
+# stopped and removed: the session-end report the supervisor would have run,
+# recorded (--stop prints the record at its end). Only a snapshot the launch
+# completed (its last line, #gitdirs-recorded) says which paths existed at
+# launch; one that --attach or --start took from the container's mounts holds
+# only #hash lines, and the whole report against it would call every existing
+# protected path an appearance (and flag the user's .sandy/ as created by a
+# session). So that one gets the content check alone, as before #554. The
+# config is not loaded here: the launch records SANDY_ALLOW_WORKFLOW_EDIT=1 as
+# #workflow-edit-allowed, so .github/workflows is not watched when it was not.
+# The gitdir a .git file names is not derived again (see
+# _sandy_unsupervised_daemon_protect), so only the top-level .git is walked
+# for admin dirs and links. $1 = sandbox dir. Returns 0 always.
+_sandy_unsupervised_stop_report() {
+    local _snap="$1/.protected-existed-at-launch" SANDY_ALLOW_WORKFLOW_EDIT=0 GITDIR_HOST=""
+    [ -f "$_snap" ] || return 0
+    if grep -qx '#gitdirs-recorded' "$_snap" 2>/dev/null; then
+        if grep -qx '#workflow-edit-allowed' "$_snap" 2>/dev/null; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
+        _sandy_session_end_report "$1" "$WORK_DIR" stop
+    else
+        _sandy_session_end_report "$1" "$WORK_DIR" stop _sandy_session_end_content_report
+    fi
+    rm -f "$_snap"
     return 0
 }
 # Print the record of sandbox $1 (workspace $2), if there is one, on stderr.
@@ -8647,9 +8676,9 @@ fi
 # changed or were replaced in the workspace) is recorded in its sandbox,
 # because the supervisor's stderr is a log nobody reads, and it is printed at
 # every --start, --attach, --stop and terminal launch of the workspace until
-# this removes it. It prints what it removes, so what was acknowledged is the
-# text on the screen even if another session added to the record since the
-# last time it was shown. An explicit command rather than "until the paths are
+# this removes it. It renames the record aside before printing and deleting
+# it, so what was acknowledged is exactly the text on the screen, and a block
+# another session appends meanwhile stays pending. An explicit command rather than "until the paths are
 # gone": a reported path may be the user's own and kept on purpose (a
 # .vscode/ they wanted), and sandy cannot tell. Filesystem-only. Exit 0 when
 # no report is pending afterwards (including none to begin with), 1 otherwise.
@@ -8674,18 +8703,27 @@ if [[ "${1:-}" == "--ack-report" ]]; then
         info "No session-end report is pending for $WORK_DIR. Nothing to do."
         exit 0
     fi
-    if [ -f "$_ack_rec" ] && [ ! -L "$_ack_rec" ]; then
+    # The record is first renamed aside (a link or file at its path moves as
+    # itself, never followed), and only what was renamed is printed and
+    # deleted: a block a session appends meanwhile lands in a new record,
+    # which stays pending, instead of being removed unseen.
+    if [ -d "$_ack_rec" ] && [ ! -L "$_ack_rec" ]; then
+        error "--ack-report: $_ack_rec is a directory; sandy never writes one there. Remove it yourself."
+        exit 1
+    fi
+    _ack_tmp="$(mktemp "$_ack_rec.ack.XXXXXX" 2>/dev/null)" || _ack_tmp=""
+    if [ -z "$_ack_tmp" ] || ! mv -f "$_ack_rec" "$_ack_tmp" 2>/dev/null; then
+        [ -z "$_ack_tmp" ] || rm -f "$_ack_tmp"
+        error "--ack-report: could not move $_ack_rec aside to acknowledge it"
+        exit 1
+    fi
+    if [ -f "$_ack_tmp" ] && [ ! -L "$_ack_tmp" ]; then
         info "Acknowledging this session-end report for $WORK_DIR:"
-        LC_ALL=C tr -d '\000-\010\013-\037\177' < "$_ack_rec"
+        LC_ALL=C tr -d '\000-\010\013-\037\177' < "$_ack_tmp"
     fi
-    # A link or anything else at the record's path is removed as itself, never
-    # followed (rm -f on a link removes the link).
-    if rm -f "$_ack_rec" 2>/dev/null && [ ! -e "$_ack_rec" ] && [ ! -L "$_ack_rec" ]; then
-        info "Acknowledged; it is no longer shown."
-        exit 0
-    fi
-    error "--ack-report: could not remove $_ack_rec"
-    exit 1
+    rm -f "$_ack_tmp"
+    info "Acknowledged; it is no longer shown."
+    exit 0
 fi
 
 if [[ "${1:-}" == "--remove-sandbox" ]]; then
@@ -15455,6 +15493,7 @@ if [ "$SANDY_STOP" = "true" ]; then
         # three things a supervisor-less session still has: container, networks,
         # and (maybe) a now-stale #14 lock.
         info "Stopping daemon session (no live supervisor — direct teardown)..."
+        _SANDY_UNSUP_STOP_SB=""
         _sandy_unsupervised_daemon_protect "$_sandy_stop_container" stop
         # Read the session label while the container still exists: after
         # `docker rm -f` an inspect finds nothing, and the lock reap, the macOS
@@ -15466,6 +15505,11 @@ if [ "$SANDY_STOP" = "true" ]; then
         # unless-stopped` (an rm -f alone races the restart policy).
         docker stop "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
         docker rm -f "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
+        # The session-end report, now that the container can write nothing
+        # more (#554); recorded, and printed with the record below.
+        if [ -n "$_SANDY_UNSUP_STOP_SB" ]; then
+            _sandy_unsupervised_stop_report "$_SANDY_UNSUP_STOP_SB"
+        fi
         # Best-effort: reaps this session's now-orphaned sandy_{net,sidecar,egress}_*
         # networks (their owning pid — the dead supervisor's — is gone, so
         # _sandy_reap_orphan_networks's liveness gate lets them go). Coordinates
@@ -23546,6 +23590,11 @@ fi
 # best you can get without rebuilding the workspace mount model.
 : > "$SANDBOX_DIR/.session-created-stubs"
 : > "$SANDBOX_DIR/.protected-existed-at-launch"
+# The effective SANDY_ALLOW_WORKFLOW_EDIT, for a session-end report run where
+# no config is loaded (--stop of a supervisor-less daemon, #554).
+if [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ]; then
+    printf '#workflow-edit-allowed\n' >> "$SANDBOX_DIR/.protected-existed-at-launch"
+fi
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     if [ -d "$WORK_DIR/$_pd" ]; then

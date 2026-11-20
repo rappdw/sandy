@@ -67,15 +67,16 @@ file under `~/.sandy/sandboxes/` that nobody reads. So a daemon
 session also **records** the report in its sandbox
 (`~/.sandy/sandboxes/<name>/.session-end-report`, outside the workspace and
 never visible to a container), one block per session headed by the UTC time it
-ended. `--stop` of a session with no live supervisor runs the same checks and
-records them too.
+ended. `--stop` of a session with no live supervisor runs the same checks once the
+container is gone and records them too (only the changed-file check when the
+session's own launch record is missing).
 
 The next `sandy --start`, `--attach`, `--stop` (at its end, so it includes the
 report of the session it just stopped) and terminal launch of that workspace
 prints the record, and keeps printing it until you acknowledge it:
 
 ```sh
-sandy --ack-report --workspace /path/to/project   # prints it once more, then removes it
+sandy --ack-report --workspace /path/to/project   # prints it, then removes it
 ```
 
 Acknowledging is explicit rather than automatic because a reported path may be

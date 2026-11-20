@@ -28483,10 +28483,13 @@ _S249_B="$_A6_DIR/s249bin"; mkdir -p "$_S249_B"
   printf '    *Mounts*) exit 0 ;;\n'
   printf '    *State.Running*) echo true; exit 0 ;;\n'
   printf '    "exec "*) echo none; exit 0 ;;\n'
-  printf '    stop*|"rm -f "*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf '    stop*) if [ -n "${S249_AT_STOP:-}" ]; then mkdir -p "$A6_WS/$S249_AT_STOP"; printf "x\\n" > "$A6_WS/$S249_AT_STOP/planted"; fi\n'
+  printf '           printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
+  printf '    "rm -f "*) printf "docker %%s\\n" "$*" >> "$A6_LOG/events.log"; exit 0 ;;\n'
   printf 'esac; fi\n'
   printf 'case " $* " in *" --name sandy-ws-"*)\n'
-  printf '    if [ -n "${S249_PLANT:-}" ]; then mkdir -p "$A6_WS/$S249_PLANT"; printf "x\\n" > "$A6_WS/$S249_PLANT/planted"; fi ;;\n'
+  printf '    if [ -n "${S249_PLANT:-}" ]; then mkdir -p "$A6_WS/$S249_PLANT"; printf "x\\n" > "$A6_WS/$S249_PLANT/planted"; fi\n'
+  printf '    if [ -n "${S249_SNAPCOPY:-}" ]; then cat "$A6_LOG"/sh/sandboxes/*/.protected-existed-at-launch > "$A6_LOG/snapcopy" 2>/dev/null || true; fi ;;\n'
   printf 'esac\n'
   printf 'exec %q "$@"\n' "$_A6_DIR/bin/docker"; } > "$_S249_B/docker"
 chmod +x "$_S249_B/docker"
@@ -28601,25 +28604,78 @@ check "§249(e) a non-daemon session prints its report and records nothing (muta
     test -z "$_S249_R"
 
 # (f) --stop of a daemon container with no live supervisor runs the WHOLE
-# report (it used to run only the content check), records it, and prints it
-# once, at the end. The launch snapshot here records nothing as existing, so
-# .vscode/ (created since) is an appearance.
-_S249_C=s249u; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.vscode"; printf 'x\n' > "$_S249_W/.vscode/tasks.json"
-_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"; : > "$_S249_S/.protected-existed-at-launch"
+# report against a snapshot the launch completed (it used to run only the
+# content check), records it, and prints it once, at the end. The snapshot
+# records nothing as existing but carries the launch-complete marker, so
+# .vscode/ (created since) and .github/workflows/ are appearances, and so is
+# .idea/, which the container writes before `docker stop` returns: the report
+# runs after the container is gone.
+_s249_hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+_S249_C=s249u; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.vscode" "$_S249_W/.github/workflows"
+printf 'x\n' > "$_S249_W/.vscode/tasks.json"; printf 'on: push\n' > "$_S249_W/.github/workflows/ci.yml"
+_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"; printf '#gitdirs-recorded\n' > "$_S249_S/.protected-existed-at-launch"
 printf '[sandy] ==== Daemon session ended earlier ====\n[sandy]   S249-EARLIER-BLOCK\n' > "$_S249_S/.session-end-report"
-_a6_launch "$_S249_C" PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID=2147480000 S249_SESS="$(basename "$_S249_S")" \
-    -- --stop --workspace "$_S249_W"
+_S249_DENV=(PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID=2147480000 S249_SESS="$(basename "$_S249_S")")
+_a6_launch "$_S249_C" "${_S249_DENV[@]}" S249_AT_STOP=.idea -- --stop --workspace "$_S249_W"
 _S249_D="$_A6_DIR/$_S249_C/out"
 _S249_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
     grep -q "has no live supervisor" "$_S249_D" || echo "not the supervisor-less path"
     [ "$(_s249_n "$_S249_D" "Protected paths appeared during this session")" = 1 ] || echo "report shown $(_s249_n "$_S249_D" "Protected paths appeared during this session") times"
     [ "$(_s249_n "$_S249_D" "not been acknowledged")" = 1 ] || echo "not shown as the record"
     grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "no .vscode/"
+    grep -qF "$_S249_W/.github/workflows/" "$_S249_D" || echo "no .github/workflows/ (the control for (f3))"
+    grep -qF "$_S249_W/.idea/" "$_S249_D" || echo "no .idea/, written before docker stop returned"
     grep -q "torn down by --stop" "$_S249_S/.session-end-report" 2>/dev/null || echo "not recorded"
     grep -q "S249-EARLIER-BLOCK" "$_S249_S/.session-end-report" 2>/dev/null || echo "the earlier unacknowledged block was dropped"
     [ ! -e "$_S249_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
 [ -z "$_S249_R" ] || _a6_diag "§249(f)" "$_S249_C"
-check "§249(f) --stop of a supervisor-less daemon reports a protected dir created since launch, records it after the earlier unacknowledged block, and prints it once (mutation: the content check alone, as before; print it as well as record it; replace the record instead of appending; ${_S249_R:-ok})" \
+check "§249(f) --stop of a supervisor-less daemon, with a snapshot the launch completed, reports protected dirs created since launch (one written just before the container stopped included), records it after the earlier unacknowledged block, and prints it once (mutation: the content check alone; print it as well as record it; replace the record instead of appending; report before docker stop; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (f2) a snapshot --attach or --start took from the mounts of the container
+# (#hash lines only, no launch-complete marker) says nothing about which paths
+# existed, so --stop runs the content check alone: protected paths that were
+# there all along are not appearances, no removal is printed, the .sandy/ of
+# the user is not flagged as created by a session; a changed file still is.
+_S249_C=s249c; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.vscode" "$_S249_W/.sandy" "$_S249_W/.github/workflows" "$_S249_W/.git"
+printf 'x\n' > "$_S249_W/.vscode/tasks.json"; printf 'SANDY_AGENT=claude\n' > "$_S249_W/.sandy/config"
+printf 'on: push\n' > "$_S249_W/.github/workflows/ci.yml"; printf 'export A=1\n' > "$_S249_W/.envrc"; printf '[core]\n' > "$_S249_W/.git/config"
+_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"
+printf '#hash\t%s\t%s\n' "$(_s249_hex "$_S249_W/.envrc")" 0000000000000000000000000000000000000000000000000000000000000000 > "$_S249_S/.protected-existed-at-launch"
+_S249_DENV=(PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID=2147480000 S249_SESS="$(basename "$_S249_S")")
+_a6_launch "$_S249_C" "${_S249_DENV[@]}" -- --stop --workspace "$_S249_W"
+_S249_D="$_A6_DIR/$_S249_C/out"
+_S249_R="$( { [ "$_A6_RC" = 0 ] || echo "rc $_A6_RC"
+    if grep -q "Protected paths appeared during this session" "$_S249_D"; then echo "existing paths reported as appeared"; fi
+    if grep -q "rm -rf\|&& rm " "$_S249_D"; then echo "a removal was printed"; fi
+    if ls "$_A6_DIR/$_S249_C/sh/approvals/"*.session-created >/dev/null 2>&1; then echo "the .sandy/ of the user flagged as session-created"; fi
+    grep -q "Protected files CHANGED during this session" "$_S249_D" || echo "the content check did not run"
+    grep -q "torn down by --stop" "$_S249_S/.session-end-report" 2>/dev/null || echo "not recorded"
+    [ ! -e "$_S249_S/.protected-existed-at-launch" ] || echo "snapshot left"; } 2>&1)" || true
+[ -z "$_S249_R" ] || _a6_diag "§249(f2)" "$_S249_C"
+check "§249(f2) --stop of a supervisor-less daemon whose snapshot --attach took from the mounts (no launch marker) runs the content check alone: no appearance, no removal, no session-created .sandy/ record, the changed file reported and recorded (mutation: drop the launch-marker test; ${_S249_R:-ok})" \
+    test -z "$_S249_R"
+
+# (f3) a launch under SANDY_ALLOW_WORKFLOW_EDIT=1 records it, and --stop of a
+# supervisor-less daemon (which loads no config) honours it: a workflow the
+# session wrote is not reported, nor offered for removal.
+_S249_C=s249w; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.github/workflows" "$_S249_W/.vscode"
+printf 'on: push\n' > "$_S249_W/.github/workflows/ci.yml"; printf 'x\n' > "$_S249_W/.vscode/tasks.json"
+_S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"; printf '#workflow-edit-allowed\n#gitdirs-recorded\n' > "$_S249_S/.protected-existed-at-launch"
+_S249_DENV=(PATH="$_S249_PATH" S249_CTR=c0ffee0000000249 S249_DPID=2147480000 S249_SESS="$(basename "$_S249_S")")
+_a6_launch "$_S249_C" "${_S249_DENV[@]}" -- --stop --workspace "$_S249_W"
+_S249_D="$_A6_DIR/$_S249_C/out"
+_S249_R="$( { [ "$_A6_RC" = 0 ] || echo "--stop rc $_A6_RC"
+    grep -qF "$_S249_W/.vscode/" "$_S249_D" || echo "the report did not run (no .vscode/)"
+    if grep -qF "$_S249_W/.github/workflows" "$_S249_D"; then echo "the workflow was reported"; fi; } 2>&1)" || true
+_S249_C=s249wl; mkdir -p "$_A6_DIR/$_S249_C/ws"
+_a6_launch "$_S249_C" "${_S249_ENV[@]}" SANDY_ALLOW_WORKFLOW_EDIT=1 S249_SNAPCOPY=1
+_S249_R="$_S249_R$( { grep -qx '#workflow-edit-allowed' "$_A6_DIR/$_S249_C/snapcopy" 2>/dev/null || echo "the launch did not record it (rc $_A6_RC)"; } 2>&1)" || true
+_S249_C=s249wn; mkdir -p "$_A6_DIR/$_S249_C/ws"
+_a6_launch "$_S249_C" "${_S249_ENV[@]}" S249_SNAPCOPY=1
+_S249_R="$_S249_R$( { [ -s "$_A6_DIR/$_S249_C/snapcopy" ] || echo "control: no snapshot copied (rc $_A6_RC)"
+    if grep -qx '#workflow-edit-allowed' "$_A6_DIR/$_S249_C/snapcopy" 2>/dev/null; then echo "recorded without the setting"; fi; } 2>&1)" || true
+check "§249(f3) a launch records SANDY_ALLOW_WORKFLOW_EDIT=1 in its snapshot (and only then), and the supervisor-less --stop honours it: no workflow line, no removal of it (mutation: drop the marker write; ignore it at stop; ${_S249_R:-ok})" \
     test -z "$_S249_R"
 
 # (g) --stop that waits for a live supervisor prints the report that
@@ -28637,6 +28693,24 @@ kill "$_S249_SUP" 2>/dev/null || true; wait "$_S249_SUP" 2>/dev/null || true
 check "§249(g) --stop that signals a live supervisor prints the report it recorded on the way out (mutation: drop the call after the wait; rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && grep -q "S249-SUPERVISOR-REPORT" "$2" && grep -q "not been acknowledged" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S249_C/out"
 
+# (h) --ack-report renames the record aside before it prints it, so a block a
+# session appends while it prints lands in a new record that stays pending.
+# A tr in front of the real one appends that block once, when the record path is
+# free (moved aside) at the moment the acknowledgement prints (its control strip).
+_S249_C=s249a; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W"; _S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"
+printf '[sandy] ==== Daemon session ended earlier ====\n[sandy]   S249-SEEN-BLOCK\n' > "$_S249_S/.session-end-report"
+mkdir -p "$_A6_DIR/s249trbin"
+{ printf '#!/bin/sh\n'
+  printf 'case "$1" in -d) if [ -n "${S249_ACK_APPEND:-}" ] && [ ! -e "$S249_ACK_APPEND" ] && [ ! -e "$S249_ACK_APPEND.done" ]; then : > "$S249_ACK_APPEND.done"; printf "[sandy]   S249-LATE-BLOCK\\n" >> "$S249_ACK_APPEND"; fi ;; esac\n'
+  printf 'exec %q "$@"\n' "$(command -v tr)"; } > "$_A6_DIR/s249trbin/tr"
+chmod +x "$_A6_DIR/s249trbin/tr"
+_a6_launch "$_S249_C" PATH="$_A6_DIR/s249trbin:$_S249_PATH" S249_ACK_APPEND="$_S249_S/.session-end-report" -- --ack-report --workspace "$_S249_W"
+check "§249(h) a block appended while --ack-report prints is not removed unseen: it stays pending, and only the printed block is gone (mutation: print, then rm the record path; rc $_A6_RC)" \
+    bash -c '[ "$1" = 0 ] && [ -e "$3.done" ] && grep -q S249-SEEN-BLOCK "$2" && grep -q S249-LATE-BLOCK "$3" && ! grep -q S249-SEEN-BLOCK "$3"' \
+    _ "$_A6_RC" "$_A6_DIR/$_S249_C/out" "$_S249_S/.session-end-report"
+
+unset _S249_DENV
+unset -f _s249_hex
 unset _S249_B _S249_PATH _S249_ENV _S249_C _S249_W _S249_S _S249_REC _S249_R _S249_D _S249_SUP _S249_PTY _S249_KEEP
 unset -f _s249_n
 
