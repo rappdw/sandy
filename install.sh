@@ -17,6 +17,10 @@ SANDY_CHANNEL="${SANDY_CHANNEL:-release}"
 SANDY_REPO_RAW="https://raw.githubusercontent.com/rappdw/sandy"
 SANDY_API_URL="https://api.github.com/repos/rappdw/sandy/releases/latest"
 SANDY_API_MAIN_URL="https://api.github.com/repos/rappdw/sandy/commits/main"
+# What a SANDY_VERSION may look like: X.Y.Z, X.Y.Z-rcN, X.Y.Z-dev and
+# X.Y.Z-rcN-dev. A byte-identical copy of sandy's line (this installer cannot
+# source sandy); sandy's run-tests §254 checks that they match.
+_SANDY_VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?(-dev)?$'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -118,10 +122,9 @@ else
         exit 1
     fi
     new_ver="$(grep -m1 '^SANDY_VERSION=' "$INSTALL_DIR/sandy.tmp.$$" | cut -d'"' -f2)" || new_ver=""
-    # The version is printed, so it must be a version string first (X.Y.Z,
-    # X.Y.Z-rcN or X.Y.Z-dev); anything else is refused without echoing it.
-    ver_re='^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+|-dev)?$'
-    if ! [[ $new_ver =~ $ver_re ]]; then
+    # The version is printed, so it must be a version string first
+    # (_SANDY_VERSION_RE); anything else is refused without echoing it.
+    if ! [[ $new_ver =~ $_SANDY_VERSION_RE ]]; then
         rm -f "$INSTALL_DIR/sandy.tmp.$$"
         error "The downloaded file does not look like sandy ${tag:-} (no valid SANDY_VERSION in it)."
         exit 1

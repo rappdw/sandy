@@ -32979,15 +32979,15 @@ check "§254(4b) ...and so do install.sh's info, warn and error ($(grep -c . "$_
     _s254_lit_lines "$_S254_D" i 3
 check "§254(5) _sandy_term_text turns ESC, BEL, C1 and newline bytes into ? and the em dash into -; _sandy_term_lines drops SGR colour codes, keeps line breaks and tabs, and turns any other escape into ? (mutation: delete only C0 controls)" \
     bash -c '. "$1"; a="$(_sandy_term_text "$(printf "a\033]0;X\007b\302\233c\nd — e")")"; b="$(printf "l1 \033[0;31m[sandy]\033[0m \033]0;X\007\tT\nl2 —\n" | _sandy_term_lines)"; [ "$a" = "a?]0;X?b??c?d - e" ] && [ "$b" = "$(printf "l1 [sandy] ?]0;X?\tT\nl2 -")" ] || { printf "%s\n%s\n" "$a" "$b" | cat -v; exit 1; }' _ "$_S254_D/helpers.sh"
-# (7) install.sh validates the downloaded file's SANDY_VERSION before it
-# prints it: a version carrying an escape is refused and never echoed; a
-# well-formed -dev version installs (the control, so the refusal is not just
-# a broken fixture). sandy --upgrade uses the same pattern.
+# (7) install.sh and sandy --upgrade validate the downloaded file's
+# SANDY_VERSION before they print it: a version carrying an escape is refused
+# and never echoed; a well-formed X.Y.Z-rcN-dev (main during an rc soak)
+# installs (the control, so the refusal is not just a broken fixture).
 mkdir -p "$_S254_D/ibin" "$_S254_D/idir"
 printf '#!/usr/bin/env bash\ncat "$S254_FILE"\n' > "$_S254_D/ibin/curl"
 chmod +x "$_S254_D/ibin/curl"
 printf '#!/usr/bin/env bash\nSANDY_VERSION="2.10.1\033]0;PWNED\007"\nSANDY_COMMIT=""\n' > "$_S254_D/bad.sandy"
-printf '#!/usr/bin/env bash\nSANDY_VERSION="2.10.1-dev"\nSANDY_COMMIT=""\n' > "$_S254_D/good.sandy"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="1.0.0-rc2-dev"\nSANDY_COMMIT=""\n' > "$_S254_D/good.sandy"
 _s254_install() {  # TAG FILE
     local _rc=0
     rm -rf "$_S254_D/idir"; mkdir -p "$_S254_D/idir"
@@ -32999,8 +32999,38 @@ _s254_install() {  # TAG FILE
 }
 _s254_install ibad "$_S254_D/bad.sandy"
 _s254_install igood "$_S254_D/good.sandy"
-check "§254(7) install.sh refuses a downloaded file whose SANDY_VERSION is not a version string, installs nothing and never echoes it (no ESC beyond its own colour codes, which are always on); a well-formed X.Y.Z-dev installs (mutation: drop the version-string check)" \
+check "§254(7) install.sh refuses a downloaded file whose SANDY_VERSION is not a version string, installs nothing and never echoes it (no ESC beyond its own colour codes, which are always on); a well-formed X.Y.Z-rcN-dev installs (mutations: drop the version-string check; the old regex without -rcN-dev)" \
     bash -c 'e="$(printf "\\033")"; [ "$(cat "$1/ibad.rc")" = 1 ] && [ "$(cat "$1/ibad.installed")" = no ] && grep -q "no valid SANDY_VERSION" "$1/ibad.out" && ! grep -q PWNED "$1/ibad.out" && [ "$(LC_ALL=C sed "s/${e}\\[[0-9;]*m//g" "$1/ibad.out" | LC_ALL=C tr -dc "\\033" | wc -c | tr -d " ")" = 0 ] && [ "$(cat "$1/igood.rc")" = 0 ] && [ "$(cat "$1/igood.installed")" = yes ] || { cat -v "$1/ibad.out" "$1/igood.out"; cat "$1/ibad.rc" "$1/igood.rc"; exit 1; }' _ "$_S254_D"
+# --upgrade, SANDY_CHANNEL=dev: the stub curl answers the commit lookup with
+# a sha and the download (-o FILE) with the fixture. A copy of sandy is
+# upgraded, so a success replaces the copy.
+mkdir -p "$_S254_D/ubin"
+cat > "$_S254_D/ubin/curl" <<'STUB'
+#!/usr/bin/env bash
+prev=""
+for a in "$@"; do
+    if [ "$prev" = -o ]; then cat "$S254_FILE" > "$a"; exit 0; fi
+    prev="$a"
+done
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+STUB
+chmod +x "$_S254_D/ubin/curl"
+_s254_upgrade() {  # TAG FILE
+    local _rc=0
+    cp "$_S254_SANDY" "$_S254_D/$1.self"
+    env -i HOME="$_S254_D/home" SANDY_HOME="$_S254_D/home/.sandy" PATH="$_S254_D/ubin:/usr/bin:/bin" \
+        TMPDIR="${TMPDIR:-/tmp}" SANDY_CHANNEL=dev S254_FILE="$2" \
+        bash "$_S254_D/$1.self" --upgrade </dev/null >"$_S254_D/$1.out" 2>&1 || _rc=$?
+    echo "$_rc" > "$_S254_D/$1.rc"
+    grep -m1 '^SANDY_VERSION=' "$_S254_D/$1.self" | cut -d'"' -f2 > "$_S254_D/$1.ver" || true
+}
+_s254_upgrade ubad "$_S254_D/bad.sandy"
+_s254_upgrade ugood "$_S254_D/good.sandy"
+_S254_OWNVER="$(grep -m1 '^SANDY_VERSION=' "$_S254_SANDY" | cut -d'"' -f2)"
+check "§254(7b) sandy --upgrade refuses the same escape-carrying SANDY_VERSION, leaves itself unchanged ($_S254_OWNVER) and prints no ESC; an X.Y.Z-rcN-dev upgrade goes through (mutations: drop the check; the old regex)" \
+    bash -c '[ "$(cat "$1/ubad.rc")" = 1 ] && [ "$(cat "$1/ubad.ver")" = "$2" ] && grep -q "no valid SANDY_VERSION" "$1/ubad.out" && ! grep -q PWNED "$1/ubad.out" && [ "$(LC_ALL=C tr -dc "\\033" < "$1/ubad.out" | wc -c | tr -d " ")" = 0 ] && [ "$(cat "$1/ugood.rc")" = 0 ] && [ "$(cat "$1/ugood.ver")" = 1.0.0-rc2-dev ] || { cat -v "$1/ubad.out" "$1/ugood.out"; cat "$1/ubad.rc" "$1/ugood.rc"; exit 1; }' _ "$_S254_D" "$_S254_OWNVER"
+check "§254(7c) the version pattern is one line, byte-identical in sandy and install.sh, and sandy's own SANDY_VERSION matches it (mutation: change either copy; a SANDY_VERSION bump to a form the pattern refuses)" \
+    bash -c 'a="$(grep -x "_SANDY_VERSION_RE=.*" "$1")"; b="$(grep -x "_SANDY_VERSION_RE=.*" "$2")"; [ -n "$a" ] && [ "$a" = "$b" ] && [ "$(grep -c "^_SANDY_VERSION_RE=" "$1")" = 1 ] && [ "$(grep -c "^_SANDY_VERSION_RE=" "$2")" = 1 ] && eval "$a" && [[ $3 =~ $_SANDY_VERSION_RE ]] || { printf "%s\n%s\nown: %s\n" "$a" "$b" "$3"; exit 1; }; for v in 1.2.3 1.0.0-rc2 2.10.1-dev 1.0.0-rc2-dev; do [[ $v =~ $_SANDY_VERSION_RE ]] || { echo "refused $v"; exit 1; }; done; for v in 1.2 1.2.3-dev-rc1 1.2.3-beta "1.2.3 " v1.2.3; do [[ $v =~ $_SANDY_VERSION_RE ]] && { echo "accepted $v"; exit 1; }; done; exit 0' _ "$_S254_SANDY" "$(dirname "$_S254_SANDY")/install.sh" "$_S254_OWNVER"
 # (8) Ratchet: every dump of a container's or a build's log onto the terminal
 # goes through _sandy_term_lines (or _sandy_term_text). The behaviour of the
 # filter is (5); this only keeps a new dump from skipping it.
@@ -33012,10 +33042,10 @@ _s254_dumps() {
 }
 check "§254(8) all nine log dumps onto the terminal (failed --start container and supervisor logs, proxy logs, the project-build tail, the update-sessions tail and heartbeat) go through the term filter (mutation: drop it from one)" \
     _s254_dumps "$_S254_SANDY"
-unset -f _s254_run _s254_helpers _s254_lit_lines _s254_install _s254_dumps
+unset -f _s254_run _s254_helpers _s254_lit_lines _s254_install _s254_upgrade _s254_dumps
 unset _s254_f
 rm -rf "$_S254_D"
-unset _S254_SANDY _S254_D _S254_REALSLEEP _S254_CAPDIFF
+unset _S254_SANDY _S254_D _S254_REALSLEEP _S254_CAPDIFF _S254_OWNVER
 
 # BEGIN SUMMARY
 # ============================================================
