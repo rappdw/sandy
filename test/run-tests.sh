@@ -144,6 +144,65 @@ _sleep_stub() {
     chmod +x "$1/sleep"
 }
 
+# --- Independent checks run side by side (§202, §224, §242) -----------------
+# _bg_run KEY CMD [ARG...] starts CMD in the background, at most _BG_JOBS at
+# once, and keeps its output and exit status under KEY. CMD is what a check
+# would have run (or a fixture step a check reads), never `check` itself: the
+# counters live in this shell. _bg_join KEY waits for it and sets _BG_RC to
+# its status, or "lost" when the job died before recording one. A check then
+# runs `_bg_result KEY`, which prints that output and returns that status, so
+# check() sees what it would have seen running CMD itself; a lost job fails
+# it. _bg_reap waits for every job still running (a section's last step);
+# cleanup kills any left by an aborted run.
+_BG_JOBS=4
+_BG_PIDS=()
+_BG_DIR=""
+_bg_run() {
+    local k="$1" p live; shift
+    [ -n "$_BG_DIR" ] || _BG_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+    while :; do
+        live=()
+        for p in ${_BG_PIDS[@]+"${_BG_PIDS[@]}"}; do
+            if kill -0 "$p" 2>/dev/null; then live+=("$p"); fi
+        done
+        _BG_PIDS=(${live[@]+"${live[@]}"})
+        [ "${#_BG_PIDS[@]}" -ge "$_BG_JOBS" ] || break
+        sleep 0.05
+    done
+    rm -f "$_BG_DIR/$k.out" "$_BG_DIR/$k.rc" "$_BG_DIR/$k.pid"
+    ( _rc=0; "$@" > "$_BG_DIR/$k.out" 2>&1 || _rc=$?; printf '%s\n' "$_rc" > "$_BG_DIR/$k.rc" ) &
+    printf '%s\n' "$!" > "$_BG_DIR/$k.pid"
+    _BG_PIDS+=("$!")
+}
+_bg_join() {   # $1 = KEY -> _BG_RC
+    if [ -f "$_BG_DIR/$1.pid" ]; then
+        wait "$(cat "$_BG_DIR/$1.pid")" 2>/dev/null || true
+        rm -f "$_BG_DIR/$1.pid"
+    fi
+    _BG_RC="$(cat "$_BG_DIR/$1.rc" 2>/dev/null || echo lost)"
+}
+_bg_result() {   # $1 = KEY: its output, then its status (1 when lost)
+    _bg_join "$1"
+    cat "$_BG_DIR/$1.out" 2>/dev/null || true
+    case "$_BG_RC" in
+        ''|*[!0-9]*) echo "background job $1 recorded no exit status (lost)"; return 1 ;;
+    esac
+    return "$_BG_RC"
+}
+_bg_reap() {
+    local p
+    for p in ${_BG_PIDS[@]+"${_BG_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
+    _BG_PIDS=()
+}
+_bg_kill() {
+    local p
+    for p in ${_BG_PIDS[@]+"${_BG_PIDS[@]}"}; do
+        pkill -TERM -P "$p" 2>/dev/null || true
+        kill -TERM "$p" 2>/dev/null || true
+    done
+    [ -z "$_BG_DIR" ] || rm -rf "$_BG_DIR"
+}
+
 # _path_farm DEST [TOOL...]: fill DEST with a symlink to every executable file
 # on $PATH, the first one of each name as a PATH lookup finds it, except the
 # named TOOLs, so a probe can run with a tool missing (`PATH="$DEST"`) while
@@ -195,6 +254,7 @@ mkdir -p "$SANDBOX_DIR/claude"
 _SCHEMA_CACHE="$(mktemp)"
 cleanup() {
     _emit_summary
+    _bg_kill
     rm -rf "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
     [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
@@ -23854,6 +23914,7 @@ elif ! command -v node >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
 else
 _S202_D="$(cd "$(mktemp -d)" && pwd -P)"
 cat > "$_S202_D/check.py" <<'S202_PY'
+import concurrent.futures
 import copy
 import json
 import os
@@ -24076,7 +24137,7 @@ mutate('file type', '[ -f "$_protectedsource" ] && [ ! -f "$_protect" ]', 'false
 def mutation_checks():
     active = [m for m in mutations if not (m[0].startswith('JS ') and not shutil.which('node'))
               and not (m[4] == 'jq' and not shutil.which('jq'))]
-    for label, old, new, case, engine in active:
+    def one(label, old, new, case, engine):
         assert old in original, 'missing mutation anchor: ' + label
         candidate = original.replace(old, new, 1)
         if label == 'duplicate':
@@ -24087,6 +24148,13 @@ def mutation_checks():
             result = apply(scratch.read_text(), case, 'codex,claude' if case == 'partial-agents' else 'codex', engine,
                            load_only=label in ('parent', 'child path', 'relative source', 'duplicate', 'overlap down', 'overlap up', 'computed destination overlap'))
             assert result.returncode == 0, f'surviving mutation {label}: {result.stdout} {result.stderr}'
+    # Each mutant is its own scratch copy and fixture, so four run at once;
+    # every one is still checked, and the first failure in list order is the
+    # one raised, as when they ran one after another.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(one, *m) for m in active]
+    for future in futures:
+        future.result()
     # Launch rendering has its own mutation, using the identical full-launch check.
     candidate = original.replace('RUN_FLAGS+=(-v "$_fm_src:$_fm_dst:ro")', 'RUN_FLAGS+=(-v "$_fm_src:$_fm_dst")', 1)
     assert candidate != original
@@ -24146,29 +24214,44 @@ elif mode == 'schema':
     assert data['manifest']['submount_keys'] == ['parent', 'path', 'from', 'mode', 'agents']
 assert Path(sys.argv[1]).read_text() == original, 'repository source changed during verification'
 S202_PY
+# The modes are independent (each makes its own temporary fixtures and reads
+# the script only), so they all start here, the slowest (mutations) first;
+# each check below joins its own and judges its output and status.
+_S202_JQ=0; _S202_NJ=0
+if command -v jq >/dev/null 2>&1; then _S202_JQ=1; fi
+if command -v node >/dev/null 2>&1 && [ "$_S202_JQ" = 1 ]; then _S202_NJ=1; fi
+_bg_run s202-mutations python3 "$_S202_D/check.py" "$SANDY_SCRIPT" mutations
+_bg_run s202-negative python3 "$_S202_D/check.py" "$SANDY_SCRIPT" negative
+_bg_run s202-positive python3 "$_S202_D/check.py" "$SANDY_SCRIPT" positive
+if [ "$_S202_NJ" = 1 ]; then _bg_run s202-parity python3 "$_S202_D/check.py" "$SANDY_SCRIPT" parity; fi
+if [ "$_S202_JQ" = 1 ]; then _bg_run s202-jq python3 "$_S202_D/check.py" "$SANDY_SCRIPT" jq; fi
+_bg_run s202-launch python3 "$_S202_D/check.py" "$SANDY_SCRIPT" launch
+_bg_run s202-schema python3 "$_S202_D/check.py" "$SANDY_SCRIPT" schema "$_SCHEMA_CACHE"
 check "§202(1) directories/files, slug expansion, boundary prefixes and selected profiles" \
-    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" positive
+    _bg_result s202-positive
 check "§202(2) all refusals, including work/work/data source writable through its parent" \
-    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" negative
-if command -v jq >/dev/null 2>&1; then
+    _bg_result s202-negative
+if [ "$_S202_JQ" = 1 ]; then
     check "§202(3) jq fallback: the same positive/refusal corpus" \
-        python3 "$_S202_D/check.py" "$SANDY_SCRIPT" jq
+        _bg_result s202-jq
 else
     skip "§202(3) jq unavailable"
 fi
-if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+if [ "$_S202_NJ" = 1 ]; then
     check "§202(3-parity) both projectors emit byte-identical records for the full corpus" \
-        python3 "$_S202_D/check.py" "$SANDY_SCRIPT" parity
+        _bg_result s202-parity
 else
     skip "§202(3-parity) both projectors required; missing projector mutations also skipped"
 fi
 check "§202(4) entire launch: emitted records become ordered parent and child -v argv" \
-    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" launch
+    _bg_result s202-launch
 check "§202(5) disable every submount decision on scratch copies and detect each mutation" \
-    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" mutations
+    _bg_result s202-mutations
 check "§202(6) additive manifest capability, closed submount keys, schema_version still 4" \
-    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" schema "$_SCHEMA_CACHE"
+    _bg_result s202-schema
+_bg_reap
 rm -rf "$_S202_D"
+unset _S202_JQ _S202_NJ
 unset _S202_D
 fi
 
@@ -27814,12 +27897,134 @@ _s248_rec() {
 }
 # The CHANGED block of output file $1, one line per entry, prefix stripped.
 _s248_block() { awk '/Protected files CHANGED during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+# Every case below with a single agent launch runs side by side (the
+# _a6_bg of §236-§239): each builds its own CASE fixture here, in the order
+# of the checks, and starts its launch; its check, further down, joins it
+# (_a6_join, which sets _A6_RC) and reads only the files of that case. The
+# --unlock, --attach and --stop cases, and the ones that launch twice or
+# start a stand-in process, run in place.
+_s248_gate() {   # $1 = CASE: .claude -> cfg holding settings.json
+    local w="$_A6_DIR/$1/ws"; _s248_repo "$w"; mkdir -p "$w/cfg"; printf '{}\n' > "$w/cfg/settings.json"; ln -s cfg "$w/.claude"
+}
+_s248_wt() {   # $1 = CASE: ws/.git -> ../realgit, with commondir and a submodule gitdir
+    local g="$_A6_DIR/$1/realgit"
+    mkdir -p "$_A6_DIR/$1/ws" "$g/objects" "$g/refs" "$g/modules/sub"
+    printf 'ref: refs/heads/main\n' > "$g/HEAD"; printf '[core]\n' > "$g/config"; printf '../main\n' > "$g/commondir"
+    printf '[core]\n' > "$g/modules/sub/config"; mkdir -p "$g/modules/sub/objects" "$g/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$g/modules/sub/HEAD"; printf 'gitdir: ../realgit\n' > "$_A6_DIR/$1/ws/.git"
+}
+_s248_wta() {   # $1 = workspace: .git/worktrees/wt1 (commondir) and wt2 (commondir, config.worktree)
+    local n
+    for n in wt1 wt2; do mkdir -p "$1/.git/worktrees/$n"; printf 'ref: refs/heads/%s\n' "$n" > "$1/.git/worktrees/$n/HEAD"; printf '../..\n' > "$1/.git/worktrees/$n/commondir"; done
+    printf '[core]\n' > "$1/.git/worktrees/wt2/config.worktree"
+}
+_S248_C=s248-hash; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_S248_H0="$(_s248_sha "$_S248_W/.envrc")"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.envrc PATH="$_S248_PATH"
+_S248_C=s248-hash0; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-hlink; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_LINK=.envrc PATH="$_S248_PATH"
+_S248_C=s248-mac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+mkdir -p "$_S248_W/.claude"; printf '{}\n' > "$_S248_W/.claude/settings.json"
+printf '%s\n' "$_S248_W/.mcp.json" > "$_A6_DIR/$_S248_C/flags"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-stale; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+mkdir -p "$(_a6_sandbox "$_S248_C")"
+_s248_rec locked "$_S248_W/.envrc" > "$(_a6_sandbox "$_S248_C")/.uchg-locked"
+printf '%s\n' "$_S248_W/.envrc" > "$_A6_DIR/$_S248_C/flags"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gate; _s248_gate "$_S248_C"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gauto; _s248_gate "$_S248_C"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1 PATH="$_S248_PATH"
+_S248_C=s248-gok; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")"
+printf '%s\n' ".claude -> $_A6_DIR/$_S248_C/ws/cfg" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gnew; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")" "$_A6_DIR/$_S248_C/t0"
+ln -s "$_A6_DIR/$_S248_C/t0" "$_A6_DIR/$_S248_C/ws/keep"
+printf '%s\n' "keep -> $_A6_DIR/$_S248_C/t0" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-genv; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/conf"
+mv "$_S248_W/.envrc" "$_S248_W/conf/envrc"; ln -s conf/envrc "$_S248_W/.envrc"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gfree; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/src"; ln -s src "$_S248_W/docs"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-cdir; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; printf '../..\n' > "$_S248_W/.git/commondir"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/config.worktree PATH="$_S248_PATH"
+_S248_C=s248-wt; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE_ABS="$_S248_G/config" PATH="$_S248_PATH"
+_S248_C=s248-wtmac; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-submac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/modules/lib/a"
+printf '[core]\n' > "$_S248_W/.git/modules/lib/a/config"; mkdir -p "$_S248_W/.git/modules/lib/a/objects" "$_S248_W/.git/modules/lib/a/refs"; printf 'ref: refs/heads/main\n' > "$_S248_W/.git/modules/lib/a/HEAD"; printf '.\n' > "$_S248_W/.git/commondir"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-hpl; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/real-tools/githooks"
+printf 'x\n' > "$_S248_W/real-tools/githooks/pre-commit"; ln -s real-tools "$_S248_W/tools"
+printf '[core]\n\thooksPath = tools/githooks\n' > "$_S248_W/.git/config"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-mlnk; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")"
+printf '%s\n' ".claude -> $_A6_DIR/$_S248_C/ws/cfg" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-swap; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; printf 'other\n' > "$_S248_W/.envrc.swap"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SWAP="$_S248_W/.envrc" PATH="$_S248_PATH"
+_S248_C=s248-deep; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_s248_gd() { mkdir -p "$1/objects" "$1/refs/heads"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
+_S248_D1="$_S248_W/.git/modules/research/hyperlight"; _s248_gd "$_S248_D1"
+_S248_D2="$_S248_D1/modules/src/hyperlight_libc/third_party/picolibc"; _s248_gd "$_S248_D2"
+printf '0000000000000000000000000000000000000000\n' > "$_S248_D1/refs/heads/config"
+printf '.\n' > "$_S248_D1/commondir"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-wta; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_wta "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/worktrees/wt1/commondir PATH="$_S248_PATH"
+_S248_C=s248-wtamac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_wta "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-wtal; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/worktrees" "$_S248_W/adm/wt3"
+printf 'ref: refs/heads/wt3\n' > "$_S248_W/adm/wt3/HEAD"; printf '../..\n' > "$_S248_W/adm/wt3/commondir"
+ln -s ../../adm/wt3 "$_S248_W/.git/worktrees/wt3"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-newgd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+mkdir -p "$_S248_W/.git/worktrees/old"; printf 'ref: refs/heads/old\n' > "$_S248_W/.git/worktrees/old/HEAD"; printf '../..\n' > "$_S248_W/.git/worktrees/old/commondir"
+_s248_gd "$_S248_W/.git/modules/oldsub"
+_S248_MK='mkdir -p .git/worktrees/new .git/modules/lib/newsub/objects .git/modules/lib/newsub/refs
+printf "ref: refs/heads/new\n" > .git/worktrees/new/HEAD; printf "../..\n" > .git/worktrees/new/commondir; printf "/x/.git\n" > .git/worktrees/new/gitdir
+printf "ref: refs/heads/main\n" > .git/modules/lib/newsub/HEAD; printf "[core]\n" > .git/modules/lib/newsub/config'
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_MK" PATH="$_S248_PATH"
+_S248_C=s248-newgd0; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/oldsub"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_SEEN='for f in .git/commondir .git/modules/s/commondir .git/worktrees/w/commondir; do printf "%s=%s\n" "$f" "$(cat "$f" 2>/dev/null)"; done > "$A6_LOG/seen"'
+_S248_C=s248-seed; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/s"
+mkdir -p "$_S248_W/.git/worktrees/w"; printf 'ref: refs/heads/w\n' > "$_S248_W/.git/worktrees/w/HEAD"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_SEEN" PATH="$_S248_PATH"
+_S248_C=s248-seedw; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/commondir PATH="$_S248_PATH"
+_S248_C=s248-seedi; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='printf ".\n" > .git/commondir.new; mv -f .git/commondir.new .git/commondir' PATH="$_S248_PATH"
+_S248_C=s248-seedg; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"; rm -f "$_S248_G/commondir"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat '"$_S248_G"'/commondir > "$A6_LOG/seen" 2>/dev/null' PATH="$_S248_PATH"
+_S248_C=s248-lk2; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+printf 'repos: []\n' > "$_S248_W/.pre-commit-config.yaml"; printf '[tools]\n' > "$_S248_W/.mise.toml"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-cdd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat .git/commondir > "$A6_LOG/seen" 2>&1' PATH="$_S248_PATH"
+_S248_C=s248-gdpin; _s248_wt "$_S248_C"; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_G="$_A6_DIR/$_S248_C/realgit"
+mkdir -p "$_S248_G/worktrees/w"; printf 'ref: refs/heads/w\n' > "$_S248_G/worktrees/w/HEAD"; printf '../..\n' > "$_S248_G/worktrees/w/commondir"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-down; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SURVIVE=down PATH="$_S248_PATH"
+_S248_C=s248-cdfull; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"; printf 'x\n' > "$_S248_W/.git/commondir/keep"
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-glink; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/sub"
+mkdir -p "$_S248_W/.git/worktrees" "$_S248_W/adm/a" "$_S248_W/adm/b" "$_S248_W/adm/k"
+for _S248_F in a b k; do printf 'ref: refs/heads/x\n' > "$_S248_W/adm/$_S248_F/HEAD"; done
+ln -s ../../adm/a "$_S248_W/.git/worktrees/old"; ln -s ../../adm/k "$_S248_W/.git/worktrees/keep"
+mkdir -p "$(_a6_sandbox "$_S248_C")"
+printf '%s\n' ".git/worktrees/keep -> $_S248_W/adm/k" ".git/worktrees/old -> $_S248_W/adm/a" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
+_S248_MK='ln -s ../../adm/b .git/modules/evil; ln -s ../../../../adm .git/modules/sub/modules; ln -s ../../adm/b .git/worktrees/new; rm .git/worktrees/old; ln -s ../../adm/b .git/worktrees/old'
+_a6_bg "$_S248_C" _a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_MK" PATH="$_S248_PATH"
 # (a) Linux: .envrc rewritten during the session is reported, with the copy
 # and a printed diff/cp; nothing is restored; the unchanged ones are not
 # listed; nothing is locked.
-_S248_C=s248-hash; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_S248_H0="$(_s248_sha "$_S248_W/.envrc")"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.envrc PATH="$_S248_PATH"
+_S248_C=s248-hash; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_O="$_A6_DIR/$_S248_C/out"; _S248_CP="$(_a6_sandbox "$_S248_C")/.protected-copies"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S248_C")" ]; then echo "launch rc $_A6_RC"; fi
     [ "$(_s248_block "$_S248_O")" = .envrc ] || echo "block: $(_s248_block "$_S248_O" | tr '\n' ' ')"
@@ -27833,15 +28038,13 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S248_C")" ]; th
 if [ -n "$_S248_R" ]; then _a6_diag "§248(a)" "$_S248_C"; fi
 check "§248(a) a protected file rewritten during the session is reported (only it), with the launch copy and a printed diff/cp, and is not restored; on Linux nothing is locked (mutation: drop the #hash snapshot, or the report; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-hash0; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-hash0; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$(grep -c 'Protected files CHANGED' "$_A6_DIR/$_S248_C/out" || true)"
 check "§248(a0) control: the same launch with no write reports nothing (rc $_A6_RC, blocks ${_S248_R:-?})" \
     test "$_A6_RC" = 0 -a "$_S248_R" = 0
 # (b) a file replaced by a link is reported, with no cp: it would write
 # wherever the link points.
-_S248_C=s248-hlink; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_LINK=.envrc PATH="$_S248_PATH"
+_S248_C=s248-hlink; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_O="$_A6_DIR/$_S248_C/out"
 _S248_R="$( { [ "$(_s248_block "$_S248_O")" = '.envrc (now missing)' ] || [ "$(_s248_block "$_S248_O")" = .envrc ] || echo "block: $(_s248_block "$_S248_O" | tr '\n' ' ')"
     if grep -qF "/.envrc" "$_S248_O" && grep -E '^\[sandy\]   (cp|diff) ' "$_S248_O" | grep -qF ".envrc"; then echo "a cp/diff through the link was printed"; fi; } 2>&1)" || true
@@ -27850,10 +28053,7 @@ check "§248(b) a protected file replaced by a link is reported with no cp or di
 # (c) macOS: the six-file list is locked while the agent runs, a flag the user
 # had set (.mcp.json) is recorded and never cleared, and cleanup clears
 # exactly what sandy set.
-_S248_C=s248-mac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-mkdir -p "$_S248_W/.claude"; printf '{}\n' > "$_S248_W/.claude/settings.json"
-printf '%s\n' "$_S248_W/.mcp.json" > "$_A6_DIR/$_S248_C/flags"
-_a6_launch "$_S248_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-mac; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_O="$_A6_DIR/$_S248_C/out"; _S248_E="$_A6_DIR/$_S248_C/events.log"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S248_C")" ]; then echo "launch rc $_A6_RC"; fi
     for _S248_F in .claude/settings.json .claude/settings.local.json .envrc .git/config .mcp.json; do
@@ -27870,11 +28070,7 @@ check "§248(c) macOS: .claude/settings.json, .claude/settings.local.json, .envr
     test -z "$_S248_R"
 # (d) a record a session left behind is cleared at the next launch's start,
 # before docker run (a Linux launch: the unlock needs chflags only).
-_S248_C=s248-stale; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-mkdir -p "$(_a6_sandbox "$_S248_C")"
-_s248_rec locked "$_S248_W/.envrc" > "$(_a6_sandbox "$_S248_C")/.uchg-locked"
-printf '%s\n' "$_S248_W/.envrc" > "$_A6_DIR/$_S248_C/flags"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-stale; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_E="$_A6_DIR/$_S248_C/events.log"
 _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
     awk -v f="chflags -h nouchg $_S248_W/.envrc" '$0 == f { l = NR } /^docker run/ && / --name sandy-ws-/ { r = NR } END { exit !(l && r && l < r) }' "$_S248_E" || echo "not unlocked before docker run"
@@ -27924,11 +28120,7 @@ _S248_R="$( { [ "$_A6_RC" = 1 ] || echo "rc $_A6_RC"
 check "§248(e5) --unlock never unlocks through a link (.claude -> cfg): exit 1, the record kept (mutation: drop the link test in the unlock; ${_S248_R:-ok})" \
     test -z "$_S248_R"
 # (f) the symlink gate for a link inside the workspace above a protected path.
-_s248_gate() {   # $1 = CASE: .claude -> cfg holding settings.json
-    local w="$_A6_DIR/$1/ws"; _s248_repo "$w"; mkdir -p "$w/cfg"; printf '{}\n' > "$w/cfg/settings.json"; ln -s cfg "$w/.claude"
-}
-_S248_C=s248-gate; _s248_gate "$_S248_C"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gate; _a6_join "$_S248_C"
 _S248_O="$_A6_DIR/$_S248_C/out"
 _S248_R="$( { [ "$_A6_RC" = 1 ] || echo "rc $_A6_RC"
     [ -z "$(_a6_agent_args "$_S248_C")" ] || echo "the agent ran"
@@ -27938,36 +28130,26 @@ _S248_R="$( { [ "$_A6_RC" = 1 ] || echo "rc $_A6_RC"
     grep -qF "need interactive approval" "$_S248_O" || echo "no non-TTY refusal"; } 2>&1)" || true
 check "§248(f1) a headless, non-TTY launch with .claude -> cfg (inside the workspace) is refused at the symlink gate, which names the link and why (mutation: drop the internal sweep; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-gauto; _s248_gate "$_S248_C"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 SANDY_AUTO_APPROVE_PRIVILEGED=1 PATH="$_S248_PATH"
+_S248_C=s248-gauto; _a6_join "$_S248_C"
 check "§248(f2) ...and SANDY_AUTO_APPROVE_PRIVILEGED=1 does not approve it (rc $_A6_RC)" \
     bash -c '[ "$1" = 1 ] && grep -qF "need interactive approval" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
-_S248_C=s248-gok; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")"
-printf '%s\n' ".claude -> $_A6_DIR/$_S248_C/ws/cfg" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gok; _a6_join "$_S248_C"
 check "§248(f3) ...once approved, the launch proceeds (rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && [ -n "$2" ]' _ "$_A6_RC" "$(_a6_agent_args "$_S248_C")"
-_S248_C=s248-gnew; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")" "$_A6_DIR/$_S248_C/t0"
-ln -s "$_A6_DIR/$_S248_C/t0" "$_A6_DIR/$_S248_C/ws/keep"
-printf '%s\n' "keep -> $_A6_DIR/$_S248_C/t0" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gnew; _a6_join "$_S248_C"
 check "§248(f4) a new such link beside an existing approval is a hard error that says why (rc $_A6_RC)" \
     bash -c '[ "$1" = 1 ] && grep -qF "cannot be protected while it sits under a link" "$2" && grep -qF ".claude -> " "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
-_S248_C=s248-genv; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/conf"
-mv "$_S248_W/.envrc" "$_S248_W/conf/envrc"; ln -s conf/envrc "$_S248_W/.envrc"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-genv; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(f5) a link AT a protected file (.envrc -> conf/envrc) is gated the same way (rc $_A6_RC)" \
     bash -c '[ "$1" = 1 ] && grep -qF ".envrc -> $3/conf/envrc" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
-_S248_C=s248-gfree; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/src"; ln -s src "$_S248_W/docs"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gfree; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(f6) control: a link inside the workspace that is not on the way to a protected path (docs -> src) needs no approval (rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && ! grep -qF "at or above a path sandy protects" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
 # (g) .git/commondir and .git/config.worktree: :ro when present, and one
 # created during the session is reported like any protected file. (The
 # commondir is seeded at launch since 2.9.0, so it is config.worktree that is
 # created here; a write to the seeded commondir is (p)'s.)
-_S248_C=s248-cdir; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; printf '../..\n' > "$_S248_W/.git/commondir"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/config.worktree PATH="$_S248_PATH"
+_S248_C=s248-cdir; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
     grep -qxF "$_S248_W/.git/commondir:/home/sandy/ws/.git/commondir:ro" "$_S248_A" || echo "commondir not :ro"
@@ -27980,14 +28162,7 @@ check "§248(g) an existing .git/commondir is mounted :ro and left as it was, an
 # the gitdir's commondir is :ro, its config is hashed and a change reported;
 # on macOS the .git file, the gitdir's config and commondir, and a submodule
 # config under it are locked during the run and unlocked after.
-_s248_wt() {   # $1 = CASE: ws/.git -> ../realgit, with commondir and a submodule gitdir
-    local g="$_A6_DIR/$1/realgit"
-    mkdir -p "$_A6_DIR/$1/ws" "$g/objects" "$g/refs" "$g/modules/sub"
-    printf 'ref: refs/heads/main\n' > "$g/HEAD"; printf '[core]\n' > "$g/config"; printf '../main\n' > "$g/commondir"
-    printf '[core]\n' > "$g/modules/sub/config"; mkdir -p "$g/modules/sub/objects" "$g/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$g/modules/sub/HEAD"; printf 'gitdir: ../realgit\n' > "$_A6_DIR/$1/ws/.git"
-}
-_S248_C=s248-wt; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE_ABS="$_S248_G/config" PATH="$_S248_PATH"
+_S248_C=s248-wt; _S248_G="$_A6_DIR/$_S248_C/realgit"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
     grep -qxF "$_S248_G/commondir:/home/sandy/realgit/commondir:ro" "$_S248_A" || echo "gitdir commondir not :ro"
@@ -27995,8 +28170,7 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
 if [ -n "$_S248_R" ]; then _a6_diag "§248(h1)" "$_S248_C"; fi
 check "§248(h1) a gitdir outside the workspace: its commondir is :ro, and its config, rewritten during the session, is reported (mutation: hash only workspace destinations; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-wtmac; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-wtmac; _S248_G="$_A6_DIR/$_S248_C/realgit"; _a6_join "$_S248_C"
 _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
     for _S248_F in "$_A6_DIR/$_S248_C/ws/.git" "$_S248_G/config" "$_S248_G/commondir" "$_S248_G/modules/sub/config"; do
         grep -qxF "$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked during the run: $_S248_F"
@@ -28004,33 +28178,25 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
     [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "left locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"; } 2>&1)" || true
 check "§248(h2) macOS: the .git file, the gitdir's config and commondir, and its submodule config are locked during the run and unlocked after (mutation: lock only the fixed workspace list; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-submac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/modules/lib/a"
-printf '[core]\n' > "$_S248_W/.git/modules/lib/a/config"; mkdir -p "$_S248_W/.git/modules/lib/a/objects" "$_S248_W/.git/modules/lib/a/refs"; printf 'ref: refs/heads/main\n' > "$_S248_W/.git/modules/lib/a/HEAD"; printf '.\n' > "$_S248_W/.git/commondir"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-submac; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$( { for _S248_F in .git/modules/lib/a/config .git/commondir .git/config .envrc .mcp.json; do
         grep -qxF "$_S248_W/$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked: $_S248_F"
     done; } 2>&1)" || true
 check "§248(h3) macOS: a submodule config under .git/modules and .git/commondir are locked with the fixed list (rc $_A6_RC; ${_S248_R:-ok})" \
     test "$_A6_RC" = 0 -a -z "$_S248_R"
 # (i) a link above the core.hooksPath directory needs the approval.
-_S248_C=s248-hpl; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/real-tools/githooks"
-printf 'x\n' > "$_S248_W/real-tools/githooks/pre-commit"; ln -s real-tools "$_S248_W/tools"
-printf '[core]\n\thooksPath = tools/githooks\n' > "$_S248_W/.git/config"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-hpl; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(i) core.hooksPath tools/githooks with tools -> real-tools is refused at the symlink gate, naming the link (mutation: leave the hooksPath out of _sandy_symlink_byname_rels; rc $_A6_RC)" \
     bash -c '[ "$1" = 1 ] && grep -qF "tools -> $3/real-tools" "$2" && grep -qF "at or above a path sandy protects" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
 # (j) never through a link: an approved .claude -> cfg gets no lock on what it
 # leads to; and a file swapped in as it is locked is cleared again and named.
-_S248_C=s248-mlnk; _s248_gate "$_S248_C"; mkdir -p "$(_a6_sandbox "$_S248_C")"
-printf '%s\n' ".claude -> $_A6_DIR/$_S248_C/ws/cfg" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-mlnk; _a6_join "$_S248_C"
 _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
     grep -qxF "$_A6_DIR/$_S248_C/ws/.envrc" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "control: .envrc not locked"
     if grep -E 'chflags .*(\.claude/|cfg/)' "$_A6_DIR/$_S248_C/events.log"; then echo "locked through the link"; fi; } 2>&1)" || true
 check "§248(j1) macOS: nothing reached through an approved .claude -> cfg is locked (mutation: drop the no-link walk in the lock; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-swap; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; printf 'other\n' > "$_S248_W/.envrc.swap"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SWAP="$_S248_W/.envrc" PATH="$_S248_PATH"
+_S248_C=s248-swap; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
     grep -qF "Not locking .envrc: it was replaced while sandy locked it" "$_A6_DIR/$_S248_C/out" || echo "no warning"
     if grep -qxF "$_S248_W/.envrc" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null; then echo "the swapped-in file is locked"; fi
@@ -28052,13 +28218,7 @@ check "§248(k) --unlock leaves a flag whose ctime moved since sandy set it (the
 # (l) submodule gitdirs found by structure with no depth limit: one nested
 # eight levels down gets its config :ro; a branch named `config` is not a
 # gitdir; a submodule gitdir's existing commondir is :ro.
-_S248_C=s248-deep; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_s248_gd() { mkdir -p "$1/objects" "$1/refs/heads"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
-_S248_D1="$_S248_W/.git/modules/research/hyperlight"; _s248_gd "$_S248_D1"
-_S248_D2="$_S248_D1/modules/src/hyperlight_libc/third_party/picolibc"; _s248_gd "$_S248_D2"
-printf '0000000000000000000000000000000000000000\n' > "$_S248_D1/refs/heads/config"
-printf '.\n' > "$_S248_D1/commondir"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-deep; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_D1="$_S248_W/.git/modules/research/hyperlight"; _S248_D2="$_S248_D1/modules/src/hyperlight_libc/third_party/picolibc"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
     _S248_CD2="/home/sandy/ws/${_S248_D2#"$_S248_W"/}"
@@ -28071,13 +28231,7 @@ check "§248(l) a submodule gitdir eight levels deep gets its config :ro, a subm
 # (m) linked-worktree admin dirs: commondir and config.worktree :ro, their
 # ancestors pinned, a rewrite reported, locked on macOS; a link among them
 # needs the approval.
-_s248_wta() {   # $1 = workspace: .git/worktrees/wt1 (commondir) and wt2 (commondir, config.worktree)
-    local n
-    for n in wt1 wt2; do mkdir -p "$1/.git/worktrees/$n"; printf 'ref: refs/heads/%s\n' "$n" > "$1/.git/worktrees/$n/HEAD"; printf '../..\n' > "$1/.git/worktrees/$n/commondir"; done
-    printf '[core]\n' > "$1/.git/worktrees/wt2/config.worktree"
-}
-_S248_C=s248-wta; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_wta "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/worktrees/wt1/commondir PATH="$_S248_PATH"
+_S248_C=s248-wta; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
     for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
@@ -28090,18 +28244,14 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
 if [ -n "$_S248_R" ]; then _a6_diag "§248(m1)" "$_S248_C"; fi
 check "§248(m1) each linked-worktree admin dir's commondir and config.worktree is :ro, its ancestors are pinned, and a rewrite is reported (mutation: no _protect_worktree_admin_dirs call; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-wtamac; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_wta "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-wtamac; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$( { for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
         grep -qxF "$_S248_W/.git/worktrees/$_S248_F" "$_A6_DIR/$_S248_C/flags-during-run" 2>/dev/null || echo "not locked: $_S248_F"
     done
     [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "left locked"; } 2>&1)" || true
 check "§248(m2) macOS: the worktree admin files are locked during the run and unlocked after (mutation: no worktree targets in the lock; rc $_A6_RC; ${_S248_R:-ok})" \
     test "$_A6_RC" = 0 -a -z "$_S248_R"
-_S248_C=s248-wtal; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/worktrees" "$_S248_W/adm/wt3"
-printf 'ref: refs/heads/wt3\n' > "$_S248_W/adm/wt3/HEAD"; printf '../..\n' > "$_S248_W/adm/wt3/commondir"
-ln -s ../../adm/wt3 "$_S248_W/.git/worktrees/wt3"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-wtal; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(m3) a worktree admin dir that is a link inside the workspace (.git/worktrees/wt3 -> adm/wt3) needs the symlink approval (mutation: leave the worktree entries out of _sandy_symlink_byname_rels; rc $_A6_RC)" \
     bash -c '[ "$1" = 1 ] && grep -qF ".git/worktrees/wt3 -> $3/adm/wt3" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_S248_W"
 # (n) a lock record in the earlier workspace-relative format is still unlocked;
@@ -28120,13 +28270,7 @@ check "§248(n) --unlock reads the earlier record format, and keeps and names a 
 # gitdir (the .git/modules/<path> shape) created during the session got no
 # :ro mount, so they are reported at session end; the ones that existed at
 # launch are not, and nothing is offered for removal.
-_S248_C=s248-newgd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-mkdir -p "$_S248_W/.git/worktrees/old"; printf 'ref: refs/heads/old\n' > "$_S248_W/.git/worktrees/old/HEAD"; printf '../..\n' > "$_S248_W/.git/worktrees/old/commondir"
-_s248_gd "$_S248_W/.git/modules/oldsub"
-_S248_MK='mkdir -p .git/worktrees/new .git/modules/lib/newsub/objects .git/modules/lib/newsub/refs
-printf "ref: refs/heads/new\n" > .git/worktrees/new/HEAD; printf "../..\n" > .git/worktrees/new/commondir; printf "/x/.git\n" > .git/worktrees/new/gitdir
-printf "ref: refs/heads/main\n" > .git/modules/lib/newsub/HEAD; printf "[core]\n" > .git/modules/lib/newsub/config'
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_MK" PATH="$_S248_PATH"
+_S248_C=s248-newgd; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_O="$_A6_DIR/$_S248_C/out"
 _S248_B2="$(awk '/A git worktree or submodule gitdir was created during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$_S248_O" | LC_ALL=C sort | tr '\n' ' ')"
 _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
@@ -28135,17 +28279,13 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
 if [ -n "$_S248_R" ]; then _a6_diag "§248(o)" "$_S248_C"; fi
 check "§248(o) a worktree admin dir and a submodule gitdir created during the session are reported, the ones from launch are not, no removal offered (mutation: drop the #gitdir snapshot, or the report; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-newgd0; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/oldsub"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-newgd0; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(o0) control: with nothing created there is no such report (rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && ! grep -q "submodule gitdir was created" "$2"' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out"
 # (p) commondir seeding: a gitdir with no commondir gets one (`.`) for the
 # session, :ro, and it is removed at the end only while it is exactly what
 # sandy wrote (same inode, content `.`).
-_S248_SEEN='for f in .git/commondir .git/modules/s/commondir .git/worktrees/w/commondir; do printf "%s=%s\n" "$f" "$(cat "$f" 2>/dev/null)"; done > "$A6_LOG/seen"'
-_S248_C=s248-seed; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/s"
-mkdir -p "$_S248_W/.git/worktrees/w"; printf 'ref: refs/heads/w\n' > "$_S248_W/.git/worktrees/w/HEAD"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_SEEN" PATH="$_S248_PATH"
+_S248_C=s248-seed; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
     [ "$(tr '\n' ' ' < "$_A6_DIR/$_S248_C/seen" 2>/dev/null)" = ".git/commondir=. .git/modules/s/commondir=. .git/worktrees/w/commondir=. " ] || echo "seen: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/seen" 2>/dev/null)"
@@ -28158,21 +28298,18 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
 if [ -n "$_S248_R" ]; then _a6_diag "§248(p1)" "$_S248_C"; fi
 check "§248(p1) .git, a submodule gitdir and a worktree admin dir without commondir get one (.) for the session, :ro, removed at the end, with no report (mutation: seeding off; no removal; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-seedw; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.git/commondir PATH="$_S248_PATH"
+_S248_C=s248-seedw; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$( { [ "$(cat "$_S248_W/.git/commondir" 2>/dev/null | tr '\n' ' ')" = ". tampered " ] || echo "commondir now: $(cat "$_S248_W/.git/commondir" 2>/dev/null | tr '\n' ' ')"
     [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .git/commondir ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"; } 2>&1)" || true
 check "§248(p2) a seeded commondir the session rewrote is kept and reported (mutation: drop the content check before removal; rc $_A6_RC; ${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-seedi; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='printf ".\n" > .git/commondir.new; mv -f .git/commondir.new .git/commondir' PATH="$_S248_PATH"
+_S248_C=s248-seedi; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 # The replacement is renamed over the seed, so it is a different inode while
 # both exist. rm-then-create may get the freed inode number back (ext4 on CI
 # runners does), and then it is, by design, indistinguishable from the seed.
 check "§248(p3) a seeded commondir replaced by another file (even one holding .) is not removed (mutation: drop the inode check before removal; rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && [ "$(cat "$2" 2>/dev/null)" = . ]' _ "$_A6_RC" "$_S248_W/.git/commondir"
-_S248_C=s248-seedg; _s248_wt "$_S248_C"; _S248_G="$_A6_DIR/$_S248_C/realgit"; rm -f "$_S248_G/commondir"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat '"$_S248_G"'/commondir > "$A6_LOG/seen" 2>/dev/null' PATH="$_S248_PATH"
+_S248_C=s248-seedg; _S248_G="$_A6_DIR/$_S248_C/realgit"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { [ "$(cat "$_A6_DIR/$_S248_C/seen" 2>/dev/null)" = . ] || echo "not seeded in the gitdir"
     grep -qxF "$_S248_G/commondir:/home/sandy/realgit/commondir:ro" "$_S248_A" || echo "not :ro"
@@ -28254,9 +28391,7 @@ kill "$_S248_SUP" 2>/dev/null || true; wait "$_S248_SUP" 2>/dev/null || true
 check "§248(q3) control: with a live supervisor --attach warns of nothing and locks nothing (rc $_A6_RC)" \
     bash -c '! grep -qF "has no live supervisor" "$1" && [ ! -s "$2" ]' _ "$_A6_DIR/$_S248_C/out" "$_A6_DIR/$_S248_C/flags"
 # (r) .pre-commit-config.yaml and .mise.toml are on the macOS lock list.
-_S248_C=s248-lk2; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-printf 'repos: []\n' > "$_S248_W/.pre-commit-config.yaml"; printf '[tools]\n' > "$_S248_W/.mise.toml"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+_S248_C=s248-lk2; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(r) macOS: .pre-commit-config.yaml and .mise.toml are locked during the run (rc $_A6_RC)" \
     bash -c 'grep -qxF "$1/.pre-commit-config.yaml" "$2" && grep -qxF "$1/.mise.toml" "$2"' _ "$_S248_W" "$_A6_DIR/$_S248_C/flags-during-run"
 # (s) the locks and the seed outlive a container that outlives its session;
@@ -28275,8 +28410,7 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
     [ ! -s "$_A6_DIR/$_S248_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S248_C/flags")"; } 2>&1)" || true
 check "§248(s2) ...and the next session, its container gone, clears both (${_S248_R:-ok})" \
     test -z "$_S248_R"
-_S248_C=s248-cdd; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat .git/commondir > "$A6_LOG/seen" 2>&1' PATH="$_S248_PATH"
+_S248_C=s248-cdd; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(s3) an empty directory at .git/commondir is removed (and said) at launch, and the seed takes its place (mutation: no _sandy_commondir_fix_dirs at launch; rc $_A6_RC)" \
     bash -c '[ "$1" = 0 ] && grep -qF "Removed an empty directory at .git/commondir" "$2" && [ "$(cat "$3")" = . ] && [ ! -e "$4/.git/commondir" ]' _ "$_A6_RC" "$_A6_DIR/$_S248_C/out" "$_A6_DIR/$_S248_C/seen" "$_S248_W"
 _S248_C=s248-cdda; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"; _S248_S="$(_a6_sandbox "$_S248_C")"; mkdir -p "$_S248_S"; : > "$_A6_DIR/$_S248_C/mounts"
@@ -28309,9 +28443,7 @@ check "§248(u) --unlock refuses while a daemon container of the workspace is ru
 # checkout): the directories between it and the :ro mounts under it
 # (modules/<n>, worktrees/<w>) are pinned too, after the gitdir mount and
 # before the mounts beneath them.
-_S248_C=s248-gdpin; _s248_wt "$_S248_C"; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_G="$_A6_DIR/$_S248_C/realgit"
-mkdir -p "$_S248_G/worktrees/w"; printf 'ref: refs/heads/w\n' > "$_S248_G/worktrees/w/HEAD"; printf '../..\n' > "$_S248_G/worktrees/w/commondir"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-gdpin; _S248_W="$_A6_DIR/$_S248_C/ws"; _S248_G="$_A6_DIR/$_S248_C/realgit"; _a6_join "$_S248_C"
 _S248_A="$(_a6_agent_args "$_S248_C")"
 _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $_A6_RC"; fi
     awk -v g="$_S248_G" -v c=/home/sandy/realgit '
@@ -28334,13 +28466,11 @@ check "§248(v) a gitdir outside the workspace gets its modules/, modules/<n>, w
     test -z "$_S248_R"
 # (w) the daemon unreachable during teardown: whether the container is gone is
 # unknown, so the seed and the locks are kept.
-_S248_C=s248-down; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S248_SURVIVE=down PATH="$_S248_PATH"
+_S248_C=s248-down; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(w) with the Docker daemon unreachable at teardown, the seed and the macOS locks are kept (mutation: an inspect error counts as gone; rc $_A6_RC)" \
     bash -c '[ "$(cat "$1/.git/commondir" 2>/dev/null)" = . ] && grep -qxF "$1/.envrc" "$2" && grep -qF "may still exist" "$3"' _ "$_S248_W" "$_A6_DIR/$_S248_C/flags" "$_A6_DIR/$_S248_C/out"
 # (x) a commondir that is a directory with content is named and left alone.
-_S248_C=s248-cdfull; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; mkdir -p "$_S248_W/.git/commondir"; printf 'x\n' > "$_S248_W/.git/commondir/keep"
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S248_C=s248-cdfull; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 check "§248(x) a .git/commondir directory with content is named with why git will fail, and left as it is (rc $_A6_RC)" \
     bash -c 'grep -qF ".git/commondir is a directory with content where git expects a commondir file" "$1" && [ -f "$2/.git/commondir/keep" ]' _ "$_A6_DIR/$_S248_C/out" "$_S248_W"
 # (q6) a supervisor for another workspace, whose path only begins with the path
@@ -28357,14 +28487,7 @@ check "§248(q6) a live --start for <ws>2 does not count as the supervisor of <w
 # D1 a link at .git/modules/<name>, D2 .git/modules itself (in a submodule
 # gitdir that had none), D3 a link at .git/worktrees/<x>, D4 an existing link
 # re-pointed; an existing link left alone is not reported.
-_S248_C=s248-glink; _S248_W="$_A6_DIR/$_S248_C/ws"; _s248_repo "$_S248_W"; _s248_gd "$_S248_W/.git/modules/sub"
-mkdir -p "$_S248_W/.git/worktrees" "$_S248_W/adm/a" "$_S248_W/adm/b" "$_S248_W/adm/k"
-for _S248_F in a b k; do printf 'ref: refs/heads/x\n' > "$_S248_W/adm/$_S248_F/HEAD"; done
-ln -s ../../adm/a "$_S248_W/.git/worktrees/old"; ln -s ../../adm/k "$_S248_W/.git/worktrees/keep"
-mkdir -p "$(_a6_sandbox "$_S248_C")"
-printf '%s\n' ".git/worktrees/keep -> $_S248_W/adm/k" ".git/worktrees/old -> $_S248_W/adm/a" > "$(_a6_sandbox "$_S248_C")/.sandy-approved-symlinks.list"
-_S248_MK='ln -s ../../adm/b .git/modules/evil; ln -s ../../../../adm .git/modules/sub/modules; ln -s ../../adm/b .git/worktrees/new; rm .git/worktrees/old; ln -s ../../adm/b .git/worktrees/old'
-_a6_launch "$_S248_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S248_MK" PATH="$_S248_PATH"
+_S248_C=s248-glink; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_O="$_A6_DIR/$_S248_C/out"
 _S248_B2="$(awk '/A git worktree or submodule gitdir was created during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$_S248_O" | LC_ALL=C sort)"
 _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
@@ -29275,21 +29398,109 @@ _s224_helpers() {
 # _s224_wait_for LINE: poll (up to 20 s) for the background job's last event.
 _s224_wait_for() {
     local _i=0
-    while [ "$_i" -lt 100 ]; do
+    while [ "$_i" -lt 400 ]; do
         grep -qxF "$1" "$_S224_D/events" 2>/dev/null && return 0
-        sleep 0.2; _i=$((_i + 1))
+        sleep 0.05; _i=$((_i + 1))
     done
     return 1
 }
 # _s224_wait_helpers N: poll (up to 20 s) until git has N helpers for github.com.
 _s224_wait_helpers() {
     local _i=0 _h
-    while [ "$_i" -lt 100 ]; do
+    while [ "$_i" -lt 400 ]; do
         _h="$(_s224_helpers)"
         [ -n "$_h" ] && [ "$(printf '%s\n' "$_h" | wc -l | tr -d ' ')" = "$1" ] && return 0
-        sleep 0.2; _i=$((_i + 1))
+        sleep 0.05; _i=$((_i + 1))
     done
     return 1
+}
+# The host side's launches (16)-(18) and (14)'s walk, which waits out its 3 s
+# bound, start in the background while (1)-(5)'s logins sleep, and are joined
+# before (6): every later case is timed or sampled, and runs alone as before.
+# The three launches each have their own CASE dir. The walk runs in a run dir
+# of its own (HOME, logs, a workspace like (13)'s; the same stub bin), its two
+# result files moved to where (14) reads them, and with TOKMAP blank (only the
+# gh stub reads it): (5) looks for the x224 tokens on every command line of
+# this process group while the logins run.
+mkdir -p "$_S224_D/hbin"
+cat > "$_S224_D/hbin/docker" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
+    "network inspect "*Gateway*) echo 172.30.0.1 ;;
+    "network inspect "*bridge.name*) echo br-sdy-224 ;;
+esac
+if [ "${1:-}" = run ]; then
+    _prev=""; _agent=0; _env=""
+    for _a in "$@"; do
+        if [ "$_prev" = --env-file ]; then _env="$_a"; fi
+        case "$_prev" in --name) case "$_a" in sandy-*) _agent=1 ;; esac ;; esac
+        _prev="$_a"
+    done
+    if [ "$_agent" = 1 ]; then
+        printf '%s\n' "$@" > "$H224_LOG/agent.args"
+        if [ -n "$_env" ]; then cp "$_env" "$H224_LOG/agent.envfile"; fi
+    fi
+fi
+exit 0
+EOF
+# gh: the host's accounts are H224_ACCOUNTS ("user:token,..."), the active
+# one's token is H224_ACTIVE_TOK. Anything else (gh api) fails.
+cat > "$_S224_D/hbin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    "auth token") printf '%s\n' "$H224_ACTIVE_TOK"; exit 0 ;;
+    "auth status")
+        IFS=',' read -ra _p <<< "$H224_ACCOUNTS"
+        for _x in "${_p[@]}"; do printf '  - Logged in to github.com account %s (keyring)\n' "${_x%%:*}"; done
+        exit 0 ;;
+    "auth token --user "*)
+        IFS=',' read -ra _p <<< "$H224_ACCOUNTS"
+        for _x in "${_p[@]}"; do [ "${_x%%:*}" = "$4" ] && { printf '%s\n' "${_x#*:}"; exit 0; }; done
+        exit 1 ;;
+esac
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$_S224_D/hbin/curl"
+printf '#!/bin/sh\nexit 0\n' > "$_S224_D/hbin/sudo"
+printf '#!/bin/sh\nexit 44\n' > "$_S224_D/hbin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S224_D/hbin/uname"
+chmod +x "$_S224_D/hbin/docker" "$_S224_D/hbin/gh" "$_S224_D/hbin/curl" "$_S224_D/hbin/sudo" "$_S224_D/hbin/security" "$_S224_D/hbin/uname"
+# _s224_host CASE [VAR=value ...]: one launch; CASE/ is $HOME, CASE/ws the
+# workspace (no git repo, so no origin: the pick is rule 1, 2 or 5). Every
+# SANDY_*/credential variable of the launching shell is removed first.
+_s224_host() {
+    local c="$_S224_D/$1"; shift
+    rm -rf "$c"; mkdir -p "$c/ws" "$c/sh"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*|GIT_TOKEN|GH_ACCOUNTS) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$c/ws" && env PATH="$_S224_D/hbin:$PATH" HOME="$c" SANDY_HOME="$c/sh" H224_LOG="$c" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 "$@" bash "$SANDY_SCRIPT" -p fixture </dev/null >"$c/out" 2>&1
+    ) || echo "rc=$?" >> "$_S224_D/$1/out"
+}
+_s224_natslow() {   # runs in _bg_run's subshell: _S224_D, PATH and TOKMAP are its own
+    _S224_D="$_S224_D/natslow-run"; _S224_TOKMAP=""
+    mkdir -p "$_S224_D/slowbin" "$_S224_D/ws/node_modules/a/b/c/d/e/f/g/h/i"
+    ln -s ../bin "$_S224_D/bin"
+    printf 'MZ-not-elf' > "$_S224_D/ws/node_modules/a/b/c/d/e/f/g/h/i/x.node"
+    printf '#!/bin/sh\nexec sleep 20\n' > "$_S224_D/slowbin/find"; chmod +x "$_S224_D/slowbin/find"
+    PATH="$_S224_D/slowbin:$PATH"
+    _s224_run natslow "$_S224_NATIVE" WORKSPACE="$_S224_D/ws"
+}
+_s224_bg_start() {
+    _bg_run s224-hchosen _s224_host hchosen H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224b SANDY_GH_ACCOUNT=alice
+    _bg_run s224-hnopick _s224_host hnopick H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224z
+    _bg_run s224-hrule5 _s224_host hrule5 H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224b
+    _bg_run s224-natslow _s224_natslow
+}
+_s224_bg_join() {
+    local _k
+    for _k in hchosen hnopick hrule5 natslow; do _bg_join "s224-$_k"; done
 }
 _S224_GHB="$_S224_D/bin/gh"
 _S224_WANT_HELPERS="$(printf '\n!%s auth git-credential\n%s' "$_S224_GHB" "$_S224_BASE")"
@@ -29298,10 +29509,13 @@ check "§224(0) the git-auth, native-addon and LFS blocks were extracted, and gi
     _ "$_S224_GH" "$_S224_NATIVE" "$_S224_LFS" "$_S224_GIT"
 if [ -z "$_S224_GIT" ]; then
     check "§224 git-auth checks (no git on this host)" sh -c 'exit 77'
+    _s224_bg_start
 else
     # Two accounts whose logins take 2 s each: 4 s of network the launch used to wait for.
     _s224_run multi "$_S224_GH" GH_ACCOUNTS=alice:x224a,bob:x224b GIT_TOKEN=x224b SANDY_GH_ACTIVE=alice STUB_LOGIN_SLEEP=2
+    _s224_bg_start
     _s224_wait_for "switch alice" || true
+    _s224_bg_join
     _s224_ev="$(cat "$_S224_D/events" 2>/dev/null || true)"
     check "§224(1) the launch returns before the logins finish (took $(cat "$_S224_D/multi.secs")s against 4s of logins), with no login done yet, nothing left holding its output or fd 7, and no child left to reap" \
         bash -c '[ "$(cat "$1/multi.secs")" -le 2 ] && ! grep -q "^login " "$1/multi.events0" && ! grep -q "^rc=" "$1/multi.out"' _ "$_S224_D"
@@ -29412,11 +29626,9 @@ check "§224(13) the walk is depth-bounded: an addon at depth 10 is not looked a
     bash -c '[ ! -s "$1/file.argv" ] && ! grep -q "native addons" "$1/natdeep.out" && ! grep -q "^rc=" "$1/natdeep.out"' _ "$_S224_D"
 # A tree too big to walk: a find that never finishes is cut off after 3 s,
 # silently, and the launch goes on.
-mkdir -p "$_S224_D/slowbin"
-printf '#!/bin/sh\nexec sleep 20\n' > "$_S224_D/slowbin/find"; chmod +x "$_S224_D/slowbin/find"
-_S224_PATH0="$PATH"; PATH="$_S224_D/slowbin:$PATH"
-_s224_run natslow "$_S224_NATIVE" WORKSPACE="$_S224_WS"
-PATH="$_S224_PATH0"
+# (_s224_natslow, started with the logins above.)
+_s224_bg_join
+mv -f "$_S224_D/natslow-run/natslow.secs" "$_S224_D/natslow-run/natslow.out" "$_S224_D/" 2>/dev/null || true
 check "§224(14) a walk that does not finish is abandoned after about 3 s, silently, and the launch goes on (took $(cat "$_S224_D/natslow.secs")s)" \
     bash -c '[ "$(cat "$1/natslow.secs")" -le 6 ] && [ ! -s "$1/natslow.out" ]' _ "$_S224_D"
 # The LFS probe never descends into node_modules (a package's own
@@ -29441,77 +29653,16 @@ check "§224(15) the LFS probe reads the workspace's .gitattributes files but no
 # rule 5 still compares against the host's ACTIVE token. Drives the real
 # launcher (-p, egress off, offline) against stubs, like §215, and reads the
 # agent's docker run: its argv and a copy of its --env-file.
-mkdir -p "$_S224_D/hbin"
-cat > "$_S224_D/hbin/docker" <<'EOF'
-#!/usr/bin/env bash
-case "$*" in
-    "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
-    "network inspect "*Gateway*) echo 172.30.0.1 ;;
-    "network inspect "*bridge.name*) echo br-sdy-224 ;;
-esac
-if [ "${1:-}" = run ]; then
-    _prev=""; _agent=0; _env=""
-    for _a in "$@"; do
-        if [ "$_prev" = --env-file ]; then _env="$_a"; fi
-        case "$_prev" in --name) case "$_a" in sandy-*) _agent=1 ;; esac ;; esac
-        _prev="$_a"
-    done
-    if [ "$_agent" = 1 ]; then
-        printf '%s\n' "$@" > "$H224_LOG/agent.args"
-        if [ -n "$_env" ]; then cp "$_env" "$H224_LOG/agent.envfile"; fi
-    fi
-fi
-exit 0
-EOF
-# gh: the host's accounts are H224_ACCOUNTS ("user:token,..."), the active
-# one's token is H224_ACTIVE_TOK. Anything else (gh api) fails.
-cat > "$_S224_D/hbin/gh" <<'EOF'
-#!/usr/bin/env bash
-case "$*" in
-    "auth token") printf '%s\n' "$H224_ACTIVE_TOK"; exit 0 ;;
-    "auth status")
-        IFS=',' read -ra _p <<< "$H224_ACCOUNTS"
-        for _x in "${_p[@]}"; do printf '  - Logged in to github.com account %s (keyring)\n' "${_x%%:*}"; done
-        exit 0 ;;
-    "auth token --user "*)
-        IFS=',' read -ra _p <<< "$H224_ACCOUNTS"
-        for _x in "${_p[@]}"; do [ "${_x%%:*}" = "$4" ] && { printf '%s\n' "${_x#*:}"; exit 0; }; done
-        exit 1 ;;
-esac
-exit 1
-EOF
-printf '#!/bin/sh\nexit 1\n' > "$_S224_D/hbin/curl"
-printf '#!/bin/sh\nexit 0\n' > "$_S224_D/hbin/sudo"
-printf '#!/bin/sh\nexit 44\n' > "$_S224_D/hbin/security"
-printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; exit 0; fi\nexec %s "$@"\n' "$(command -v uname)" > "$_S224_D/hbin/uname"
-chmod +x "$_S224_D/hbin/docker" "$_S224_D/hbin/gh" "$_S224_D/hbin/curl" "$_S224_D/hbin/sudo" "$_S224_D/hbin/security" "$_S224_D/hbin/uname"
-# _s224_host CASE [VAR=value ...]: one launch; CASE/ is $HOME, CASE/ws the
-# workspace (no git repo, so no origin: the pick is rule 1, 2 or 5). Every
-# SANDY_*/credential variable of the launching shell is removed first.
-_s224_host() {
-    local c="$_S224_D/$1"; shift
-    rm -rf "$c"; mkdir -p "$c/ws" "$c/sh"
-    (
-        for _v in $(compgen -e); do
-            case "$_v" in
-                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*|GIT_TOKEN|GH_ACCOUNTS) unset "$_v" ;;
-            esac
-        done
-        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
-        cd "$c/ws" && env PATH="$_S224_D/hbin:$PATH" HOME="$c" SANDY_HOME="$c/sh" H224_LOG="$c" \
-            SANDY_EGRESS=off SANDY_OFFLINE=1 "$@" bash "$SANDY_SCRIPT" -p fixture </dev/null >"$c/out" 2>&1
-    ) || echo "rc=$?" >> "$_S224_D/$1/out"
-}
-_s224_host hchosen H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224b SANDY_GH_ACCOUNT=alice
-_s224_host hnopick H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224z
-_s224_host hrule5 H224_ACCOUNTS=alice:h224a,bob:h224b H224_ACTIVE_TOK=h224b
+# (_s224_host, started with the logins above.)
+_s224_bg_join
 check "§224(16) the host forwards the CHOSEN account's token as GIT_TOKEN (chosen alice, host-active bob), with SANDY_GH_ACTIVE=alice, every account still in GH_ACCOUNTS, and the gh info line as before" \
     bash -c 'e="$1/hchosen/agent.envfile"; [ "$(grep -c "^GIT_TOKEN=" "$e")" = 1 ] && grep -qx "GIT_TOKEN=h224a" "$e" && grep -qx "GH_ACCOUNTS=alice:h224a,bob:h224b" "$e" && grep -qx "SANDY_GH_ACTIVE=alice" "$1/hchosen/agent.args" && grep -q "Git auth: GitHub token via gh CLI" "$1/hchosen/out" && ! grep -q "h224[ab]" "$1/hchosen/agent.args"' _ "$_S224_D"
 check "§224(17) with nothing picked (the host-active token is no forwarded account's) GIT_TOKEN is the host-active token, and nothing is switched" \
     bash -c 'e="$1/hnopick/agent.envfile"; grep -qx "GIT_TOKEN=h224z" "$e" && [ "$(grep -c "^GIT_TOKEN=" "$e")" = 1 ] && ! grep -q "^SANDY_GH_ACTIVE=" "$1/hnopick/agent.args"' _ "$_S224_D"
 check "§224(18) rule 5 still sees the host-ACTIVE token: with no other rule it picks bob, and GIT_TOKEN is bob's" \
     bash -c 'grep -qx "SANDY_GH_ACTIVE=bob" "$1/hrule5/agent.args" && grep -qx "GIT_TOKEN=h224b" "$1/hrule5/agent.envfile"' _ "$_S224_D"
-unset -f _s224_host
+_bg_reap
+unset -f _s224_host _s224_natslow _s224_bg_start _s224_bg_join
 rm -rf "$_S224_D"
 unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
@@ -31517,27 +31668,43 @@ section "§242: --print-state reads each sandbox with two spawns, and its output
 _S242_FX="$(cd "$(dirname "$0")" && pwd)/fixtures/print-state"
 _S242_UTF8="$(locale -a 2>/dev/null | grep -m1 -i -E '^(c|en_us)\.utf-?8$' || true)"
 [ -n "$_S242_UTF8" ] || skip "§242: no C.UTF-8 or en_US.UTF-8 locale on this host; the UTF-8 runs below use C only"
-for _S242_G in escape ascii file ws approval split marker; do
-    for _S242_L in C $_S242_UTF8; do
-        check "§242(1) $_S242_G readers equal the forking forms they replaced, LC_ALL=$_S242_L (mutations: one escape dropped; the cat fallback dropped; the greedy key match made first-occurrence; awk's missing-field rule)" \
-            env LC_ALL="$_S242_L" bash "$_S242_FX/unit-checks.sh" "$_SBX_SCRIPT" "$_S242_G"
-    done
-done
-
 _S242_D="$(mktemp -d)"; _S242_D="$(cd "$_S242_D" && pwd -P)"
 # A pid known to be dead (a reaped child), and this suite's own, alive.
 sleep 0 & _S242_DEAD=$!; wait "$_S242_DEAD" 2>/dev/null || true
 mkdir -p "$_S242_D/g"
 bash "$_S242_FX/make-home.sh" "$_S242_D/g" "$$" "$_S242_DEAD"
+_s242_said() {   # $1 = KEY of a background _s242_state: say when it failed (its check then fails on the output)
+    [ "$_BG_RC" = 0 ] || printf '    \033[0;33m^ %s exited %s: %s\033[0m\n' "$1" "$_BG_RC" "$(tail -c 400 "$_BG_DIR/$1.out" 2>/dev/null | tr '\n' ' ')"
+}
 _s242_state() { # ROOT MODE LOCALE OUT: run --print-state over ROOT/home, isolated (MODE sizes = full --sizes)
     local _r="$1" _a="$2"; [ "$2" = sizes ] && _a="full --sizes"
     env -i HOME="$_r" PATH="$_r/bin:$PATH" TMPDIR="${TMPDIR:-/tmp}" SANDY_HOME="$_r/home" \
         SANDY_HOST_ID=fixture-host LC_ALL="$3" bash "$_SBX_SCRIPT" --print-state $_a > "$4.raw" 2> "$4.err" || echo "rc=$?" >> "$4.err"
     python3 "$_S242_FX/normalize.py" "$4.raw" "$_r" "$$" "$_S242_DEAD" > "$4"
 }
+# The (1) unit checks and the (2) --print-state runs are independent (each
+# unit check makes its own temporary files; --print-state writes nothing in
+# the sandboxes it reads), so they all start here, and each check joins its
+# own. (3) counts processes and (4) is timed, so both still run alone.
+for _S242_G in escape ascii file ws approval split marker; do
+    for _S242_L in C $_S242_UTF8; do
+        _bg_run "s242-u-$_S242_G-$_S242_L" env LC_ALL="$_S242_L" bash "$_S242_FX/unit-checks.sh" "$_SBX_SCRIPT" "$_S242_G"
+    done
+done
 for _S242_M in light full sizes; do
     for _S242_L in C $_S242_UTF8; do
-        _s242_state "$_S242_D/g" "$_S242_M" "$_S242_L" "$_S242_D/$_S242_M.$_S242_L"
+        _bg_run "s242-s-$_S242_M-$_S242_L" _s242_state "$_S242_D/g" "$_S242_M" "$_S242_L" "$_S242_D/$_S242_M.$_S242_L"
+    done
+done
+for _S242_G in escape ascii file ws approval split marker; do
+    for _S242_L in C $_S242_UTF8; do
+        check "§242(1) $_S242_G readers equal the forking forms they replaced, LC_ALL=$_S242_L (mutations: one escape dropped; the cat fallback dropped; the greedy key match made first-occurrence; awk's missing-field rule)" \
+            _bg_result "s242-u-$_S242_G-$_S242_L"
+    done
+done
+for _S242_M in light full sizes; do
+    for _S242_L in C $_S242_UTF8; do
+        _bg_join "s242-s-$_S242_M-$_S242_L"; _s242_said "s242-s-$_S242_M-$_S242_L"
         check "§242(2) $_S242_M mode over the every-branch fixture is byte for byte the pre-B7 document, LC_ALL=$_S242_L, stderr empty (mutations: two marker tags swapped; one marker field not read; the stat line parsed from the wrong field)" \
             bash -c 'cmp "$1" "$2" && [ ! -s "$3" ] && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$1" || { cat "$3"; tr "," "\n" < "$1" > "$1.got"; tr "," "\n" < "$2" > "$1.want"; diff "$1.want" "$1.got" | head -40; exit 1; }' \
             _ "$_S242_D/$_S242_M.$_S242_L" "$_S242_FX/expected-$_S242_M.json" "$_S242_D/$_S242_M.$_S242_L.err"
@@ -31616,7 +31783,12 @@ _S242_WV="$(sed -n 's/^  "sandy_version": "\([^"]*\)",$/\1/p' "$_S242_N" 2>/dev/
 [ "$_S242_WS" = present ] || _S242_WS=unreadable
 for _S242_M in light full; do
     for _S242_L in C $_S242_UTF8; do
-        _s242_state "$_S242_D/nul" "$_S242_M" "$_S242_L" "$_S242_D/nul.$_S242_M.$_S242_L"
+        _bg_run "s242-n-$_S242_M-$_S242_L" _s242_state "$_S242_D/nul" "$_S242_M" "$_S242_L" "$_S242_D/nul.$_S242_M.$_S242_L"
+    done
+done
+for _S242_M in light full; do
+    for _S242_L in C $_S242_UTF8; do
+        _bg_join "s242-n-$_S242_M-$_S242_L"; _s242_said "s242-n-$_S242_M-$_S242_L"
         check "§242(5) $_S242_M mode, LC_ALL=$_S242_L: a marker with an invalid lead byte before a NUL reads as the old readers read it (state $_S242_WS, sandy_version \"$_S242_WV\"; mutation: the slurp in the caller locale)" \
             bash -c '[ ! -s "$1.err" ] && python3 -c "
 import json, sys
@@ -31626,7 +31798,8 @@ assert m[\"state\"] == sys.argv[2] and m[\"sandy_version\"] == want_v, m
 " "$1" "$2" "$3" || { cat "$1.err"; exit 1; }' _ "$_S242_D/nul.$_S242_M.$_S242_L" "$_S242_WS" "$_S242_WV"
     done
 done
-unset -f _s242_state _s242_spawns
+_bg_reap
+unset -f _s242_state _s242_spawns _s242_said
 rm -rf "$_S242_D"
 unset _S242_FX _S242_UTF8 _S242_G _S242_L _S242_D _S242_DEAD _S242_M _S242_C _S242_P _S242_C1 _S242_C5 _S242_PER _S242_B _S242_T0 _S242_EL _S242_N _S242_WS _S242_WV
 
