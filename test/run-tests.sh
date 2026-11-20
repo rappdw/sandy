@@ -30504,7 +30504,7 @@ unset -f _s247_run
 rm -rf "$_S247_D"
 unset _S247_INTEG _S247_D _S247_N
 
-section "§249: --update-sessions skips a session whose workspace approval is pending, instead of rebuilding and restarting it on the host's choice (2.9.0)"
+section "§249: --update-sessions skips a session whose workspace approval is pending, instead of rebuilding and restarting it on the host's choice (2.9.1)"
 # ============================================================
 # Every --update-sessions child runs with no terminal, so an unanswered gate
 # fails closed: a workspace SANDY_AGENT=codex (wider than the host default,

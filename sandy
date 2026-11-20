@@ -13842,7 +13842,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         fi
     fi
 
-    # Update restart (2.9.0): --update-sessions runs this --start with both
+    # Update restart (2.9.1): --update-sessions runs this --start with both
     # streams on a non-terminal capture file (or /dev/null if the capture
     # cannot be allocated), so the pre-pass above did not run, and the
     # supervisor would fail closed -- drop a pending key and come up on the host's
@@ -14434,7 +14434,7 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             _upd_build_failed[$_upd_i]=1
             continue
         fi
-        # Approval guard (2.9.0): every child here runs with no terminal (the
+        # Approval guard (2.9.1): every child here runs with no terminal (the
         # build below with </dev/null; the restart's --start with both streams
         # on a non-terminal capture file, or /dev/null if the capture cannot be
         # allocated, which skips its tty pre-pass), so a gate that is still
@@ -14651,7 +14651,7 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         _upd_start_log="$(mktemp 2>/dev/null)" || _upd_start_log=""
         if [ "$_upd_ok" = "true" ] \
            && ! SANDY_UPDATE_RESTART=1 "$_sandy_self" --start --workspace "$_upd_ws" >"${_upd_start_log:-/dev/null}" 2>&1; then
-            # Both refusals of an update restart (2.9.0): the client's check
+            # Both refusals of an update restart (2.9.1): the client's check
             # before forking, and the supervisor's gate when the approval
             # changed after that check. Either way the session is stopped.
             if [ -n "$_upd_start_log" ] && grep -qE 'An approval is pending for|will not drop these keys' "$_upd_start_log" 2>/dev/null; then
@@ -15195,7 +15195,7 @@ _resolve_passive_privileged_approval() {
 
     # Headless / non-interactive: fail closed.
     if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
-        # An --update-sessions restart (2.9.0) must not come up without keys
+        # An --update-sessions restart (2.9.1) must not come up without keys
         # the session ran with: its client and the orchestrator checked just
         # before, so a set that is pending HERE changed after those checks.
         # Refuse the launch (fatal marker: the client exits 6 at once and
