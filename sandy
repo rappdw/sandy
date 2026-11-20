@@ -13842,9 +13842,10 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         fi
     fi
 
-    # Update restart (2.9.0): --update-sessions runs this --start with stderr
-    # on /dev/null, so the pre-pass above did not run, and the supervisor
-    # would fail closed -- drop a pending key and come up on the host's
+    # Update restart (2.9.0): --update-sessions runs this --start with both
+    # streams on a non-terminal capture file (or /dev/null if the capture
+    # cannot be allocated), so the pre-pass above did not run, and the
+    # supervisor would fail closed -- drop a pending key and come up on the host's
     # choice, which is a degraded restart nobody sees. The orchestrator checks
     # just before its --stop, but a gated input can still change after that
     # check. So under SANDY_UPDATE_RESTART=1 an unresolved approval REFUSES
@@ -14434,8 +14435,9 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             continue
         fi
         # Approval guard (2.9.0): every child here runs with no terminal (the
-        # build below with </dev/null; the restart's --start with stderr on
-        # /dev/null, which skips its tty pre-pass), so a gate that is still
+        # build below with </dev/null; the restart's --start with both streams
+        # on a non-terminal capture file, or /dev/null if the capture cannot be
+        # allocated, which skips its tty pre-pass), so a gate that is still
         # unanswered fails closed: a workspace SANDY_AGENT wider than the host's
         # is dropped, and the session would be rebuilt and restarted on the
         # HOST's agents, auth mode or base image, with the warning lost in a
