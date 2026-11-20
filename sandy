@@ -943,6 +943,7 @@ _sandy_protected_files() {
 .pre-commit-config.yaml
 .claude/settings.json
 .claude/settings.local.json
+.gemini/settings.json
 EOF
 }
 # Top-level .git files that can trigger host-side code execution if tampered.
@@ -2051,11 +2052,14 @@ EOF
 }
 
 # Detection-only directories. The agent CLI on the HOST reads these from the
-# workspace (slash commands, subagents, plugins), so an agent-created file here
-# is live for the user's next host session. Sandy overlays a sandbox-only copy
-# on each one ONLY when the workspace (or the sandbox) already has it (the
-# copy-overlay block before `docker run`); otherwise nothing is mounted and a
-# creation lands in the workspace. They are deliberately NOT in
+# workspace (slash commands, subagents, plugins, skills, extensions), so an
+# agent-created file here is live for the user's next host session. Sandy
+# overlays a sandbox-only copy on each one ONLY when the workspace (or the
+# sandbox) already has it (the copy-overlay block before `docker run`);
+# otherwise nothing is mounted and a creation lands in the workspace.
+# .claude/skills (#557) has no overlay at all: it is always the plain rw
+# workspace path, so an existing one is fingerprinted at launch and a change
+# reported, and a session can still author a skill the operator then reviews. They are deliberately NOT in
 # _sandy_protected_dirs: that list gets a :ro mount when the dir exists, which
 # would make an existing .claude/commands read-only and break its writable
 # overlay. Mounting is unchanged; the launch snapshot and the session-end
@@ -2065,16 +2069,20 @@ _sandy_overlay_detect_dirs() {
 .claude/commands
 .claude/agents
 .claude/plugins
+.claude/skills
+.gemini/extensions
 .gemini/commands
 EOF
 }
 # The agent whose overlay covers a _sandy_overlay_detect_dirs entry: the
-# .claude/* copies are mounted only when claude runs, .gemini/commands only
+# .claude/* copies are mounted only when claude runs, the .gemini/* ones only
 # when gemini does. In any other session an existing entry is the plain rw
 # workspace path, so the snapshot fingerprints it instead of trusting an
-# overlay that was never mounted.
+# overlay that was never mounted. .claude/skills has no overlay in any
+# session, so it names no agent (and _sandy_agent_has "" is false).
 _sandy_overlay_detect_agent() {
     case "$1" in
+        .claude/skills) ;;
         .claude/*) echo claude ;;
         .gemini/*) echo gemini ;;
     esac
@@ -2528,6 +2536,7 @@ _sandy_uchg_files() {
     cat <<'EOF'
 .claude/settings.json
 .claude/settings.local.json
+.gemini/settings.json
 .mcp.json
 .envrc
 .pre-commit-config.yaml
@@ -3112,7 +3121,7 @@ REFLECTION_API_KEY|secret|||2.9.0|experimental|Reflection AI API key for the Mir
 XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container.
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
-SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
+SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'); a single trailing comma is accepted and dropped (2.9.1), so the launch, the container and the session marker see 'claude' for 'claude,'. 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
 SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
@@ -3940,7 +3949,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
-    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME. When the destination has no workspace there, the workspace itself is copied first, whole (.git, untracked and ignored files, symlinks as links), as a new directory (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist. --exclude PATTERN (repeatable, rsync syntax, relative to the workspace root) keeps paths out of the workspace copy; across a CPU architecture change its .venv/ and node_modules/ are skipped too. Credential-bearing files, in the sandbox and in a copied workspace, are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync-from"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"The reverse of --rsync (#409): PULL a sandbox from another host into this one, over outbound ssh + rsync from here only (the source is never modified). The copy is named for THIS host workspace path and gets the same rewrites as --rsync: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json. The source workspace defaults to the same path relative to $HOME on the remote. A local workspace named with --workspace that does not exist yet is pulled too, whole, as a new directory, and moves into place with the sandbox (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist (--exclude PATTERN as for --rsync). Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. It lands in a hidden staging directory and is renamed into place only once every step succeeds, so a failed pull installs nothing. Refuses while a live session holds the source on the remote and never overwrites a sandbox already here. Takes the source host as its argument. Sub-options: --workspace PATH, --src-workspace PATH, --src-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','
@@ -16580,6 +16589,14 @@ for _a in "${_SANDY_AGENTS[@]}"; do
         *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, mirror, or comma-separated combo)" >&2; exit 1 ;;
     esac
 done
+# `read -ra` drops ONE trailing empty field, so `claude,` validated as
+# [claude] while SANDY_AGENT itself kept the comma: no single-agent image
+# matched it, and `_sandy_agent_has ""` matched its `,,`. Every consumer from
+# here on reads the validated list, rejoined. The ordered SANDY_AGENT gate and
+# the approval pending list ran earlier, in the config loader, on the raw
+# KEY=value (so an approval recorded for it is unchanged), and the gate's own
+# `read -ra` already compared it as this same set.
+SANDY_AGENT="$(IFS=,; printf '%s' "${_SANDY_AGENTS[*]}")"
 # Mirror runs alone (#463, decision 1): it is not installed in sandy-full, so a
 # 0.1.0 beta's release churn and PyPI install stay out of the image every
 # combo user shares. Refuse rather than launch a pane whose binary is absent.
@@ -16622,7 +16639,8 @@ else
     esac
 fi
 # Helper: check if a specific agent is in the resolved agent list
-_sandy_agent_has() { case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
+# An empty name is never "in" the list, however SANDY_AGENT is spelled.
+_sandy_agent_has() { [ -n "$1" ] || return 1; case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
 # #428: a login session runs exactly the agent it logs in. `sandy --login`
 # passes --agent itself; this catches the internal variable set by hand.
 if [ -n "${SANDY_LOGIN_AGENT:-}" ] && [ "$SANDY_AGENT" != "$SANDY_LOGIN_AGENT" ]; then
@@ -23336,7 +23354,9 @@ done < <(_sandy_protected_dirs)
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     [ -d "$WORK_DIR/$_pd" ] || continue
-    if _sandy_agent_has "$(_sandy_overlay_detect_agent "$_pd")"; then
+    # An entry that names no agent (.claude/skills) is never overlaid.
+    _pd_agent="$(_sandy_overlay_detect_agent "$_pd")"
+    if [ -n "$_pd_agent" ] && _sandy_agent_has "$_pd_agent"; then
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     else
         # Exists but no overlay this launch: writes go straight to the host,
