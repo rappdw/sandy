@@ -13887,18 +13887,22 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # .sandy/Dockerfile gate, bound to the context hash; always passed, empty
     # when there was no decline, so a stray value in the caller's env cannot
     # reach the supervisor.
+    # Fast-fail signal: the supervisor writes "$_sandy_daemon_log.fatal" if it
+    # hits an unanswerable approval (e.g. a first-encounter dangerous-symlink
+    # prompt it can't answer under /dev/null, or a pending key under an
+    # --update-sessions restart) so the readiness loop below stops immediately
+    # instead of burning the full timeout. It has already torn its own
+    # wreckage down via its EXIT trap by the time it writes this. A stale
+    # marker is cleared BEFORE the fork, never after: a supervisor that
+    # refuses early could otherwise write the marker before this process
+    # removed it, and the loop would miss it and time out (exit 8, not 6).
+    _sandy_fatal_marker="${_sandy_daemon_log}.fatal"
+    rm -f "$_sandy_fatal_marker" 2>/dev/null || true
+
     nohup env SANDY_DAEMON_SUPERVISOR=1 "SANDY_DAEMON_LOG=$_sandy_daemon_log" \
         "SANDY_DOCKERFILE_DECLINED_HASH=$_sandy_df_declined" \
         "$0" "${_sandy_reexec_args[@]}" </dev/null >>"$_sandy_daemon_log" 2>&1 &
     disown 2>/dev/null || true
-
-    # Fast-fail signal: the supervisor writes "$_sandy_daemon_log.fatal" if it
-    # hits an unanswerable approval (e.g. a first-encounter dangerous-symlink
-    # prompt it can't answer under /dev/null) so the readiness loop below stops
-    # immediately instead of burning the full timeout. It has already torn its
-    # own wreckage down via its EXIT trap by the time it writes this.
-    _sandy_fatal_marker="${_sandy_daemon_log}.fatal"
-    rm -f "$_sandy_fatal_marker" 2>/dev/null || true
 
     info "Starting daemon session for $WORK_DIR..."
 
@@ -14637,14 +14641,18 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         # The --start output goes to a temp file, not /dev/null, only so a
         # refusal can be named below; it is never printed. A file is still not
         # a terminal, so the client's tty pre-pass stays off, as before.
+        # With no temp file (mktemp failed) the output goes to /dev/null as it
+        # did before, and a refusal is reported without its cause: a failing
+        # mktemp here, after the --stop, must not abort the run under set -e
+        # and leave the session stopped with no summary.
         _upd_why=""
-        _upd_start_log="$(mktemp)"
+        _upd_start_log="$(mktemp 2>/dev/null)" || _upd_start_log=""
         if [ "$_upd_ok" = "true" ] \
-           && ! SANDY_UPDATE_RESTART=1 "$_sandy_self" --start --workspace "$_upd_ws" >"$_upd_start_log" 2>&1; then
+           && ! SANDY_UPDATE_RESTART=1 "$_sandy_self" --start --workspace "$_upd_ws" >"${_upd_start_log:-/dev/null}" 2>&1; then
             # Both refusals of an update restart (2.9.0): the client's check
             # before forking, and the supervisor's gate when the approval
             # changed after that check. Either way the session is stopped.
-            if grep -qE 'An approval is pending for|will not drop these keys' "$_upd_start_log" 2>/dev/null; then
+            if [ -n "$_upd_start_log" ] && grep -qE 'An approval is pending for|will not drop these keys' "$_upd_start_log" 2>/dev/null; then
                 _upd_why="approval pending"
                 error "  --start failed for $_upd_sess: approval pending (it changed after the update checked it), so the session is stopped, not restarted without it. Approve once from a terminal: run sandy (or sandy --start) in $_upd_ws."
             else
@@ -14652,7 +14660,7 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             fi
             _upd_ok=false
         fi
-        rm -f "$_upd_start_log" 2>/dev/null || true
+        [ -z "$_upd_start_log" ] || rm -f "$_upd_start_log" 2>/dev/null || true
         _upd_t1="$(date +%s)"
         _upd_elapsed=$((_upd_t1 - _upd_t0))
         if [ "$_upd_ok" = "true" ]; then

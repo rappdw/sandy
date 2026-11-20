@@ -30804,6 +30804,66 @@ check "§248(8) a gated key that appears only when the restarted supervisor read
 rm -rf "$_S248_G"
 unset _S248_G _S248_MUT8 _S248_MUT8OK _S248_GRC _S248_GDROP _S248_GREF _S248_GRC1 _S248_GDROP1 _S248_GREF1 _S248_GOUT1 _S248_GHOOK1 _S248_GDROP2
 unset -f _s248_g
+# (9) The --start client clears a stale fatal marker BEFORE it forks the
+# supervisor, so a supervisor that refuses at once (as (7)/(8) make it) is
+# reported as refused (exit 6), never missed. Deterministic: the stub nohup
+# writes the marker as soon as it is forked, without running a supervisor,
+# and the stub rm, when it is asked to remove that marker, first waits (up to
+# 3s) for it to exist. In the fixed order the rm runs before any fork, finds
+# no marker, and the readiness loop sees the one the fork writes: exit 6. The
+# mutant (clear after the fork, the r4.2 order) removes the fresh marker, and
+# the loop runs out (sleep stubbed): exit 8.
+_S248_H="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S248_H/bin" "$_S248_H/sh" "$_S248_H/ws"
+_S248_RM="$(command -v rm)"
+cat > "$_S248_H/bin/docker" <<'DOCK'
+#!/usr/bin/env bash
+case "$1" in ps|inspect) exit 0 ;; run) exit 1 ;; esac
+exit 0
+DOCK
+cat > "$_S248_H/bin/nohup" <<'NOH'
+#!/usr/bin/env bash
+for _a in "$@"; do case "$_a" in SANDY_DAEMON_LOG=*) : > "${_a#SANDY_DAEMON_LOG=}.fatal" ;; esac; done
+exit 0
+NOH
+{
+    printf '#!/usr/bin/env bash\n'
+    printf 'for _a in "$@"; do case "$_a" in *.fatal) _n=0; while [ ! -e "$_a" ] && [ "$_n" -lt 60 ]; do %q 0.05; _n=$((_n + 1)); done ;; esac; done\n' "$(command -v sleep)"
+    printf 'exec %q "$@"\n' "$_S248_RM"
+} > "$_S248_H/bin/rm"
+printf '#!/bin/sh\nexit 1\n' > "$_S248_H/bin/curl"
+chmod +x "$_S248_H/bin/docker" "$_S248_H/bin/nohup" "$_S248_H/bin/rm" "$_S248_H/bin/curl"
+_sleep_stub "$_S248_H/bin" "$_S248_H/sleep.log"
+_S248_MUT9="$_S248_H/sandy.mut9"
+awk 'BEGIN{held=0}
+     !held && $0=="    rm -f \"$_sandy_fatal_marker\" 2>/dev/null || true" {held=1; line=$0; next}
+     {print}
+     held==1 && $0=="    disown 2>/dev/null || true" {print line; held=2}' "$SANDY_SCRIPT" > "$_S248_MUT9"
+chmod +x "$_S248_MUT9"
+_S248_MUT9OK=0; ! cmp -s "$SANDY_SCRIPT" "$_S248_MUT9" && _S248_MUT9OK=1
+# _s248_h SANDY: one --start with no terminal; sets _S248_HRC.
+_s248_h() {
+    _S248_HRC=0
+    "$_S248_RM" -rf "$_S248_H/sh"; mkdir -p "$_S248_H/sh"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        cd "$_S248_H/ws" && env PATH="$_S248_H/bin:$PATH" HOME="$_S248_H" SANDY_HOME="$_S248_H/sh" \
+            SANDY_EGRESS=off SANDY_OFFLINE=1 bash "$1" --start --workspace "$_S248_H/ws" </dev/null >"$_S248_H/out" 2>&1
+    ) || _S248_HRC=$?
+}
+_s248_h "$SANDY_SCRIPT"
+_S248_HRC1="$_S248_HRC"; _S248_HOUT1="$(grep -c 'Daemon startup was refused before it could' "$_S248_H/out" || true)"
+_s248_h "$_S248_MUT9"
+_S248_HRC2="$_S248_HRC"
+check "§248(9) a supervisor that refuses at once is reported as refused (exit 6), because the stale fatal marker is cleared before the fork; the mutant that clears it after the fork misses the fresh marker and times out (rc=$_S248_HRC1 refused-line=$_S248_HOUT1; mutant applied: $_S248_MUT9OK rc=$_S248_HRC2)" \
+    bash -c 'test "$1" = 6 && test "$2" -ge 1 && test "$3" = 1 && test "$4" = 8' _ "$_S248_HRC1" "$_S248_HOUT1" "$_S248_MUT9OK" "$_S248_HRC2"
+"$_S248_RM" -rf "$_S248_H"
+unset _S248_H _S248_RM _S248_MUT9 _S248_MUT9OK _S248_HRC _S248_HRC1 _S248_HOUT1 _S248_HRC2
+unset -f _s248_h
 rm -rf "$_S248_D"
 unset _S248_D _S248_RC _S248_RC1 _S248_RC2 _S248_RC3 _S248_N2 _S248_OUT1 _S248_W1 _S248_A1 _S248_P1 _S248_WARN _S248_MUT _S248_MUTOK _S248_WM
 unset -f _s248_run _s248_plan _s248_h

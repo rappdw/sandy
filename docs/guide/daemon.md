@@ -121,6 +121,8 @@ For each session it runs that workspace's own `sandy --build-only` (so image sel
 
 **A session waiting for an approval is skipped, not restarted (2.9.0).** `--update-sessions` cannot answer an approval prompt, so a workspace whose `.sandy/config` needs one (for example a `SANDY_AGENT` that adds an agent your host config does not choose) would otherwise be rebuilt and restarted without that key, on your host's choice. Instead the session is left running as it is, with a warning naming the gate and the keys (names only) and the plan line `skip (approval pending)`, and the run exits `1` so a cron job notices. Approve it once from a terminal (run `sandy` or `sandy --start` in that workspace; `sandy --approvals --workspace <path>` shows what is pending), and the next `--update-sessions` handles it normally.
 
+The check is repeated just before each restart, and the restarted session checks again when it reads the workspace config. If a key that needs approval appears after the session was already stopped for its restart, the restart is refused rather than started without it: the session **stays stopped**, the output says `--start failed for <session>: approval pending`, the summary lists it under `Failed` as `<session> (approval pending)`, and the run exits `1`. Approve it from a terminal and start it (`sandy --start` in that workspace). A `.sandy/Dockerfile` that changes in that window is not covered: the session restarts without its project image until the Dockerfile is approved.
+
 A cron/launchd recipe for a nightly quiet-hours refresh:
 
 ```cron

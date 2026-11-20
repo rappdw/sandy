@@ -91,3 +91,24 @@ again automatically once the 30 minutes are up, or sooner once the base image
 is rebuilt (for example after a sandy upgrade that changes it).
 A successful rebuild clears the hold. To retry at once (say, after
 fixing the network), run `sandy --rebuild`.
+
+## `--update-sessions`: "approval pending"
+
+**Symptom.** `sandy --update-sessions` exits `1`, and its output either shows a
+session as `skip (approval pending)` with a warning naming one or more keys,
+or says `--start failed for <session>: approval pending` and lists the
+session under `Failed` as `<session> (approval pending)`.
+
+**Cause.** That workspace's `.sandy/config` or `.sandy/.secrets` sets a key
+that needs a one-time approval from a terminal, for example a `SANDY_AGENT`
+that adds an agent your host config does not choose (2.9.0), and it has not
+been approved, or its approved set changed. `--update-sessions` cannot answer
+the prompt, and restarting without the key would quietly change the session,
+so it does not. A `skip` leaves the session running as it was. A `--start
+failed` means the key appeared after that session had already been stopped
+for its restart, so it is **stopped** now.
+
+**Fix.** Run `sandy` (or `sandy --start`) once from a terminal in that
+workspace and answer the prompt. `sandy --approvals --workspace <path>` shows
+what is pending without changing anything. A stopped session comes back with
+that `sandy --start`; the next `--update-sessions` then handles it normally.
