@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="2.9.2-dev"
+SANDY_VERSION="2.10.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -2904,9 +2904,11 @@ _sandy_supervisor_alive() {
 # reboot-time unlock, or never set). The next --attach and --start of that
 # workspace therefore warn, re-apply the macOS locks (the record is merged, so
 # locks still set stay sandy's) and, only when no launch snapshot exists, take
-# the content snapshot from the container's own :ro mounts. --stop warns and
-# prints the content report against whatever snapshot exists, then tears down
-# as before (which clears the locks and the seeded commondir files).
+# the content snapshot from the container's own :ro mounts. --stop warns, tears
+# down as before (which clears the locks and the seeded commondir files), and
+# once the container is gone runs the session-end report against whatever
+# snapshot exists and records it (_sandy_unsupervised_stop_report; the --stop
+# dispatcher prints the record at its end, #554).
 # $1 = container  $2 = attach|start|stop. Returns 0 always.
 _sandy_unsupervised_daemon_protect() {
     local _dpid _sess _sb _snap _src _dst
@@ -2921,10 +2923,10 @@ _sandy_unsupervised_daemon_protect() {
     warn "This daemon session (container ${1:0:12}) has no live supervisor: Docker restarted it after the supervisor ended (a reboot or a Docker restart)."
     warn "  Since then it has run without sandy's session-end checks, and on macOS possibly without its file locks."
     if [ "$2" = stop ]; then
-        if [ -f "$_snap" ]; then
-            _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$_snap")" "$_sb/.protected-copies"
-            rm -f "$_snap"
-        fi
+        # The report runs once the container is stopped and removed, so a
+        # write made after the check cannot slip past it: the --stop
+        # dispatcher calls _sandy_unsupervised_stop_report with this sandbox.
+        _SANDY_UNSUP_STOP_SB="$_sb"
         return 0
     fi
     warn "  For a fully protected session: sandy --stop, then sandy --start."
@@ -2948,6 +2950,395 @@ _sandy_unsupervised_daemon_protect() {
         _sandy_protected_hash_snapshot "$_snap" "$_sb/.protected-copies"
         info "Recorded the protected files' contents now; 'sandy --stop' reports any change from here."
     fi
+    return 0
+}
+
+# The .sandy/ build-context hash. It and the #295 record below are defined
+# here, ahead of the dispatchers, because --stop's direct teardown of a
+# supervisor-less daemon runs the session-end report, which uses both.
+_sandy_context_hash() {
+    local dir="$1" f h out=""
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$f" = "$dir/config" ] && continue
+        [ "$f" = "$dir/.secrets" ] && continue
+        # Named Claude session files are launch configuration, not build
+        # context: editing one must not re-prompt the Dockerfile approval or
+        # rebuild the project image (decisions/2026-10-12-named-claude-sessions.md).
+        case "$f" in "$dir"/sessions/*) continue ;; esac
+        if [ "${2:-}" = "--list" ]; then
+            printf '%s\n' "${f#"$dir"/}"
+            continue
+        fi
+        h="$(sha256 < "$f" | awk '{print $1}')"
+        out="$out$h  ${f#"$dir"/}
+"
+    done < <(find "$dir" -type f 2>/dev/null | LC_ALL=C sort)
+    [ "${2:-}" = "--list" ] && return 0
+    printf '%s' "$out" | sha256 | awk '{print $1}'
+}
+
+# --- A .sandy/ that a SESSION created (#295 item 3) --------------------------
+# .sandy/ is protected against modification, not creation: like every protected
+# directory it is mounted :ro only when it EXISTED at launch, so a session that
+# started without one can write .sandy/Dockerfile through the rw workspace bind.
+# For every other protected path the session-end warning precedes the harm; for
+# this one sandy is the actor, offering to run its RUN lines on the host daemon
+# at the NEXT launch. Always-mounting .sandy/ :ro was declined (maintainer
+# decision, option C): it would bring back the workspace stubs the existence
+# gate was introduced to remove. Instead the creation is RECORDED, and the next
+# Dockerfile approval prompt says so -- the strongest provenance sandy can give.
+#
+# The record lives in $SANDY_HOME/approvals/, beside the approval it qualifies,
+# because that is the one place neither a repository (not under the workspace)
+# nor the session (not under any directory mounted into the container) can
+# write -- a record the agent could forge or delete would be worthless. Keyed
+# on the same 16-char workspace hash as the approval file, so --remove-sandbox
+# reaps both together.
+_sandy_df_session_record() {   # $1 = workspace (canonical)
+    printf '%s/approvals/dockerfile-%s.session-created' "$SANDY_HOME" \
+        "$(printf '%s' "$1" | sha256 | awk '{print $1}' | cut -c1-16)"
+}
+
+# Write that record when $WORK_DIR/.sandy exists now (with content) and the
+# launch snapshot $1 ($SANDBOX_DIR/.protected-existed-at-launch) says it did
+# not exist at launch. $2 says who noticed: "session-end" (cleanup, including
+# the daemon supervisor's own cleanup on --stop) or "next-launch" (a snapshot
+# left behind by a session whose cleanup never ran -- SIGKILL, a reboot under
+# --restart unless-stopped, a --stop that found the supervisor dead; picked up
+# by the approval gate below before the launch clears stale snapshots). The
+# first line is the context hash as it stood at that moment, so the prompt can
+# say whether the content is still what the session left. Returns 0 only when
+# it wrote a record.
+_sandy_note_session_created_sandy_dir() {
+    local snap="$1" by="${2:-session-end}" rec
+    [ -n "${WORK_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] && [ -f "$snap" ] || return 1
+    grep -qFx ".sandy" "$snap" 2>/dev/null && return 1
+    [ -d "$WORK_DIR/.sandy" ] && [ -n "$(ls -A "$WORK_DIR/.sandy" 2>/dev/null)" ] || return 1
+    rec="$(_sandy_df_session_record "$WORK_DIR")"
+    mkdir -p "$SANDY_HOME/approvals" 2>/dev/null || return 1
+    {
+        printf '%s\n' "$(_sandy_context_hash "$WORK_DIR/.sandy")"
+        printf '# workspace: %s\n' "$WORK_DIR"
+        printf '# recorded:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
+        printf '# by:        %s\n' "$by"
+    } > "$rec" 2>/dev/null || return 1
+    chmod 600 "$rec" 2>/dev/null || true
+    return 0
+}
+
+# --- The session-end protected-path report, and its record (#554) -----------
+# _sandy_session_end_protected_report compares the workspace now with the
+# launch snapshot $1/.protected-existed-at-launch and prints, on stderr, every
+# report about protected paths: paths that appeared, changed or were REPLACED,
+# a session-created .sandy/, protected FILES whose contents changed, and git
+# worktree/submodule admin dirs and links created in-session. Then it removes
+# the snapshot. It used to be inline in cleanup(); it is a function so that
+# --stop's direct teardown of a supervisor-less daemon runs exactly the same
+# checks (it used to run only the content check).
+# $1 = sandbox dir  $2 = workspace. Returns 0 always.
+_sandy_session_end_protected_report() {
+    local SANDBOX_DIR="$1" WORK_DIR="$2"
+    local _new_protected _changed_protected _replaced_protected _pd _pf _fp0 _cfg_hooks
+    local _sandy_df_flagged _rm_args _rm_links _seen_links _e _p _lnk _tgt _lhex0 _lhex
+    # Detect protected-path appearances: with the hybrid mount model, an
+    # absent protected dir gets no in-session protection — an agent can
+    # `mkdir .vscode/` and write into it, and the writes land on the host
+    # workspace. We took a snapshot of which protected dirs existed at
+    # launch in $SANDBOX_DIR/.protected-existed-at-launch; now we compare
+    # against the current state. Anything that newly appeared (with
+    # content) is reported to the user with one-line remediation.
+    #
+    # No automatic cleanup here — we don't know if the agent's write was
+    # legitimate ("set up .vscode/settings.json for this project") or a
+    # prompt injection. Surface the change, let the user decide.
+    if [ -n "${SANDBOX_DIR:-}" ] \
+            && [ -f "$SANDBOX_DIR/.protected-existed-at-launch" ] \
+            && [ -n "${WORK_DIR:-}" ]; then
+        _new_protected=()
+        _changed_protected=()
+        _replaced_protected=()
+        while IFS= read -r _pd; do
+            [ -z "$_pd" ] && continue
+            # Only flag dirs that DIDN'T exist at launch but DO now (with content).
+            # One that existed at launch is reported only if the session REPLACED
+            # it (a separate list: it was the user's, so no removal is offered).
+            if grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+                if _sandy_replaced_since_launch "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                    _replaced_protected+=("$_pd")
+                fi
+                continue
+            fi
+            # ...or that existed with no overlay (a #content fingerprint) and changed.
+            _fp0="$(awk -F '\t' -v p="$_pd" '$1 == "#content" && $2 == p { print $3; exit }' \
+                "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
+            if [ -n "$_fp0" ]; then
+                if [ -d "$WORK_DIR/$_pd" ] && { [ "$_fp0" = unhashable ] \
+                        || [ "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" != "$_fp0" ]; }; then
+                    _changed_protected+=("$_pd")
+                fi
+                continue
+            fi
+            if [ -d "$WORK_DIR/$_pd" ] && [ -n "$(ls -A "$WORK_DIR/$_pd" 2>/dev/null)" ]; then
+                if _sandy_dir_is_inert_git "$_pd"; then
+                    [ "${SANDY_VERBOSE:-0}" = "1" ] && \
+                        info "  (protected path appeared but looks inert git scaffolding: $_pd)"
+                    continue
+                fi
+                _new_protected+=("$_pd")
+            fi
+        done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs)
+        # Same for protected FILES absent at launch (e.g. .npmrc, .envrc,
+        # .pre-commit-config.yaml) — existence-gated, so a newly-created one
+        # persists to the host workspace and otherwise goes unreported.
+        while IFS= read -r _pf; do
+            [ -z "$_pf" ] && continue
+            if grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+                if _sandy_replaced_since_launch "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                    _replaced_protected+=("$_pf")
+                fi
+                continue
+            fi
+            if [ -f "$WORK_DIR/$_pf" ]; then
+                _new_protected+=("$_pf")
+            fi
+        done < <(_sandy_protected_files; _sandy_watched_git_files)
+        # Issue F: a core.hooksPath target the agent CREATED during the session.
+        # An existing one was :ro-mounted at launch (and recorded in the snapshot,
+        # so it's skipped here); an absent-at-launch one escapes the mount, so
+        # flag it if it now exists with content. git hooks fire on the user's next
+        # host git operation, so this belongs in the same warning.
+        _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
+        if [ -n "$_cfg_hooks" ] && grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            if _sandy_replaced_since_launch "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+                _replaced_protected+=("$_cfg_hooks")
+            fi
+        elif [ -n "$_cfg_hooks" ] \
+                && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
+            _new_protected+=("$_cfg_hooks")
+        fi
+        # #295 item 3: a .sandy/ this session created is the one appearance
+        # sandy itself acts on -- the next launch offers to build its
+        # Dockerfile on the host daemon. Record it where neither the workspace
+        # nor the container can reach, so that approval prompt can say who
+        # wrote it. Runs in the daemon supervisor's cleanup too (--stop).
+        _sandy_df_flagged=false
+        if _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" session-end; then
+            _sandy_df_flagged=true
+        fi
+        if [ ${#_new_protected[@]} -gt 0 ] || [ ${#_changed_protected[@]} -gt 0 ]; then
+            printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
+            # A reported path may be, or sit under, a link (the session can plant
+            # `.claude/commands -> ../..`). Every test above follows it, and so
+            # would `rm -rf X/`: it deletes the target's contents. So a link is
+            # shown with its target and removed with a plain `rm` (the link
+            # only); one that existed at launch (#link) gets no command at all.
+            _rm_args=""; _rm_links=""; _seen_links=" "
+            for _e in ${_new_protected[@]+"${_new_protected[@]}"} \
+                      ${_changed_protected[@]+"${_changed_protected[@]/#/changed:}"}; do
+                _p="${_e#changed:}"
+                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
+                    # Target at launch, hex-encoded (#link<TAB>link<TAB>hex); "x" alone = recorded
+                    # with an unreadable target, nothing = not there at launch.
+                    _lhex0="$(awk -F '\t' -v p="$_lnk" '$1 == "#link" && $2 == p { print "x" $3; exit }' \
+                        "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
+                    _lhex="x$(_sandy_link_hex "$WORK_DIR/$_lnk")"
+                    if [ -n "$_lhex0" ] && [ "$_lhex0" = "$_lhex" ]; then
+                        printf "${YELLOW}[sandy]${NC}   %s/%q (through %q -> %q, a link that existed at launch: review it there)\n" \
+                            "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
+                    else
+                        case "$_seen_links" in
+                            *" $_lnk "*) ;;
+                            *)  _seen_links="$_seen_links$_lnk "
+                                if [ -n "$_lhex0" ]; then
+                                    # The user's link, re-pointed: review it, no removal offered.
+                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a link that existed at launch, RETARGETED during this session: review it)\n" \
+                                        "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                else
+                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a symbolic link)\n" "$WORK_DIR" "$_lnk" "$_tgt" >&2
+                                    _rm_links="$_rm_links $(printf '%q' "$_lnk")"
+                                fi ;;
+                        esac
+                    fi
+                elif [ "$_e" != "$_p" ]; then
+                    printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
+                        "$WORK_DIR" "$_p" >&2
+                elif [ -d "$WORK_DIR/$_p" ]; then
+                    printf "${YELLOW}[sandy]${NC}   %s/%q/\n" "$WORK_DIR" "$_p" >&2
+                    _rm_args="$_rm_args $(printf '%q' "$_p")/"
+                else
+                    printf "${YELLOW}[sandy]${NC}   %s/%q\n" "$WORK_DIR" "$_p" >&2
+                    _rm_args="$_rm_args $(printf '%q' "$_p")"
+                fi
+            done
+            printf "${YELLOW}[sandy]${NC}\n" >&2
+            printf "${YELLOW}[sandy]${NC} Sandy watches these paths because they auto-execute code or steer an agent under\n" >&2
+            printf "${YELLOW}[sandy]${NC} common operations: git hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`,\n" >&2
+            printf "${YELLOW}[sandy]${NC} IDE/shell/tool configs on project open or next use, and the .claude/ and .gemini/\n" >&2
+            printf "${YELLOW}[sandy]${NC} commands, agents, plugins, skills, extensions and settings are\n" >&2
+            printf "${YELLOW}[sandy]${NC} read by the agent CLI on your host at its next start. Most are kept away from your\n" >&2
+            printf "${YELLOW}[sandy]${NC} host workspace (read-only, or a sandbox-only copy) only when they exist at launch;\n" >&2
+            printf "${YELLOW}[sandy]${NC} .claude/skills/ never is.\n" >&2
+            if [ -n "$_rm_args" ] || [ -n "$_rm_links" ]; then
+                printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
+                if [ -n "$_rm_args" ]; then
+                    printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n" "$WORK_DIR" "$_rm_args" >&2
+                fi
+                if [ -n "$_rm_links" ]; then
+                    printf "${YELLOW}[sandy]${NC}   (cd %q && rm%s)   # the link only, never what it points to\n" "$WORK_DIR" "$_rm_links" >&2
+                fi
+            else
+                printf "${YELLOW}[sandy]${NC} Review the content before any of those operations.\n" >&2
+            fi
+            printf "\n" >&2
+        fi
+        if [ ${#_replaced_protected[@]} -gt 0 ]; then
+            printf "\n${YELLOW}[sandy]${NC} Protected paths REPLACED during this session (they existed at launch):\n" >&2
+            for _p in "${_replaced_protected[@]}"; do
+                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
+                    printf "${YELLOW}[sandy]${NC}   %s/%q (through %q, now -> %q)\n" "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
+                else
+                    printf "${YELLOW}[sandy]${NC}   %s/%q (a different object now sits at this path)\n" "$WORK_DIR" "$_p" >&2
+                fi
+            done
+            printf "${YELLOW}[sandy]${NC} A link on the way was re-pointed, or a parent directory was renamed aside and the\n" >&2
+            printf "${YELLOW}[sandy]${NC} path recreated, so what is there now is not what sandy protected or overlaid. It was\n" >&2
+            printf "${YELLOW}[sandy]${NC} yours before the session, so sandy offers no removal: review it, and any renamed-aside\n" >&2
+            printf "${YELLOW}[sandy]${NC} sibling, before your next git, IDE or agent operation in this workspace.\n\n" >&2
+        fi
+        if [ "$_sandy_df_flagged" = true ]; then
+            printf "${YELLOW}[sandy]${NC} .sandy/ was CREATED during this session. Sandy runs a .sandy/Dockerfile's RUN\n" >&2
+            printf "${YELLOW}[sandy]${NC} lines on your host docker daemon, so the next launch that would build one will\n" >&2
+            printf "${YELLOW}[sandy]${NC} flag it in the approval prompt as CREATED BY A SANDY SESSION. Record:\n" >&2
+            printf "${YELLOW}[sandy]${NC}   %s\n\n" "$(_sandy_df_session_record "$WORK_DIR")" >&2
+        fi
+        # Protected FILES whose contents changed although mounted :ro (#hash
+        # records; _sandy_protected_hash_snapshot). Reported, never restored.
+        _sandy_protected_hash_report \
+            "$(_sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch")" \
+            "$SANDBOX_DIR/.protected-copies"
+        # Git admin dirs created in-session (#gitdir records; only when the
+        # launch got as far as recording them).
+        if grep -qx '#gitdirs-recorded' "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            _sandy_git_admin_report "$SANDBOX_DIR/.protected-existed-at-launch"
+        fi
+        rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
+    fi
+    return 0
+}
+
+# The record a session-end report leaves when nobody was reading its stderr:
+# the daemon supervisor's cleanup (its stderr is a log file), and --stop's
+# direct teardown of a supervisor-less daemon (which prints the record itself
+# when it is done). Kept in the sandbox dir, which is outside the workspace and
+# never mounted into a container, until `sandy --ack-report`. Plain text, with
+# ANSI colours and control bytes removed; one block per session, each headed
+# by the UTC time it ended.
+_sandy_session_report_path() { printf '%s/.session-end-report' "$1"; }
+# Append captured report text (file $2) to the record of sandbox $1, as a new
+# block headed by the time and $3 (who noticed: supervisor | stop). Written to
+# a fresh temp file beside it and renamed into place: never through a link at
+# the record's path (the rename replaces the link itself), and an existing
+# record is carried over only when it is a regular file.
+_sandy_session_report_add() {
+    local _rec _n _um _what
+    _rec="$(_sandy_session_report_path "$1")"
+    case "$3" in
+        stop) _what="torn down by --stop; its supervisor was gone" ;;
+        *)    _what="reported by its supervisor's cleanup" ;;
+    esac
+    _um="$(umask)"; umask 077
+    _n="$(mktemp "$1/.session-end-report.XXXXXX" 2>/dev/null)" || _n=""
+    umask "$_um"
+    if [ -n "$_n" ] && {
+            if [ -f "$_rec" ] && [ ! -L "$_rec" ]; then cat "$_rec"; fi
+            printf '[sandy] ==== Daemon session ended %s (%s) ====\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" "$_what"
+            sed $'s/\033\\[[0-9;]*m//g' "$2" | LC_ALL=C tr -d '\000-\010\013-\037\177'
+        } > "$_n" && mv -f "$_n" "$_rec"; then
+        return 0
+    fi
+    [ -z "$_n" ] || rm -f "$_n"
+    printf "${YELLOW:-}[sandy]${NC:-} Could not record this session-end report in %s; it is printed here only.\n" "$1" >&2
+    return 1
+}
+# Run the session-end report for sandbox $1 and workspace $2. With no $3 it is
+# only printed (a terminal session: the person reading it is there). With
+# $3 = supervisor it is printed to the daemon log as before AND recorded; with
+# $3 = stop it is only recorded (--stop prints the record once it is done, so
+# printing it here too would show it twice). When it cannot be recorded it is
+# printed. $4 names the report function (default: the whole report,
+# _sandy_session_end_protected_report). Returns 0 always.
+_sandy_session_end_report() {
+    local _sb="$1" _wd="$2" _by="${3:-}" _fn="${4:-_sandy_session_end_protected_report}" _t="" _um
+    [ -n "$_sb" ] && [ -n "$_wd" ] && [ -f "$_sb/.protected-existed-at-launch" ] || return 0
+    if [ -n "$_by" ] && [ -d "$_sb" ] && [ ! -L "$_sb" ]; then
+        _um="$(umask)"; umask 077
+        _t="$(mktemp "$_sb/.session-report.XXXXXX" 2>/dev/null)" || _t=""
+        umask "$_um"
+    fi
+    if [ -z "$_t" ]; then
+        if [ -n "$_by" ]; then
+            printf "${YELLOW:-}[sandy]${NC:-} Could not record this session-end report in %s; it is printed here only.\n" "$_sb" >&2
+        fi
+        "$_fn" "$_sb" "$_wd" || true
+        return 0
+    fi
+    "$_fn" "$_sb" "$_wd" 2>"$_t" || true
+    if [ -s "$_t" ]; then
+        if ! _sandy_session_report_add "$_sb" "$_t" "$_by" || [ "$_by" = supervisor ]; then
+            cat "$_t" >&2
+        fi
+    fi
+    rm -f "$_t"
+    return 0
+}
+# The content check alone (protected FILES whose contents changed): what a
+# snapshot that is not a launch's can support. $1 = sandbox  $2 = workspace.
+_sandy_session_end_content_report() {
+    local WORK_DIR="$2"
+    _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$1/.protected-existed-at-launch")" "$1/.protected-copies"
+    rm -f "$1/.protected-existed-at-launch"
+    return 0
+}
+# --stop's direct teardown of a supervisor-less daemon, once its container is
+# stopped and removed: the session-end report the supervisor would have run,
+# recorded (--stop prints the record at its end). Only a snapshot the launch
+# completed (its last line, #gitdirs-recorded) says which paths existed at
+# launch; one that --attach or --start took from the container's mounts holds
+# only #hash lines, and the whole report against it would call every existing
+# protected path an appearance (and flag the user's .sandy/ as created by a
+# session). So that one gets the content check alone, as before #554. The
+# config is not loaded here: the launch records SANDY_ALLOW_WORKFLOW_EDIT=1 as
+# #workflow-edit-allowed, so .github/workflows is not watched when it was not.
+# The gitdir a .git file names is not derived again (see
+# _sandy_unsupervised_daemon_protect), so only the top-level .git is walked
+# for admin dirs and links. $1 = sandbox dir. Returns 0 always.
+_sandy_unsupervised_stop_report() {
+    local _snap="$1/.protected-existed-at-launch" SANDY_ALLOW_WORKFLOW_EDIT=0 GITDIR_HOST=""
+    [ -f "$_snap" ] || return 0
+    if grep -qx '#gitdirs-recorded' "$_snap" 2>/dev/null; then
+        if grep -qx '#workflow-edit-allowed' "$_snap" 2>/dev/null; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
+        _sandy_session_end_report "$1" "$WORK_DIR" stop
+    else
+        _sandy_session_end_report "$1" "$WORK_DIR" stop _sandy_session_end_content_report
+    fi
+    rm -f "$_snap"
+    return 0
+}
+# Print the record of sandbox $1 (workspace $2), if there is one, on stderr.
+# Called by --start, --attach, --stop and a terminal launch of the workspace,
+# every time, until `sandy --ack-report` removes the record.
+_sandy_session_report_show() {
+    local _rec
+    _rec="$(_sandy_session_report_path "$1")"
+    [ -f "$_rec" ] && [ ! -L "$_rec" ] && [ -s "$_rec" ] || return 0
+    printf "\n${YELLOW:-}[sandy]${NC:-} A daemon session of %s ended with a protected-path report that has not been acknowledged:\n" "$2" >&2
+    LC_ALL=C tr -d '\000-\010\013-\037\177' < "$_rec" >&2
+    printf "${YELLOW:-}[sandy]${NC:-} This repeats at every --start, --attach, --stop and terminal launch of the workspace. Once reviewed:\n" >&2
+    printf "${YELLOW:-}[sandy]${NC:-}   sandy --ack-report --workspace %q\n\n" "$2" >&2
     return 0
 }
 
@@ -3960,6 +4351,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--ack-report"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Acknowledge the session-end report a daemon session of the workspace recorded in its sandbox (protected paths that appeared, changed or were replaced while nobody was reading the supervisor log; #554): prints it once more and removes it, so --start, --attach, --stop and terminal launches stop showing it. Filesystem-only. Exit 0 when no report is pending afterwards (including none to begin with), 1 otherwise. Sub-options: --workspace PATH."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME. When the destination has no workspace there, the workspace itself is copied first, whole (.git, untracked and ignored files, symlinks as links), as a new directory (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist. --exclude PATTERN (repeatable, rsync syntax, relative to the workspace root) keeps paths out of the workspace copy; across a CPU architecture change its .venv/ and node_modules/ are skipped too. Credential-bearing files, in the sandbox and in a copied workspace, are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync-from"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"The reverse of --rsync (#409): PULL a sandbox from another host into this one, over outbound ssh + rsync from here only (the source is never modified). The copy is named for THIS host workspace path and gets the same rewrites as --rsync: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json. The source workspace defaults to the same path relative to $HOME on the remote. A local workspace named with --workspace that does not exist yet is pulled too, whole, as a new directory, and moves into place with the sandbox (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist (--exclude PATTERN as for --rsync). Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. It lands in a hidden staging directory and is renamed into place only once every step succeeds, so a failed pull installs nothing. Refuses while a live session holds the source on the remote and never overwrites a sandbox already here. Takes the source host as its argument. Sub-options: --workspace PATH, --src-workspace PATH, --src-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','
@@ -3967,7 +4359,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about that is missing the per-sandbox state a launch creates -- pip/ since 2.6.0 (#382; relay-state/ was the target from 2.2.0 through 2.5.x, but a launch no longer creates it), which is what --reset-sandbox leaves behind, and what any launch that failed part-way leaves behind; it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with that state in place. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --unlock, --provision, --approvals, and --accounts. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --unlock, --ack-report, --provision, --approvals, and --accounts. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -8281,6 +8673,61 @@ if [[ "${1:-}" == "--unlock" ]]; then
     exit 1
 fi
 
+# --- sandy --ack-report (#554) — acknowledge a recorded session-end report.
+# A daemon session's session-end report (protected paths that appeared,
+# changed or were replaced in the workspace) is recorded in its sandbox,
+# because the supervisor's stderr is a log nobody reads, and it is printed at
+# every --start, --attach, --stop and terminal launch of the workspace until
+# this removes it. It renames the record aside before printing and deleting
+# it, so what was acknowledged is exactly the text on the screen, and a block
+# another session appends meanwhile stays pending. An explicit command rather than "until the paths are
+# gone": a reported path may be the user's own and kept on purpose (a
+# .vscode/ they wanted), and sandy cannot tell. Filesystem-only. Exit 0 when
+# no report is pending afterwards (including none to begin with), 1 otherwise.
+if [[ "${1:-}" == "--ack-report" ]]; then
+    _ack_ws=""
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)   shift; _ack_ws="${1:-}"
+                           [ -n "$_ack_ws" ] || { error "--ack-report: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*) _ack_ws="${1#--workspace=}"
+                           [ -n "$_ack_ws" ] || { error "--ack-report: --workspace needs a PATH"; exit 1; } ;;
+            *) error "--ack-report: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+    _ack_ws="${_ack_ws:-$PWD}"
+    [ -d "$_ack_ws" ] || { error "--ack-report: workspace not found: $_ack_ws"; exit 1; }
+    WORK_DIR="$(cd "$_ack_ws" 2>/dev/null && pwd -P)" || { error "--ack-report: cannot resolve workspace"; exit 1; }
+    _ack_rec="$(_sandy_session_report_path "$SANDY_HOME/sandboxes/$(_sandy_slug_for "$WORK_DIR")")"
+    if [ ! -e "$_ack_rec" ] && [ ! -L "$_ack_rec" ]; then
+        info "No session-end report is pending for $WORK_DIR. Nothing to do."
+        exit 0
+    fi
+    # The record is first renamed aside (a link or file at its path moves as
+    # itself, never followed), and only what was renamed is printed and
+    # deleted: a block a session appends meanwhile lands in a new record,
+    # which stays pending, instead of being removed unseen.
+    if [ -d "$_ack_rec" ] && [ ! -L "$_ack_rec" ]; then
+        error "--ack-report: $_ack_rec is a directory; sandy never writes one there. Remove it yourself."
+        exit 1
+    fi
+    _ack_tmp="$(mktemp "$_ack_rec.ack.XXXXXX" 2>/dev/null)" || _ack_tmp=""
+    if [ -z "$_ack_tmp" ] || ! mv -f "$_ack_rec" "$_ack_tmp" 2>/dev/null; then
+        [ -z "$_ack_tmp" ] || rm -f "$_ack_tmp"
+        error "--ack-report: could not move $_ack_rec aside to acknowledge it"
+        exit 1
+    fi
+    if [ -f "$_ack_tmp" ] && [ ! -L "$_ack_tmp" ]; then
+        info "Acknowledging this session-end report for $WORK_DIR:"
+        LC_ALL=C tr -d '\000-\010\013-\037\177' < "$_ack_tmp"
+    fi
+    rm -f "$_ack_tmp"
+    info "Acknowledged; it is no longer shown."
+    exit 0
+fi
+
 if [[ "${1:-}" == "--remove-sandbox" ]]; then
     _rms_workspace=""; _rms_sandbox=""; _rms_orphans=false
     _rms_dry_run=false; _rms_yes=false
@@ -10206,8 +10653,8 @@ Flags:
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
                      --exec, --login, --update-sessions, --reset-sandbox,
-                     --remove-sandbox, --unlock, --provision, --approvals,
-                     and --accounts.
+                     --remove-sandbox, --unlock, --ack-report, --provision,
+                     --approvals, and --accounts.
   -v                 Alone (sandy -v): print the version. With other options:
                      verbose, show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
@@ -10233,6 +10680,11 @@ that started it, so a closed tab/dropped SSH/IDE quit does not end it):
                      launch. Sub-options: --workspace PATH, --dry-run
   --stop             Stop a running daemon session (full teardown: container,
                      proxy, networks, lock). Sub-options: --workspace PATH
+  --ack-report       Acknowledge the session-end report a daemon session left
+                     (protected paths that appeared or changed in the
+                     workspace; --start, --attach, --stop and terminal
+                     launches show it until then): prints it, then removes
+                     it. Filesystem-only. Sub-options: --workspace PATH
   --update-sessions  Fleet image refresh + rolling restart across every
                      daemon session on the host; scope to one session with
                      --workspace PATH. Sub-options: --dry-run, --yes,
@@ -14622,6 +15074,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         done
         if [ "$_sandy_session_live" = 1 ]; then
             _sandy_unsupervised_daemon_protect "$_sandy_daemon_existing" start
+            _sandy_session_report_show "$SANDY_HOME/sandboxes/$(_sandy_slug_for "$WORK_DIR")" "$WORK_DIR"
             info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
             exit 0
         fi
@@ -14637,6 +15090,9 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         "$0" --stop --workspace "$WORK_DIR" >/dev/null 2>&1 || true
         # fall through to a fresh --start below
     fi
+    # #554: a report a daemon session of this workspace recorded at its end
+    # (including the reap just above), until acknowledged.
+    _sandy_session_report_show "$SANDY_HOME/sandboxes/$(_sandy_slug_for "$WORK_DIR")" "$WORK_DIR"
 
     # D1 — normalize the currently-parsed flags back into an argv for the
     # supervisor re-exec. $@ at this point is REMAINING_ARGS (whatever the
@@ -14913,6 +15369,9 @@ fi
 # this workspace is invisible to it — it can never attach into someone else's
 # non-daemon session.
 if [ "$SANDY_ATTACH" = "true" ]; then
+    # #554: a recorded session-end report, printed before tmux takes the
+    # screen (tmux's alternate screen gives it back on detach).
+    _sandy_session_report_show "$SANDY_HOME/sandboxes/$(_sandy_slug_for "$WORK_DIR")" "$WORK_DIR"
     _sandy_daemon_filter=(--filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR")
     _sandy_attach_container="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
     if [ -z "$_sandy_attach_container" ]; then
@@ -14976,8 +15435,13 @@ fi
 if [ "$SANDY_STOP" = "true" ]; then
     _sandy_daemon_filter=(--filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR")
     _sandy_stop_container="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
+    # #554: --stop prints the recorded session-end report once, at its end,
+    # so the report the session it stops leaves (its supervisor's cleanup, or
+    # the direct teardown below) is shown with any earlier one.
+    _sandy_stop_sb="$SANDY_HOME/sandboxes/$(_sandy_slug_for "$WORK_DIR")"
     if [ -z "$_sandy_stop_container" ]; then
         error "No daemon session running for $WORK_DIR."
+        _sandy_session_report_show "$_sandy_stop_sb" "$WORK_DIR"
         exit 4
     fi
 
@@ -15011,6 +15475,9 @@ if [ "$SANDY_STOP" = "true" ]; then
             sleep 1
             _sandy_stop_waited=$((_sandy_stop_waited + 1))
         done
+        # The supervisor's cleanup records its report before it removes the
+        # container, so by now the record holds it (#554).
+        _sandy_session_report_show "$_sandy_stop_sb" "$WORK_DIR"
         if [ -n "$_sandy_stop_still" ]; then
             error "Daemon session did not stop within ${_sandy_stop_timeout_s}s (supervisor pid $_sandy_stop_pid)."
             exit 5
@@ -15028,6 +15495,7 @@ if [ "$SANDY_STOP" = "true" ]; then
         # three things a supervisor-less session still has: container, networks,
         # and (maybe) a now-stale #14 lock.
         info "Stopping daemon session (no live supervisor — direct teardown)..."
+        _SANDY_UNSUP_STOP_SB=""
         _sandy_unsupervised_daemon_protect "$_sandy_stop_container" stop
         # Read the session label while the container still exists: after
         # `docker rm -f` an inspect finds nothing, and the lock reap, the macOS
@@ -15039,6 +15507,13 @@ if [ "$SANDY_STOP" = "true" ]; then
         # unless-stopped` (an rm -f alone races the restart policy).
         docker stop "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
         docker rm -f "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
+        # The session-end report, now that the container can write nothing
+        # more (#554); recorded, and printed with the record below. Not when
+        # the teardown failed: the container may still be writing, and the
+        # snapshot stays for the next --stop to judge against.
+        if [ -n "$_SANDY_UNSUP_STOP_SB" ] && [ "$_sandy_stop_ok" = true ]; then
+            _sandy_unsupervised_stop_report "$_SANDY_UNSUP_STOP_SB"
+        fi
         # Best-effort: reaps this session's now-orphaned sandy_{net,sidecar,egress}_*
         # networks (their owning pid — the dead supervisor's — is gone, so
         # _sandy_reap_orphan_networks's liveness gate lets them go). Coordinates
@@ -15074,6 +15549,7 @@ if [ "$SANDY_STOP" = "true" ]; then
                 _sandy_commondir_unseed "$SANDY_HOME/sandboxes/$_sandy_stop_session"
             fi
         fi
+        _sandy_session_report_show "$_sandy_stop_sb" "$WORK_DIR"
         if [ "$_sandy_stop_ok" = "true" ]; then
             info "Daemon session stopped."
             exit 0
@@ -16720,6 +17196,13 @@ DIR_BASE="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"
 DIR_BASE="${DIR_BASE:-project}"
 SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
 SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
+# #554: a terminal launch prints the session-end report a daemon session of
+# this workspace recorded, until acknowledged. Not the supervisor (its stderr
+# is the log the record exists for) and not the --start approval pass (its
+# client prints it).
+if [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ] && [ -z "${_SANDY_APPROVE_PASS:-}" ] && [ -t 2 ]; then
+    _sandy_session_report_show "$SANDBOX_DIR" "$WORK_DIR"
+fi
 
 # --- Per-project .sandy/Dockerfile approval (HF-incident Issue 7, #296) ------
 # Defined here rather than at the Phase 3 build site because the SANDY_APPROVE_ONLY
@@ -16889,28 +17372,6 @@ _sandy_sessions_parse() {
     return 0
 }
 
-_sandy_context_hash() {
-    local dir="$1" f h out=""
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        [ "$f" = "$dir/config" ] && continue
-        [ "$f" = "$dir/.secrets" ] && continue
-        # Named Claude session files are launch configuration, not build
-        # context: editing one must not re-prompt the Dockerfile approval or
-        # rebuild the project image (decisions/2026-10-12-named-claude-sessions.md).
-        case "$f" in "$dir"/sessions/*) continue ;; esac
-        if [ "${2:-}" = "--list" ]; then
-            printf '%s\n' "${f#"$dir"/}"
-            continue
-        fi
-        h="$(sha256 < "$f" | awk '{print $1}')"
-        out="$out$h  ${f#"$dir"/}
-"
-    done < <(find "$dir" -type f 2>/dev/null | LC_ALL=C sort)
-    [ "${2:-}" = "--list" ] && return 0
-    printf '%s' "$out" | sha256 | awk '{print $1}'
-}
-
 # Stage the per-project build context (#295) into a fresh temp dir holding
 # EXACTLY the files _sandy_context_hash covers, and print its path. Refuses
 # (nonzero, reason on stderr, nothing left behind) when:
@@ -16949,55 +17410,6 @@ _sandy_stage_project_context() {
         return 1
     fi
     printf '%s\n' "$stage"
-}
-
-# --- A .sandy/ that a SESSION created (#295 item 3) --------------------------
-# .sandy/ is protected against modification, not creation: like every protected
-# directory it is mounted :ro only when it EXISTED at launch, so a session that
-# started without one can write .sandy/Dockerfile through the rw workspace bind.
-# For every other protected path the session-end warning precedes the harm; for
-# this one sandy is the actor, offering to run its RUN lines on the host daemon
-# at the NEXT launch. Always-mounting .sandy/ :ro was declined (maintainer
-# decision, option C): it would bring back the workspace stubs the existence
-# gate was introduced to remove. Instead the creation is RECORDED, and the next
-# Dockerfile approval prompt says so -- the strongest provenance sandy can give.
-#
-# The record lives in $SANDY_HOME/approvals/, beside the approval it qualifies,
-# because that is the one place neither a repository (not under the workspace)
-# nor the session (not under any directory mounted into the container) can
-# write -- a record the agent could forge or delete would be worthless. Keyed
-# on the same 16-char workspace hash as the approval file, so --remove-sandbox
-# reaps both together.
-_sandy_df_session_record() {   # $1 = workspace (canonical)
-    printf '%s/approvals/dockerfile-%s.session-created' "$SANDY_HOME" \
-        "$(printf '%s' "$1" | sha256 | awk '{print $1}' | cut -c1-16)"
-}
-
-# Write that record when $WORK_DIR/.sandy exists now (with content) and the
-# launch snapshot $1 ($SANDBOX_DIR/.protected-existed-at-launch) says it did
-# not exist at launch. $2 says who noticed: "session-end" (cleanup, including
-# the daemon supervisor's own cleanup on --stop) or "next-launch" (a snapshot
-# left behind by a session whose cleanup never ran -- SIGKILL, a reboot under
-# --restart unless-stopped, a --stop that found the supervisor dead; picked up
-# by the approval gate below before the launch clears stale snapshots). The
-# first line is the context hash as it stood at that moment, so the prompt can
-# say whether the content is still what the session left. Returns 0 only when
-# it wrote a record.
-_sandy_note_session_created_sandy_dir() {
-    local snap="$1" by="${2:-session-end}" rec
-    [ -n "${WORK_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] && [ -f "$snap" ] || return 1
-    grep -qFx ".sandy" "$snap" 2>/dev/null && return 1
-    [ -d "$WORK_DIR/.sandy" ] && [ -n "$(ls -A "$WORK_DIR/.sandy" 2>/dev/null)" ] || return 1
-    rec="$(_sandy_df_session_record "$WORK_DIR")"
-    mkdir -p "$SANDY_HOME/approvals" 2>/dev/null || return 1
-    {
-        printf '%s\n' "$(_sandy_context_hash "$WORK_DIR/.sandy")"
-        printf '# workspace: %s\n' "$WORK_DIR"
-        printf '# recorded:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
-        printf '# by:        %s\n' "$by"
-    } > "$rec" 2>/dev/null || return 1
-    chmod 600 "$rec" 2>/dev/null || true
-    return 0
 }
 
 # Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
@@ -21276,188 +21688,15 @@ cleanup() {
             "$SANDBOX_DIR/claude/tool-audit.jsonl" \
             "$(grep -c . "$SANDBOX_DIR/claude/tool-audit.jsonl" 2>/dev/null || echo '?')" >&2
     fi
-    # Detect protected-path appearances: with the hybrid mount model, an
-    # absent protected dir gets no in-session protection — an agent can
-    # `mkdir .vscode/` and write into it, and the writes land on the host
-    # workspace. We took a snapshot of which protected dirs existed at
-    # launch in $SANDBOX_DIR/.protected-existed-at-launch; now we compare
-    # against the current state. Anything that newly appeared (with
-    # content) is reported to the user with one-line remediation.
-    #
-    # No automatic cleanup here — we don't know if the agent's write was
-    # legitimate ("set up .vscode/settings.json for this project") or a
-    # prompt injection. Surface the change, let the user decide.
-    if [ -n "${SANDBOX_DIR:-}" ] \
-            && [ -f "$SANDBOX_DIR/.protected-existed-at-launch" ] \
-            && [ -n "${WORK_DIR:-}" ]; then
-        _new_protected=()
-        _changed_protected=()
-        _replaced_protected=()
-        while IFS= read -r _pd; do
-            [ -z "$_pd" ] && continue
-            # Only flag dirs that DIDN'T exist at launch but DO now (with content).
-            # One that existed at launch is reported only if the session REPLACED
-            # it (a separate list: it was the user's, so no removal is offered).
-            if grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
-                if _sandy_replaced_since_launch "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
-                    _replaced_protected+=("$_pd")
-                fi
-                continue
-            fi
-            # ...or that existed with no overlay (a #content fingerprint) and changed.
-            _fp0="$(awk -F '\t' -v p="$_pd" '$1 == "#content" && $2 == p { print $3; exit }' \
-                "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
-            if [ -n "$_fp0" ]; then
-                if [ -d "$WORK_DIR/$_pd" ] && { [ "$_fp0" = unhashable ] \
-                        || [ "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" != "$_fp0" ]; }; then
-                    _changed_protected+=("$_pd")
-                fi
-                continue
-            fi
-            if [ -d "$WORK_DIR/$_pd" ] && [ -n "$(ls -A "$WORK_DIR/$_pd" 2>/dev/null)" ]; then
-                if _sandy_dir_is_inert_git "$_pd"; then
-                    [ "${SANDY_VERBOSE:-0}" = "1" ] && \
-                        info "  (protected path appeared but looks inert git scaffolding: $_pd)"
-                    continue
-                fi
-                _new_protected+=("$_pd")
-            fi
-        done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs)
-        # Same for protected FILES absent at launch (e.g. .npmrc, .envrc,
-        # .pre-commit-config.yaml) — existence-gated, so a newly-created one
-        # persists to the host workspace and otherwise goes unreported.
-        while IFS= read -r _pf; do
-            [ -z "$_pf" ] && continue
-            if grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
-                if _sandy_replaced_since_launch "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
-                    _replaced_protected+=("$_pf")
-                fi
-                continue
-            fi
-            if [ -f "$WORK_DIR/$_pf" ]; then
-                _new_protected+=("$_pf")
-            fi
-        done < <(_sandy_protected_files; _sandy_watched_git_files)
-        # Issue F: a core.hooksPath target the agent CREATED during the session.
-        # An existing one was :ro-mounted at launch (and recorded in the snapshot,
-        # so it's skipped here); an absent-at-launch one escapes the mount, so
-        # flag it if it now exists with content. git hooks fire on the user's next
-        # host git operation, so this belongs in the same warning.
-        _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
-        if [ -n "$_cfg_hooks" ] && grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
-            if _sandy_replaced_since_launch "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; then
-                _replaced_protected+=("$_cfg_hooks")
-            fi
-        elif [ -n "$_cfg_hooks" ] \
-                && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
-            _new_protected+=("$_cfg_hooks")
-        fi
-        # #295 item 3: a .sandy/ this session created is the one appearance
-        # sandy itself acts on -- the next launch offers to build its
-        # Dockerfile on the host daemon. Record it where neither the workspace
-        # nor the container can reach, so that approval prompt can say who
-        # wrote it. Runs in the daemon supervisor's cleanup too (--stop).
-        _sandy_df_flagged=false
-        if _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" session-end; then
-            _sandy_df_flagged=true
-        fi
-        if [ ${#_new_protected[@]} -gt 0 ] || [ ${#_changed_protected[@]} -gt 0 ]; then
-            printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
-            # A reported path may be, or sit under, a link (the session can plant
-            # `.claude/commands -> ../..`). Every test above follows it, and so
-            # would `rm -rf X/`: it deletes the target's contents. So a link is
-            # shown with its target and removed with a plain `rm` (the link
-            # only); one that existed at launch (#link) gets no command at all.
-            _rm_args=""; _rm_links=""; _seen_links=" "
-            for _e in ${_new_protected[@]+"${_new_protected[@]}"} \
-                      ${_changed_protected[@]+"${_changed_protected[@]/#/changed:}"}; do
-                _p="${_e#changed:}"
-                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
-                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
-                    # Target at launch, hex-encoded (#link<TAB>link<TAB>hex); "x" alone = recorded
-                    # with an unreadable target, nothing = not there at launch.
-                    _lhex0="$(awk -F '\t' -v p="$_lnk" '$1 == "#link" && $2 == p { print "x" $3; exit }' \
-                        "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
-                    _lhex="x$(_sandy_link_hex "$WORK_DIR/$_lnk")"
-                    if [ -n "$_lhex0" ] && [ "$_lhex0" = "$_lhex" ]; then
-                        printf "${YELLOW}[sandy]${NC}   %s/%q (through %q -> %q, a link that existed at launch: review it there)\n" \
-                            "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
-                    else
-                        case "$_seen_links" in
-                            *" $_lnk "*) ;;
-                            *)  _seen_links="$_seen_links$_lnk "
-                                if [ -n "$_lhex0" ]; then
-                                    # The user's link, re-pointed: review it, no removal offered.
-                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a link that existed at launch, RETARGETED during this session: review it)\n" \
-                                        "$WORK_DIR" "$_lnk" "$_tgt" >&2
-                                else
-                                    printf "${YELLOW}[sandy]${NC}   %s/%q -> %q  (a symbolic link)\n" "$WORK_DIR" "$_lnk" "$_tgt" >&2
-                                    _rm_links="$_rm_links $(printf '%q' "$_lnk")"
-                                fi ;;
-                        esac
-                    fi
-                elif [ "$_e" != "$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
-                        "$WORK_DIR" "$_p" >&2
-                elif [ -d "$WORK_DIR/$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%q/\n" "$WORK_DIR" "$_p" >&2
-                    _rm_args="$_rm_args $(printf '%q' "$_p")/"
-                else
-                    printf "${YELLOW}[sandy]${NC}   %s/%q\n" "$WORK_DIR" "$_p" >&2
-                    _rm_args="$_rm_args $(printf '%q' "$_p")"
-                fi
-            done
-            printf "${YELLOW}[sandy]${NC}\n" >&2
-            printf "${YELLOW}[sandy]${NC} Sandy keeps these paths away from your host workspace when they exist at launch,\n" >&2
-            printf "${YELLOW}[sandy]${NC} because they auto-execute code or steer an agent under common operations (git\n" >&2
-            printf "${YELLOW}[sandy]${NC} hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`, IDE/shell/tool\n" >&2
-            printf "${YELLOW}[sandy]${NC} configs on project open or next use, and .claude/ or .gemini/ commands, agents\n" >&2
-            printf "${YELLOW}[sandy]${NC} and plugins are read by the agent CLI on your host at its next start).\n" >&2
-            if [ -n "$_rm_args" ] || [ -n "$_rm_links" ]; then
-                printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
-                if [ -n "$_rm_args" ]; then
-                    printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n" "$WORK_DIR" "$_rm_args" >&2
-                fi
-                if [ -n "$_rm_links" ]; then
-                    printf "${YELLOW}[sandy]${NC}   (cd %q && rm%s)   # the link only, never what it points to\n" "$WORK_DIR" "$_rm_links" >&2
-                fi
-            else
-                printf "${YELLOW}[sandy]${NC} Review the content before any of those operations.\n" >&2
-            fi
-            printf "\n" >&2
-        fi
-        if [ ${#_replaced_protected[@]} -gt 0 ]; then
-            printf "\n${YELLOW}[sandy]${NC} Protected paths REPLACED during this session (they existed at launch):\n" >&2
-            for _p in "${_replaced_protected[@]}"; do
-                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
-                    _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
-                    printf "${YELLOW}[sandy]${NC}   %s/%q (through %q, now -> %q)\n" "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
-                else
-                    printf "${YELLOW}[sandy]${NC}   %s/%q (a different object now sits at this path)\n" "$WORK_DIR" "$_p" >&2
-                fi
-            done
-            printf "${YELLOW}[sandy]${NC} A link on the way was re-pointed, or a parent directory was renamed aside and the\n" >&2
-            printf "${YELLOW}[sandy]${NC} path recreated, so what is there now is not what sandy protected or overlaid. It was\n" >&2
-            printf "${YELLOW}[sandy]${NC} yours before the session, so sandy offers no removal: review it, and any renamed-aside\n" >&2
-            printf "${YELLOW}[sandy]${NC} sibling, before your next git, IDE or agent operation in this workspace.\n\n" >&2
-        fi
-        if [ "$_sandy_df_flagged" = true ]; then
-            printf "${YELLOW}[sandy]${NC} .sandy/ was CREATED during this session. Sandy runs a .sandy/Dockerfile's RUN\n" >&2
-            printf "${YELLOW}[sandy]${NC} lines on your host docker daemon, so the next launch that would build one will\n" >&2
-            printf "${YELLOW}[sandy]${NC} flag it in the approval prompt as CREATED BY A SANDY SESSION. Record:\n" >&2
-            printf "${YELLOW}[sandy]${NC}   %s\n\n" "$(_sandy_df_session_record "$WORK_DIR")" >&2
-        fi
-        # Protected FILES whose contents changed although mounted :ro (#hash
-        # records; _sandy_protected_hash_snapshot). Reported, never restored.
-        _sandy_protected_hash_report \
-            "$(_sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch")" \
-            "$SANDBOX_DIR/.protected-copies"
-        # Git admin dirs created in-session (#gitdir records; only when the
-        # launch got as far as recording them).
-        if grep -qx '#gitdirs-recorded' "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
-            _sandy_git_admin_report "$SANDBOX_DIR/.protected-existed-at-launch"
-        fi
-        rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
+    # Detect protected-path appearances: the session-end report
+    # (_sandy_session_end_protected_report). A daemon supervisor also records
+    # it in the sandbox (#554): its stderr is a log nobody reads, so the next
+    # --start, --attach, --stop or terminal launch of the workspace prints it
+    # until `sandy --ack-report`.
+    if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
+        _sandy_session_end_report "${SANDBOX_DIR:-}" "${WORK_DIR:-}" supervisor
+    else
+        _sandy_session_end_report "${SANDBOX_DIR:-}" "${WORK_DIR:-}"
     fi
     # #80: .git/HEAD is rw in-container, so `git switch` works — but a switch that
     # left HEAD on a different (or detached) branch means a host git/IDE now sees a
@@ -23355,6 +23594,11 @@ fi
 # best you can get without rebuilding the workspace mount model.
 : > "$SANDBOX_DIR/.session-created-stubs"
 : > "$SANDBOX_DIR/.protected-existed-at-launch"
+# The effective SANDY_ALLOW_WORKFLOW_EDIT, for a session-end report run where
+# no config is loaded (--stop of a supervisor-less daemon, #554).
+if [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ]; then
+    printf '#workflow-edit-allowed\n' >> "$SANDBOX_DIR/.protected-existed-at-launch"
+fi
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     if [ -d "$WORK_DIR/$_pd" ]; then
