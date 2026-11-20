@@ -1038,9 +1038,11 @@ You can also `git switch -c <feature>` and work directly; just expect the sessio
 **Removal is governed by announcement, not by the act of deleting.** What breaks a consumer is *surprise*, so the major-gated event is the **announcement**:
 
 1. `README.md` carries a **`## Deprecated`** section.
-2. An entry may only be **added** to it in an `X.0.0` release.
-3. Anything listed there may be **removed** in a later `X.Y.0`.
-4. **Nothing may be removed that was never listed.** That is the whole of the protection — without it the section is decoration. Guarded by `run-tests.sh` §138.
+2. An entry may be **added** to it in an `X.0.0` release, **or in a minor when its removal is scheduled no earlier than the next `X.0.0`** (2.10.0). Such a row names its removal release in the *since* cell: `2.10.0 (removal: 3.0.0)`.
+3. An entry added in an `X.0.0` may be **removed** in a later `X.Y.0`; an entry added in a minor, no earlier than the major its row names.
+4. **Nothing may be removed that was never listed.** That is the whole of the protection — without it the section is decoration. Guarded by `run-tests.sh` §138, which also refuses a row whose *since* is not an `X.0.0`, not `(exception)`, and not `X.Y.Z (removal: N.0.0)` with `N` greater than `X`.
+
+Why rule 2 allows a minor (2.10.0, decided 2026-11-20, first use: the Gemini CLI agent): nothing vanishes during the current major, because removal still lands only in a major, and users get the warning earlier than an announcement held back for the `X.0.0` would give them.
 
 Someone upgrading across a major therefore reads one list and learns everything that may vanish during that line. The rule was written after its absence made "is removing a key major?" a live question twice in ten minutes: the old wording named renames and retiering and simply did not mention removal.
 

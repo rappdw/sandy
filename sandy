@@ -3544,9 +3544,9 @@ SANDY_SYMLINK_SCAN_SKIP|string|||2.9.0|stable|Comma-separated workspace-relative
 SANDY_SCREENSHOT_DIR|path|||0.12.0|deprecated|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
 CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
-GEMINI_MODEL|string|||0.9.0|stable|Gemini model override.
-SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||0.9.0|stable|Gemini credential probe strategy. auto also mounts the host Gemini OAuth credentials and Google ADC file when present, even beside GEMINI_API_KEY. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
-SANDY_GEMINI_EXTENSIONS|string|||0.9.0|stable|Comma-separated Gemini extensions to enable.
+GEMINI_MODEL|string|||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Gemini model override.
+SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Gemini credential probe strategy. auto also mounts the host Gemini OAuth credentials and Google ADC file when present, even beside GEMINI_API_KEY. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
+SANDY_GEMINI_EXTENSIONS|string|||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Comma-separated Gemini extensions to enable.
 GOOGLE_CLOUD_PROJECT|string|||0.9.0|stable|Google Cloud project for Vertex AI.
 GOOGLE_CLOUD_LOCATION|string|||0.9.0|stable|Google Cloud location for Vertex AI.
 GOOGLE_GENAI_USE_VERTEXAI|bool|||0.9.0|stable|Use Vertex AI backend for Gemini.
@@ -22315,6 +22315,15 @@ load_gemini_credentials() {
             [ -z "$GEMINI_SELECTED_AUTH" ] && GEMINI_SELECTED_AUTH="vertex-ai"
         fi
     fi
+    # The credential the agent will actually use is the Google-account OAuth
+    # login (an API key or ADC would have been selected first). Since
+    # 2026-06-18 Google no longer serves Gemini CLI to personal accounts
+    # (free, Google AI Pro/Ultra), so this login fails for most people while
+    # a Gemini Code Assist Standard/Enterprise login still works: warn, never
+    # refuse.
+    if [ "$GEMINI_SELECTED_AUTH" = "oauth-personal" ]; then
+        warn "Gemini is using your Google-account login (~/.gemini OAuth). Since 2026-06-18 Google no longer serves Gemini CLI to personal Google accounts (free, Google AI Pro/Ultra); only Gemini Code Assist Standard/Enterprise logins still work. Set GEMINI_API_KEY or use Vertex AI (SANDY_GEMINI_AUTH=adc) now, or move to Antigravity CLI when it lands in sandy 3.0.0."
+    fi
     if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "$GEMINI_CRED_TMPDIR" ] && [ -z "$GEMINI_ADC_MOUNT" ]; then
         warn "No Gemini credentials found. Set GEMINI_API_KEY, run 'gemini auth' on host, or run 'gcloud auth application-default login'"
     fi
@@ -22506,6 +22515,10 @@ load_mirror_credentials() {
 }
 
 if _sandy_agent_has gemini; then
+    # Announced in README ## Deprecated (2.10.0, removal 3.0.0). Once per
+    # launch: the --start approval pre-pass exits long before this point, and
+    # introspection never reaches it.
+    warn "SANDY_AGENT=gemini (Gemini CLI, also via --agent gemini or 'all') is deprecated and will be removed in sandy 3.0.0; Antigravity CLI replaces it (see README ## Deprecated)."
     load_gemini_credentials
     _sandy_stage_commit "$SANDBOX_DIR/gemini/settings.json"
 fi

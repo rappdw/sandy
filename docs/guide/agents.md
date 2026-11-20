@@ -41,6 +41,13 @@ Run `ant auth login` on the host, not in the container — the browser callback 
 
 ## Running Gemini CLI (`SANDY_AGENT=gemini`)
 
+> **Deprecated in 2.10.0; removal in sandy 3.0.0.** Antigravity CLI (`agy`)
+> replaces Gemini CLI and lands in sandy 3.0.0. Every launch that includes
+> `gemini` (alone, in a combo, or through `all`) prints one warning saying so.
+> `GEMINI_MODEL`, `SANDY_GEMINI_AUTH` and `SANDY_GEMINI_EXTENSIONS` go with the
+> agent; `GEMINI_API_KEY` stays (Antigravity uses it), and so do the `.gemini/`
+> workspace protections. See [Deprecated](../../README.md#deprecated).
+
 Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI_AUTH` pins a specific one:
 
 | Path | How to set up | When to use |
@@ -49,6 +56,15 @@ Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI
 | ADC | `gcloud auth application-default login` on the host | Google Cloud / Vertex AI workflows |
 | Vertex AI | ADC + `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT=...`, `GOOGLE_CLOUD_LOCATION=...` | Enterprise / Vertex billing |
 | OAuth (browser login) | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30; falls back to legacy `tokens.json`) into the container ephemerally on each launch | Subject to Google's client/account eligibility check; see below |
+
+> **Personal Google accounts are no longer served (since 2026-06-18).** Google
+> stopped serving Gemini CLI to free personal accounts and to Google AI Pro/Ultra
+> subscriptions; paid API keys, Vertex AI and Gemini Code Assist
+> Standard/Enterprise still work. When the credential sandy selects is the
+> Google-account OAuth file (no `GEMINI_API_KEY`, or `SANDY_GEMINI_AUTH=oauth`),
+> the launch warns and suggests `GEMINI_API_KEY` or Vertex AI now, or Antigravity
+> CLI in 3.0.0. It does not refuse: a Code Assist Standard/Enterprise login still
+> works through that file.
 
 > **OAuth eligibility can fail independently of credential refresh.** Some
 > launches receive `IneligibleTierError` with `UNSUPPORTED_CLIENT` from Google
