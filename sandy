@@ -944,6 +944,7 @@ _sandy_protected_files() {
 .claude/settings.json
 .claude/settings.local.json
 .gemini/settings.json
+.gemini/.env
 EOF
 }
 # Top-level .git files that can trigger host-side code execution if tampered.
@@ -2318,6 +2319,194 @@ _sandy_protected_hash_report() {
     printf "\n" >&2
 }
 
+# --- .env files a host-side Gemini CLI loads (2.10.0) ------------------------
+# Gemini CLI looks for an env file from its working directory upward,
+# <dir>/.gemini/.env before <dir>/.env in each directory, takes the first one
+# it finds, and loads it into its own environment (from a .gemini/.env every
+# variable). So a file the session writes where a host-side Gemini CLI run
+# would start from changes that run. The workspace root's .gemini/.env is a
+# protected file (_sandy_protected_files). A plain .env is not: applications
+# use it, and it may be the user's. So the launch lists every .env and
+# .gemini/.env (names matched in any case, for case-insensitive file systems)
+# in the workspace root and up to _SANDY_ENV_SCAN_DEPTH directory levels below
+# it, with what each holds, and the session-end report names those created or
+# changed since. Detection only: nothing is mounted, removed or restored. The
+# directories _sandy_env_scan_skip_dirs names are not entered (dependency,
+# cache and build trees, where nobody starts gemini), and neither is a link to
+# a directory (find never follows one).
+_SANDY_ENV_SCAN_DEPTH=4
+_sandy_env_scan_skip_dirs() {
+    cat <<'SKIP'
+.git
+node_modules
+.venv
+venv
+vendor
+__pycache__
+.tox
+.mypy_cache
+.pytest_cache
+.cache
+target
+SKIP
+}
+# The watched entries under workspace $1, NUL-terminated records, each a
+# one-letter kind and a workspace-relative path:
+#   E<path>  a .env (any case: a regular file, a link, a FIFO or a directory,
+#            since Gemini takes any of them as "the env file") whose directory,
+#            or for one inside a .gemini directory that directory's parent, is
+#            at most _SANDY_ENV_SCAN_DEPTH levels below the root; or a LINK
+#            named .gemini (any case) in such a directory, which can lead to a
+#            .env the scan does not enter (a skipped or outside directory). The
+#            root's own .gemini/.env is left to the protected-file checks.
+#   U<path>  a directory inside the scanned depth that cannot be listed (mode
+#            111, say): find cannot see into it, but a host gemini run can
+#            still open a .env there by name. find itself prints only the
+#            directories some read bit is missing from (octal -perm, which
+#            GNU and BSD find both take), so the shell tests just those.
+# A directory named .env that holds pyvenv.cfg is a Python virtualenv (the
+# `python -m venv .env` convention): it is neither entered nor reported. Gemini
+# finds it and loads nothing from it, which only hides an env file above it.
+_sandy_env_files() {
+    local _p _b _d _t _n _s _skip=()
+    [ -d "$1" ] || return 0
+    while IFS= read -r _s; do
+        [ -n "$_s" ] || continue
+        if [ ${#_skip[@]} -eq 0 ]; then _skip=(-name "$_s"); else _skip+=(-o -name "$_s"); fi
+    done < <(_sandy_env_scan_skip_dirs)
+    while IFS= read -r -d '' _p; do
+        _p="${_p#./}"
+        _b="${_p##*/}"
+        case "$_p" in */*) _d="${_p%/*}" ;; *) _d="" ;; esac
+        case "$_b" in
+            [.][eE][nN][vV])
+                case "/$_d" in
+                    */[.][gG][eE][mM][iI][nN][iI])
+                        case "$_d" in */*) _d="${_d%/*}" ;; *) continue ;; esac ;;
+                esac ;;
+            *)
+                if [ -L "$1/$_p" ]; then
+                    # Only a .gemini link is printed as one (find's -iname).
+                    :
+                else
+                    # A directory find reported. One it can enter but not
+                    # list (x without r) hides what is in it from the scan
+                    # but not from a host gemini run, which opens a .env by
+                    # name: named. One within the depth, or a .gemini just
+                    # below it.
+                    if [ "$_p" != . ] && [ -d "$1/$_p" ] && [ -x "$1/$_p" ] && [ ! -r "$1/$_p" ]; then
+                        _t="${_p//[!\/]/}"; _n=$((${#_t} + 1))
+                        case "$_b" in [.][gG][eE][mM][iI][nN][iI]) _n=$((_n - 1)) ;; esac
+                        [ "$_n" -le "$_SANDY_ENV_SCAN_DEPTH" ] && printf 'U%s\0' "$_p"
+                    fi
+                    continue
+                fi ;;
+        esac
+        _n=0
+        if [ -n "$_d" ]; then _t="${_d//[!\/]/}"; _n=$((${#_t} + 1)); fi
+        [ "$_n" -le "$_SANDY_ENV_SCAN_DEPTH" ] && printf 'E%s\0' "$_p"
+    done < <(cd "$1" 2>/dev/null && find . -maxdepth $((_SANDY_ENV_SCAN_DEPTH + 2)) \
+                \( -type d \( "${_skip[@]}" \) -prune \) \
+                -o \( -type d -iname .env -exec sh -c 'test -f "$1/pyvenv.cfg"' _ {} \; -prune \) \
+                -o \( -iname .env \( -type f -o -type l -o -type p -o -type d \) -print0 \) \
+                -o \( -iname .gemini -type l -print0 \) \
+                -o \( -type d \( ! -perm -400 -o ! -perm -040 -o ! -perm -004 \) -print0 \) 2>/dev/null)
+    return 0
+}
+# What watched entry $1 is now: "sha256:<hex>" for a regular file,
+# "link:<target, hex>" for a link (never followed), "fifo", "dir", or "none".
+# A FIFO is never opened.
+_sandy_env_file_state() {
+    if [ -L "$1" ]; then
+        printf 'link:%s' "$(_sandy_link_hex "$1")"
+    elif [ -p "$1" ]; then
+        printf 'fifo'
+    elif [ -d "$1" ]; then
+        printf 'dir'
+    elif [ -f "$1" ]; then
+        printf 'sha256:%s' "$(_sandy_file_sha256 "$1")"
+    else
+        printf 'none'
+    fi
+}
+# Launch: append one "#envfile<TAB><path, hex><TAB><state>" line per watched
+# entry (E records) of workspace $2 to snapshot $1, then "#envfiles-recorded",
+# which tells the session end that the listing is complete.
+_sandy_env_file_snapshot() {
+    local _r _t0=$SECONDS _dur
+    while IFS= read -r -d '' _r; do
+        case "$_r" in E*) ;; *) continue ;; esac
+        _r="${_r#E}"
+        printf '#envfile\t%s\t%s\n' "$(_sandy_hex "$_r")" "$(_sandy_env_file_state "$2/$_r")" >> "$1"
+    done < <(_sandy_env_files "$2")
+    printf '#envfiles-recorded\n' >> "$1"
+    _dur=$((SECONDS - _t0))
+    if [ "$_dur" -gt 5 ]; then
+        info "The launch .env scan took ${_dur}s (the directories within $_SANDY_ENV_SCAN_DEPTH levels of the workspace root; see _sandy_env_scan_skip_dirs for what it never enters)."
+    fi
+    return 0
+}
+# Session end: print, on stderr, the watched entries of workspace $2 created
+# or changed since snapshot $1 listed them, and the directories the scan could
+# not list. Nothing when the snapshot has no #envfiles-recorded line or there
+# is nothing to say. A removed entry is not reported (a missing file loads
+# nothing), and no removal is offered. The scan is timed: the session can
+# make it slow (many directories within the depth), and a slow one says so.
+_sandy_env_file_report() {
+    local _r _p _hx _s0 _s _what _lines="" _skips="" _unl="" _nunl=0 _t0=$SECONDS _dur
+    grep -qx '#envfiles-recorded' "$1" 2>/dev/null || return 0
+    while IFS= read -r -d '' _r; do
+        _p="${_r#?}"
+        case "$_r" in
+            U*) _nunl=$((_nunl + 1))
+                [ "$_nunl" -le 10 ] && _unl="$_unl$(printf '%s/%q' "$2" "$_p")"$'\n'
+                continue ;;
+        esac
+        _hx="$(_sandy_hex "$_p")"
+        _s0="$(awk -F '\t' -v h="$_hx" '$1 == "#envfile" && $2 == h { print "x" $3; exit }' "$1" 2>/dev/null || true)"
+        _s="$(_sandy_env_file_state "$2/$_p")"
+        if [ -z "$_s0" ]; then _what="created"
+        elif [ "$_s0" != "x$_s" ]; then _what="changed"
+        else continue; fi
+        case "$_s" in
+            link:*) _what="$_what; a symbolic link -> $(printf '%q' "$(readlink "$2/$_p" 2>/dev/null || echo '?')")" ;;
+            fifo)   _what="$_what; a FIFO: a host gemini run there blocks reading it" ;;
+            dir)    _what="$_what; a directory: Gemini stops its search there, so no .env above it is loaded" ;;
+        esac
+        _lines="$_lines$(printf '%s/%q (%s)' "$2" "$_p" "$_what")"$'\n'
+    done < <(_sandy_env_files "$2")
+    _dur=$((SECONDS - _t0))
+    if [ -n "$_lines" ] || [ -n "$_unl" ]; then
+        while IFS= read -r _s; do
+            [ -n "$_s" ] && _skips="${_skips:+$_skips, }$_s"
+        done < <(_sandy_env_scan_skip_dirs)
+    fi
+    if [ -n "$_lines" ]; then
+        printf "\n${YELLOW:-}[sandy]${NC:-} .env files CREATED or CHANGED during this session:\n" >&2
+        while IFS= read -r _p; do
+            [ -n "$_p" ] && printf "${YELLOW:-}[sandy]${NC:-}   %s\n" "$_p" >&2
+        done <<< "$_lines"
+        printf "${YELLOW:-}[sandy]${NC:-} A Gemini CLI run on your host in that directory, or below it, loads the nearest one into\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} its environment (from a .gemini/.env, every variable), which can change what it runs and\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} where it sends your credentials. A .env may well be yours, so sandy leaves it writable and\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} offers no removal: review each one before you run gemini on the host here.\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} (Detection only. Scanned: the workspace root and %s directory levels below it, not\n" "$_SANDY_ENV_SCAN_DEPTH" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} entering %s, or a linked directory.)\n\n" "$_skips" >&2
+    fi
+    if [ -n "$_unl" ]; then
+        printf "\n${YELLOW:-}[sandy]${NC:-} %s director%s could not be scanned for .env files (not readable); a host gemini run\n" "$_nunl" "$([ "$_nunl" = 1 ] && echo y || echo ies)" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} can still open a .env in one by name. Check them yourself%s:\n" "$([ "$_nunl" -gt 10 ] && echo ' (the first 10)')" >&2
+        while IFS= read -r _p; do
+            [ -n "$_p" ] && printf "${YELLOW:-}[sandy]${NC:-}   %s\n" "$_p" >&2
+        done <<< "$_unl"
+        printf "\n" >&2
+    fi
+    if [ "$_dur" -gt 5 ]; then
+        printf "${YELLOW:-}[sandy]${NC:-} The session-end .env scan took %ss (the directories within %s levels of the workspace root).\n" "$_dur" "$_SANDY_ENV_SCAN_DEPTH" >&2
+    fi
+    return 0
+}
+
 # Session end: every git admin dir (_sandy_git_admin_dirs) not recorded in
 # snapshot $1 (#gitdir lines) was created during the session. Reported, never
 # removed: it may be the user's own `git worktree add` or submodule.
@@ -2537,6 +2726,7 @@ _sandy_uchg_files() {
 .claude/settings.json
 .claude/settings.local.json
 .gemini/settings.json
+.gemini/.env
 .mcp.json
 .envrc
 .pre-commit-config.yaml
@@ -3176,7 +3366,7 @@ _sandy_session_end_protected_report() {
             printf "${YELLOW}[sandy]${NC} Sandy watches these paths because they auto-execute code or steer an agent under\n" >&2
             printf "${YELLOW}[sandy]${NC} common operations: git hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`,\n" >&2
             printf "${YELLOW}[sandy]${NC} IDE/shell/tool configs on project open or next use, and the .claude/ and .gemini/\n" >&2
-            printf "${YELLOW}[sandy]${NC} commands, agents, plugins, skills, extensions and settings are\n" >&2
+            printf "${YELLOW}[sandy]${NC} commands, agents, plugins, skills, extensions, settings and .gemini/.env are\n" >&2
             printf "${YELLOW}[sandy]${NC} read by the agent CLI on your host at its next start. Most are kept away from your\n" >&2
             printf "${YELLOW}[sandy]${NC} host workspace (read-only, or a sandbox-only copy) only when they exist at launch;\n" >&2
             printf "${YELLOW}[sandy]${NC} .claude/skills/ never is.\n" >&2
@@ -3219,6 +3409,9 @@ _sandy_session_end_protected_report() {
         _sandy_protected_hash_report \
             "$(_sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch")" \
             "$SANDBOX_DIR/.protected-copies"
+        # .env files created or changed in-session (#envfile records; only
+        # when the launch recorded them).
+        _sandy_env_file_report "$SANDBOX_DIR/.protected-existed-at-launch" "$WORK_DIR"
         # Git admin dirs created in-session (#gitdir records; only when the
         # launch got as far as recording them).
         if grep -qx '#gitdirs-recorded' "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
@@ -3525,7 +3718,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Cod
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'); a single trailing comma is accepted and dropped (2.9.1), so the launch, the container and the session marker see 'claude' for 'claude,'. 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding modelConfigs.customOverrides (and, on every gemini launch since 2.10.0, security.auth.selectedType and enforcedType, the auth type sandy selected) -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -3545,7 +3738,7 @@ SANDY_SCREENSHOT_DIR|path|||0.12.0|deprecated|Host directory containing screensh
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
 CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
 GEMINI_MODEL|string|||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Gemini model override.
-SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Gemini credential probe strategy. auto also mounts the host Gemini OAuth credentials and Google ADC file when present, even beside GEMINI_API_KEY. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
+SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Gemini credential probe strategy. auto also mounts the host Gemini OAuth credentials and Google ADC file when present, even beside GEMINI_API_KEY. oauth and adc (2.10.0) withhold GEMINI_API_KEY from the container, except in a combo with opencode, which reads it. Ordered tier (2.9.0): from a workspace .sandy/config, api_key and the value the environment or host config resolved (default auto) are passive-safe; any other value is approval-gated, because it brings in an account credential the host did not choose.
 SANDY_GEMINI_EXTENSIONS|string|||0.9.0|deprecated|DEPRECATED in 2.10.0, removal in 3.0.0 with the gemini agent (README ## Deprecated). Comma-separated Gemini extensions to enable.
 GOOGLE_CLOUD_PROJECT|string|||0.9.0|stable|Google Cloud project for Vertex AI.
 GOOGLE_CLOUD_LOCATION|string|||0.9.0|stable|Google Cloud location for Vertex AI.
@@ -4350,7 +4543,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
-    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .gemini/.env, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--ack-report"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Acknowledge the session-end report a daemon session of the workspace recorded in its sandbox (protected paths that appeared, changed or were replaced while nobody was reading the supervisor log; #554): prints it once more and removes it, so --start, --attach, --stop and terminal launches stop showing it. Filesystem-only. Exit 0 when no report is pending afterwards (including none to begin with), 1 otherwise. Sub-options: --workspace PATH."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME. When the destination has no workspace there, the workspace itself is copied first, whole (.git, untracked and ignored files, symlinks as links), as a new directory (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist. --exclude PATTERN (repeatable, rsync syntax, relative to the workspace root) keeps paths out of the workspace copy; across a CPU architecture change its .venv/ and node_modules/ are skipped too. Credential-bearing files, in the sandbox and in a copied workspace, are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync-from"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"The reverse of --rsync (#409): PULL a sandbox from another host into this one, over outbound ssh + rsync from here only (the source is never modified). The copy is named for THIS host workspace path and gets the same rewrites as --rsync: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json. The source workspace defaults to the same path relative to $HOME on the remote. A local workspace named with --workspace that does not exist yet is pulled too, whole, as a new directory, and moves into place with the sandbox (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist (--exclude PATTERN as for --rsync). Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. It lands in a hidden staging directory and is renamed into place only once every step succeeds, so a failed pull installs nothing. Refuses while a live session holds the source on the remote and never overwrites a sandbox already here. Takes the source host as its argument. Sub-options: --workspace PATH, --src-workspace PATH, --src-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
@@ -22601,7 +22794,24 @@ load_gemini_credentials() {
     if [ "$GEMINI_SELECTED_AUTH" = "oauth-personal" ]; then
         warn "Gemini will use your host Google-account login (~/.gemini OAuth). If this is a personal Google account (free, Google AI Pro/Ultra), Gemini CLI no longer serves it (since 2026-06-18): set GEMINI_API_KEY or use Vertex AI (gcloud ADC). Gemini Code Assist Standard/Enterprise logins still work. Antigravity CLI support is planned for sandy 3.0.0."
     fi
-    if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "$GEMINI_CRED_TMPDIR" ] && [ -z "$GEMINI_ADC_MOUNT" ]; then
+    # oauth and adc withhold GEMINI_API_KEY from Gemini (2.10.0), so the mode's
+    # own file is the only credential it can have: a pinned mode whose file is
+    # missing leaves Gemini with nothing, whatever the host key.
+    local _key="${GEMINI_API_KEY:-}" _missing=""
+    case "$mode" in
+        oauth) _key=""; [ -n "$GEMINI_CRED_TMPDIR" ] || _missing="no host ~/.gemini/oauth_creds.json (or tokens.json): run 'gemini auth' on the host" ;;
+        adc)   _key=""; [ -n "$GEMINI_ADC_MOUNT" ] || _missing="no host ~/.config/gcloud/application_default_credentials.json: run 'gcloud auth application-default login' on the host" ;;
+    esac
+    if [ -n "$_missing" ]; then
+        # Gemini would open its auth dialog (interactive) or fail (headless)
+        # with no credential: refuse where nobody can answer the dialog.
+        if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] || [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
+            echo "[sandy] ERROR: SANDY_GEMINI_AUTH=$mode but $_missing. GEMINI_API_KEY is not used in this mode. Refusing rather than starting a Gemini session with no credential that nobody can log in to." >&2
+            _sandy_daemon_fatal
+            exit 1
+        fi
+        warn "SANDY_GEMINI_AUTH=$mode but $_missing. Gemini has NO credential this launch (GEMINI_API_KEY is not used in this mode); it will ask you to authenticate."
+    elif [ -z "$_key" ] && [ -z "$GEMINI_CRED_TMPDIR" ] && [ -z "$GEMINI_ADC_MOUNT" ]; then
         warn "No Gemini credentials found. Set GEMINI_API_KEY, or run 'gcloud auth application-default login' on the host (Vertex AI). A Google-account login ('gemini' on the host) works only for Gemini Code Assist Standard/Enterprise; Google no longer serves personal accounts."
     fi
     _gemini_write_auth_type
@@ -24257,7 +24467,12 @@ fi
 #
 # What it may clobber, stated: the merge REPLACES arrays (no mergeStrategy on
 # modelConfigs.*), so a system value for a key wins wholesale. The file
-# therefore holds ONE key, modelConfigs.customOverrides, and nothing else.
+# therefore holds at most two keys: modelConfigs.customOverrides (only with
+# SANDY_EFFORT) and, on every gemini launch with a credential (2.10.0),
+# security.auth.selectedType and .enforcedType, the auth type sandy selected. Measured on the
+# 0.70.0 bundle: mergeSettings(system, systemDefaults, user, workspace)
+# deep-merges schemaDefaults, systemDefaults, user, workspace, then system, so
+# the system value of that scalar wins over a workspace one.
 # `overrides` -- the key gemini-cli's own docs use in their examples -- is left
 # entirely to the user; a user's own `customOverrides` IS shadowed while
 # SANDY_EFFORT is set. At equal match depth a sandy entry sorts after a user
@@ -24280,36 +24495,58 @@ if [ -L "$_sandy_gemini_settings_file" ]; then
     warn "Removed a symlink at ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/} -- sandy regenerates this file every launch and will not write through a link."
     rm -f "$_sandy_gemini_settings_file"
 fi
-_sandy_gemini_level=""; _sandy_gemini_budget=""
+_sandy_gemini_level=""; _sandy_gemini_budget=""; _sandy_gemini_auth=""; _sandy_gemini_body=""
 if _sandy_agent_has gemini; then
     case "${SANDY_EFFORT:-}" in
         low)            _sandy_gemini_level=LOW;  _sandy_gemini_budget=1024 ;;
         medium)         _sandy_gemini_level=HIGH; _sandy_gemini_budget=8192 ;;
         high|xhigh|max) _sandy_gemini_level=HIGH; _sandy_gemini_budget=24576 ;;
     esac
+    # The auth type sandy selected (load_gemini_credentials), pinned as
+    # security.auth.selectedType (2.10.0): the key Gemini CLI reads
+    # (settings.merged.security.auth.selectedType; the top-level
+    # selectedAuthType sandy also writes into ~/.gemini is the legacy name).
+    # A workspace .gemini/settings.json, committed or written by an earlier
+    # session, would otherwise outrank the user-scope choice sandy seeds and
+    # pick another credential sandy forwarded. security.auth.enforcedType is
+    # pinned to the same type: a workspace one naming another type would
+    # otherwise fail a -p run and park a session on an auth dialog limited to
+    # that type. Only sandy's own literals.
+    case "${GEMINI_SELECTED_AUTH:-}" in
+        gemini-api-key|oauth-personal|vertex-ai) _sandy_gemini_auth="$GEMINI_SELECTED_AUTH" ;;
+    esac
 fi
 if [ -n "$_sandy_gemini_level" ]; then
+    _sandy_gemini_body="$(printf '  "modelConfigs": {\n    "customOverrides": [\n      {\n        "match": { "model": "chat-base-3" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "%s" } } }\n      },\n      {\n        "match": { "model": "chat-base-2.5" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingBudget": %s } } }\n      }\n    ]\n  }' \
+        "$_sandy_gemini_level" "$_sandy_gemini_budget")"
+fi
+if [ -n "$_sandy_gemini_auth" ]; then
+    _sandy_gemini_body="${_sandy_gemini_body:+$_sandy_gemini_body,
+}$(printf '  "security": { "auth": { "selectedType": "%s", "enforcedType": "%s" } }' "$_sandy_gemini_auth" "$_sandy_gemini_auth")"
+fi
+if [ -n "$_sandy_gemini_body" ]; then
     mkdir -p "$(_sandy_launch_dir)" 2>/dev/null || true
     _sandy_gemini_tmp="$(mktemp "$_sandy_gemini_settings_file.XXXXXX" 2>/dev/null)" || _sandy_gemini_tmp=""
-    if [ -n "$_sandy_gemini_tmp" ] && printf '{\n  "modelConfigs": {\n    "customOverrides": [\n      {\n        "match": { "model": "chat-base-3" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "%s" } } }\n      },\n      {\n        "match": { "model": "chat-base-2.5" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingBudget": %s } } }\n      }\n    ]\n  }\n}\n' \
-            "$_sandy_gemini_level" "$_sandy_gemini_budget" > "$_sandy_gemini_tmp" \
+    if [ -n "$_sandy_gemini_tmp" ] && printf '{\n%s\n}\n' "$_sandy_gemini_body" > "$_sandy_gemini_tmp" \
         && chmod 644 "$_sandy_gemini_tmp" && mv -f "$_sandy_gemini_tmp" "$_sandy_gemini_settings_file"; then
         # gemini-cli takes any file name here. Not `settings.json`: the suite
         # ratchets that no read-only settings.json overlay exists (the pre-0.11.3
         # Claude approach), and the derived system-defaults path lands at
-        # /etc/sandy-gemini/system-defaults.json, which does not exist.
+        # /etc/sandy-gemini/system-defaults.json, which does not exist. The
+        # destination keeps its 2.7.0 name, effort.json, although it now
+        # carries the auth pin too: it is part of the documented mount set.
         RUN_FLAGS+=(-v "$_sandy_gemini_settings_file:/etc/sandy-gemini/effort.json:ro")
         RUN_FLAGS+=(-e "GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json")
     else
         [ -n "$_sandy_gemini_tmp" ] && rm -f "$_sandy_gemini_tmp"
-        warn "SANDY_EFFORT=$SANDY_EFFORT not applied to gemini: could not write ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/}"
+        warn "Gemini system settings not applied (${SANDY_EFFORT:+SANDY_EFFORT=$SANDY_EFFORT, }${_sandy_gemini_auth:+auth type $_sandy_gemini_auth}): could not write ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/}"
     fi
 else
     # Not applicable this launch: leave no stale pin lying around for a reader
     # to mistake for the one in effect.
     rm -f "$_sandy_gemini_settings_file"
 fi
-unset _sandy_gemini_settings_file _sandy_gemini_level _sandy_gemini_budget _sandy_gemini_tmp
+unset _sandy_gemini_settings_file _sandy_gemini_level _sandy_gemini_budget _sandy_gemini_tmp _sandy_gemini_auth _sandy_gemini_body
 # SANDY_AGENT_ARGS_<AGENT> (per-agent operator args, #210):
 # _sandy_build_agent_cmd runs CONTAINER-side (it lives in the user-setup.sh
 # heredoc), so these five resolved values have to cross the boundary or the
@@ -25071,8 +25308,27 @@ fi
 if _sandy_agent_has gemini; then
     # Disable Gemini's per-tool sandbox — sandy provides whole-session isolation.
     RUN_FLAGS+=(-e "GEMINI_SANDBOX=false")
+    # One credential per agent (2.10.0, like Codex #429): an explicit
+    # SANDY_GEMINI_AUTH=oauth or adc means that account credential is the one
+    # Gemini credential in the box, so GEMINI_API_KEY is withheld (and pinned
+    # empty below, _sandy_gemini_pin_env). auto and api_key keep it. The
+    # exception is a combo with opencode, which reads GEMINI_API_KEY from the
+    # environment for its Google provider: the key stays and the launch says so.
     if [ -n "${GEMINI_API_KEY:-}" ]; then
-        _sandy_add_secret_env GEMINI_API_KEY "$GEMINI_API_KEY"
+        case "${SANDY_GEMINI_AUTH:-auto}" in
+            oauth|adc)
+                if _sandy_agent_has opencode; then
+                    _sandy_add_secret_env GEMINI_API_KEY "$GEMINI_API_KEY"
+                    info "SANDY_GEMINI_AUTH=${SANDY_GEMINI_AUTH}: GEMINI_API_KEY still reaches the container because opencode is in this combo and reads it from the environment."
+                else
+                    if [ -n "${GEMINI_SELECTED_AUTH:-}" ]; then
+                        info "SANDY_GEMINI_AUTH=${SANDY_GEMINI_AUTH}: GEMINI_API_KEY is withheld from the container (Gemini uses its ${SANDY_GEMINI_AUTH} credential)."
+                    else
+                        info "SANDY_GEMINI_AUTH=${SANDY_GEMINI_AUTH}: GEMINI_API_KEY is withheld from the container."
+                    fi
+                fi ;;
+            *) _sandy_add_secret_env GEMINI_API_KEY "$GEMINI_API_KEY" ;;
+        esac
     fi
     if [ -n "${GEMINI_MODEL:-}" ]; then
         RUN_FLAGS+=(-e "GEMINI_MODEL=$GEMINI_MODEL")
@@ -25694,6 +25950,9 @@ done < <(_sandy_git_admin_dirs "$WORK_DIR")
 while IFS=$'\t' read -r _gd_snap _gd_tgt; do
     [ -n "$_gd_snap" ] && printf '#gitlink\t%s\t%s\n' "$(_sandy_hex "$_gd_snap")" "$_gd_tgt" >> "$SANDBOX_DIR/.protected-existed-at-launch"
 done < <(_sandy_git_admin_links "$WORK_DIR")
+# The .env files a host-side Gemini CLI would load (#envfile lines; detection
+# only, _sandy_env_file_report).
+_sandy_env_file_snapshot "$SANDBOX_DIR/.protected-existed-at-launch" "$WORK_DIR"
 printf '#gitdirs-recorded\n' >> "$SANDBOX_DIR/.protected-existed-at-launch"
 unset _gd_snap _gd_tgt
 _sandy_uchg_lock "$SANDBOX_DIR" "$WORK_DIR"
@@ -25775,6 +26034,141 @@ if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SA
             ;;
     esac
 fi
+
+# --- Gemini: only sandy's credential selection reaches Gemini CLI (2.10.0) ---
+# Gemini CLI loads <workspace>/.gemini/.env, or else <workspace>/.env (the
+# workspace is its working directory, and sandy trusts it), into its own
+# environment, for every variable not already set: so a key, project or
+# endpoint there would reach the agent beside, or instead of, the credential
+# sandy selected (one credential per agent). Each variable below that nothing
+# else forwards to this container (the per-agent blocks, SANDY_EXTRA_ENV, the
+# ADC mount) is set explicitly: Node counts a variable set to "" as present,
+# so the file's value is never loaded, and Gemini CLI 0.70.0 reads every one
+# of them through a truthy test (`||`, `=== "true"`, `!== "1"`), so "" means
+# unset, or, for the GEMINI_TELEMETRY_* switches, reads "" as false (its
+# parseBooleanEnvFlag), which turns telemetry off. The ones it reads with `??`
+# and then validates or uses as a value (CODE_ASSIST_ENDPOINT,
+# GOOGLE_CLOUD_UNIVERSE_DOMAIN, GEMINI_TELEMETRY_TARGET and _OTLP_PROTOCOL,
+# where "" would be an error or a broken URL) are set to Gemini's own defaults
+# instead. GEMINI_CLI_HOME relocates Gemini's whole home (credentials,
+# extensions, policies); "" falls back to the real one. The proxy variables
+# and NODE_TLS_REJECT_UNAUTHORIZED (Node reads it per connection, and only "0"
+# turns checks off) would route API traffic elsewhere: sandy's own egress
+# proxy is transparent and sets none of them, so "" (no proxy) is what the
+# session had anyway; a corporate proxy is forwarded with SANDY_EXTRA_ENV,
+# which this then leaves alone. A variable another agent of this container
+# was given is never touched: it is already in the env-file or the argv, and a
+# later -e would override it. Names one per line: "NAME" or "NAME=default".
+_sandy_gemini_env_pins() {
+    cat <<'PINS'
+GEMINI_API_KEY
+GOOGLE_API_KEY
+GOOGLE_CLOUD_PROJECT
+GOOGLE_CLOUD_PROJECT_ID
+GCLOUD_PROJECT
+GOOGLE_CLOUD_QUOTA_PROJECT
+GOOGLE_CLOUD_LOCATION
+GOOGLE_CLOUD_REGION
+GOOGLE_GENAI_USE_VERTEXAI
+GOOGLE_GENAI_USE_GCA
+GOOGLE_CLOUD_ACCESS_TOKEN
+GOOGLE_APPLICATION_CREDENTIALS
+CLOUDSDK_CONFIG
+GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES
+GEMINI_CLI_USE_COMPUTE_ADC
+GEMINI_DEFAULT_AUTH_TYPE
+GEMINI_API_KEY_AUTH_MECHANISM
+GEMINI_CLI_CUSTOM_HEADERS
+GOOGLE_GEMINI_BASE_URL
+GOOGLE_VERTEX_BASE_URL
+CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com
+GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com
+GEMINI_CLI_HOME
+GEMINI_FORCE_FILE_STORAGE
+GEMINI_FORCE_ENCRYPTED_FILE_STORAGE
+google_application_credentials
+gcloud_project
+google_cloud_project
+OTLP_GOOGLE_CLOUD_PROJECT
+GCE_METADATA_HOST
+GCE_METADATA_IP
+METADATA_SERVER_DETECTION
+GEMINI_TELEMETRY_ENABLED
+GEMINI_TELEMETRY_TRACES_ENABLED
+GEMINI_TELEMETRY_TARGET=local
+GEMINI_TELEMETRY_OTLP_ENDPOINT
+GEMINI_TELEMETRY_OTLP_PROTOCOL=grpc
+GEMINI_TELEMETRY_OTLP_HEADERS
+GEMINI_TELEMETRY_LOG_PROMPTS
+GEMINI_TELEMETRY_OUTFILE
+GEMINI_TELEMETRY_USE_COLLECTOR
+GEMINI_TELEMETRY_USE_CLI_AUTH
+OTEL_EXPORTER_OTLP_ENDPOINT
+OTEL_EXPORTER_OTLP_HEADERS
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+OTEL_EXPORTER_OTLP_TRACES_HEADERS
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+OTEL_EXPORTER_OTLP_LOGS_HEADERS
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+OTEL_EXPORTER_OTLP_METRICS_HEADERS
+HTTPS_PROXY
+https_proxy
+HTTP_PROXY
+http_proxy
+ALL_PROXY
+all_proxy
+NODE_TLS_REJECT_UNAUTHORIZED
+PINS
+}
+# Append the pins to RUN_FLAGS (gemini sessions only); env-file $1 (may be
+# empty) holds what the secret env-file forwards. Sets _SANDY_GEMINI_PINNED
+# to the names pinned, space-separated.
+_sandy_gemini_pin_env() {
+    local _l _n _v _f _a _set
+    _SANDY_GEMINI_PINNED=""
+    _sandy_agent_has gemini || return 0
+    while IFS= read -r _l; do
+        [ -n "$_l" ] || continue
+        _n="${_l%%=*}"; _v=""
+        case "$_l" in *=*) _v="${_l#*=}" ;; esac
+        _set=0
+        if [ -n "$1" ] && [ -f "$1" ] && grep -q "^${_n}=" "$1" 2>/dev/null; then _set=1; fi
+        for _a in ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}; do
+            case "$_a" in "$_n"|"$_n"=*) _set=1; break ;; esac
+        done
+        [ "$_set" = 0 ] || continue
+        RUN_FLAGS+=(-e "$_n=$_v")
+        _SANDY_GEMINI_PINNED="${_SANDY_GEMINI_PINNED:+$_SANDY_GEMINI_PINNED }$_n"
+    done < <(_sandy_gemini_env_pins)
+    # Say so when the env file Gemini would load in the container sets one of
+    # them, by name only (the values are never read out). Its search order
+    # from the workspace: <ws>/.gemini/.env, <ws>/.env, then each parent
+    # directory, and at the top ~/.gemini/.env and ~/.env. The parents are
+    # the image's own directories (or ones Docker creates for the mounts),
+    # none of them host paths; ~/.gemini is this sandbox's gemini/ directory,
+    # agent-writable and kept across launches, so a file there is checked too
+    # (never through a link). The pins above apply whichever file it is.
+    for _f in "$WORK_DIR/.gemini/.env" "$WORK_DIR/.env" "$SANDBOX_DIR/gemini/.env"; do
+        [ -f "$_f" ] || continue
+        if [ "$_f" = "$SANDBOX_DIR/gemini/.env" ] && [ -L "$_f" ]; then continue; fi
+        _set=""
+        for _n in $_SANDY_GEMINI_PINNED; do
+            if grep -qE "^[[:space:]]*(export[[:space:]]+)?${_n}[[:space:]]*[=:]" "$_f" 2>/dev/null; then
+                _set="${_set:+$_set }$_n"
+            fi
+        done
+        if [ -n "$_set" ]; then
+            case "$_f" in
+                "$SANDBOX_DIR"/*) _a="this sandbox's ~/.gemini/.env (${_f#"$SANDY_HOME"/})" ;;
+                *) _a="${_f#"$WORK_DIR"/}" ;;
+            esac
+            warn "Gemini: $_a sets $_set, which Gemini CLI would load as its own credential, project or endpoint; inside sandy they come only from sandy's credential selection (set GEMINI_API_KEY, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, GOOGLE_GENAI_USE_VERTEXAI or GOOGLE_API_KEY in sandy's config to use one), so it does not."
+        fi
+        break
+    done
+    return 0
+}
+_sandy_gemini_pin_env "${SECRET_ENV_FILE:-}"
 
 [ "$_sandy_secret_env_count" -gt 0 ] && RUN_FLAGS+=(--env-file "$SECRET_ENV_FILE")
 

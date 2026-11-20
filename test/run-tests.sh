@@ -21909,7 +21909,8 @@ names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
          '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved',
          '_sandy_session_end_protected_report', '_sandy_session_report_path',
-         '_sandy_session_report_add', '_sandy_session_end_report']
+         '_sandy_session_report_add', '_sandy_session_end_report',
+         '_sandy_env_scan_skip_dirs', '_sandy_env_files', '_sandy_env_file_state', '_sandy_env_file_report']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
 b = src.index('done < <(_sandy_protected_files; _sandy_watched_git_files)\n', a) + len('done < <(_sandy_protected_files; _sandy_watched_git_files)\n')
@@ -29049,6 +29050,323 @@ rm -rf "$_S251_D"
 unset _S251_SKV _S251_C _S251_O _S251_R _S251_R1 _S251_R2 _S251_D _S251_W
 unset -f _s251_ws _s251_gmount _s251_chk
 
+section "§252: a workspace .gemini/.env is protected like .gemini/settings.json; a plain .env and nested .env / .gemini/.env files created or changed in-session are reported at session end (detection only), recorded for a daemon too; in a gemini session only sandy's credential selection reaches Gemini CLI"
+# ============================================================
+# WHY. A host-side Gemini CLI run loads the first .gemini/.env or .env it
+# finds from its working directory upward into its own environment, so one
+# a session writes changes that host run. The root .gemini/.env is now a
+# protected file (:ro when present, .gemini pinned, hashed, macOS-locked,
+# creation reported). A plain .env stays writable (applications use it): the
+# launch lists every .env and .gemini/.env in the root and up to
+# _SANDY_ENV_SCAN_DEPTH (4) directory levels below, skipping dependency and
+# cache trees (node_modules, .git, .venv, ...), and the session end names
+# those created or changed, with no removal offered. Asserted on a CODEX
+# session (no gemini overlay pins .gemini). Uses the §248 stubs and helpers.
+_S252_PATH="$_S248_PATH"; _S252_CWS=/home/sandy/ws
+_s252_ws() {   # $1 = workspace: a git dir
+    mkdir -p "$1/.git/objects" "$1/.git/refs"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+}
+# The .env block of output file $1, one line per entry, prefix stripped.
+_s252_block() { awk '/\.env files CREATED or CHANGED during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$1" | sed "s/$(printf '\033')\\[[0-9;]*m//g"; }
+# The .env block of $1, from its heading to the blank line after it.
+_s252_text() { awk '/\.env files CREATED or CHANGED during this session/ { on = 1 } on && /^$/ { exit } on { print }' "$1"; }
+# (a) .gemini/.env existing at launch: :ro, .gemini pinned once before it, and
+# a rewrite through the rw workspace is in the CHANGED block, not the .env one.
+_S252_C=s252-ro; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_S252_W/.gemini"; printf 'GEMINI_MODEL=x\n' > "$_S252_W/.gemini/.env"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.gemini/.env PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S252_W/.gemini/.env:$_S252_CWS/.gemini/.env:ro" "$_S252_A" || echo "no :ro mount of .gemini/.env"
+    awk -v pin="$_S252_W/.gemini:$_S252_CWS/.gemini" -v ro="$_S252_W/.gemini/.env:$_S252_CWS/.gemini/.env:ro" \
+        'p == "-v" { n++; if ($0 == pin) { k++; pi = n } if ($0 == ro) ri = n } { p = $0 }
+         END { if (k != 1) { print ".gemini pinned " k + 0 " times"; exit } if (!(pi < ri)) print "the .gemini pin is not before the :ro mount" }' "$_S252_A"
+    _s248_block "$_S252_O" | grep -qxF .gemini/.env || echo "the rewrite is not in the CHANGED block"
+    if _s252_block "$_S252_O" | grep -qF .gemini/.env; then echo "the root .gemini/.env is also in the .env block"; fi; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(a)" "$_S252_C"; fi
+check "§252(a) codex session: an existing .gemini/.env is mounted :ro, .gemini is pinned once before it, and a rewrite through the rw workspace is reported in the CHANGED block (mutation: drop .gemini/.env from _sandy_protected_files; scan the root .gemini/.env as a plain env file too; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (b) macOS: locked while the agent runs, unlocked by cleanup.
+_S252_C=s252-mac; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_S252_W/.gemini"; printf 'GEMINI_MODEL=x\n' > "$_S252_W/.gemini/.env"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S252_PATH"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S252_C")" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qxF "$_S252_W/.gemini/.env" "$_A6_DIR/$_S252_C/flags-during-run" 2>/dev/null || echo "not locked during the run"
+    grep -qF "Locked until this session ends (macOS chflags uchg): .gemini/.env " "$_A6_DIR/$_S252_C/out" || echo "not named in the lock notice"
+    if [ -s "$_A6_DIR/$_S252_C/flags" ]; then echo "still locked after: $(tr '\n' ' ' < "$_A6_DIR/$_S252_C/flags")"; fi; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(b)" "$_S252_C"; fi
+check "§252(b) macOS: .gemini/.env is locked (chflags uchg) while the agent runs and unlocked by cleanup (mutation: drop it from _sandy_uchg_files; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (c) no .gemini at launch; the session creates .gemini/.env: reported as a
+# protected path that appeared (with its removal), nothing mounted for it.
+_S252_C=s252-gnew; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 \
+    S248_RUN='mkdir -p .gemini && printf "X=1\n" > .gemini/.env' PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_S252_W/.gemini/.env" ] || echo "control: the session did not create it"
+    if grep -qF "/.gemini" "$_S252_A"; then echo "something under .gemini was mounted"; fi
+    grep -A12 "Protected paths appeared during this session" "$_S252_O" | grep -qF "$_S252_W/.gemini/.env" || echo "the creation is not reported"; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(c)" "$_S252_C"; fi
+check "§252(c) a .gemini/.env created during a session that had none is reported at session end, and nothing was mounted for it (mutation: drop it from _sandy_protected_files; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (d) a plain .env created in-session: in the .env block, which names the
+# host-side Gemini CLI and offers no removal; nothing was mounted for it.
+_S252_C=s252-new; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='printf "X=1\n" > .env' PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_S252_W/.env" ] || echo "control: the session did not create it"
+    if grep -qF "$_S252_W/.env:" "$_S252_A"; then echo "something was mounted for .env"; fi
+    [ "$(_s252_block "$_S252_O")" = "$_S252_W/.env (created)" ] || echo "block: $(_s252_block "$_S252_O" | tr '\n' ' ')"
+    _s252_text "$_S252_O" | grep -qF "A Gemini CLI run on your host" || echo "the block does not say why"
+    if _s252_text "$_S252_O" | grep -qE '(^|[ (])rm '; then echo "a removal was offered"; fi
+    [ "$(cat "$_S252_W/.env")" = "X=1" ] || echo "the file was changed or removed"; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(d)" "$_S252_C"; fi
+check "§252(d) a plain .env created in-session is reported at session end, saying a host-side Gemini CLI loads it, with no removal offered and nothing mounted (mutation: drop the _sandy_env_file_report call, or the launch snapshot; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (e) a plain .env that existed at launch: changed -> reported as changed;
+# untouched -> no .env block at all.
+_S252_C=s252-chg; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"; printf 'APP=1\n' > "$_S252_W/.env"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_WRITE=.env PATH="$_S252_PATH"
+_S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S252_C")" ]; then echo "launch rc $_A6_RC"; fi
+    grep -q tampered "$_S252_W/.env" || echo "control: the session did not change it"
+    [ "$(_s252_block "$_S252_O")" = "$_S252_W/.env (changed)" ] || echo "changed block: $(_s252_block "$_S252_O" | tr '\n' ' ')"; } 2>&1)" || true
+_S252_C=s252-same; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"; printf 'APP=1\n' > "$_S252_W/.env"
+mkdir -p "$_S252_W/sub/.gemini"; printf 'APP=2\n' > "$_S252_W/sub/.env"; printf 'APP=3\n' > "$_S252_W/sub/.gemini/.env"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='cat .env sub/.env sub/.gemini/.env > ran' PATH="$_S252_PATH"
+_S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$_S252_R$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S252_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ -s "$_S252_W/ran" ] || echo "control: the session did not read them"
+    if grep -q "\.env files CREATED or CHANGED" "$_S252_O"; then echo "unchanged: reported $(_s252_block "$_S252_O" | tr '\n' ' ')"; fi; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(e)" "$_S252_C"; fi
+check "§252(e) a plain .env that existed at launch is reported as changed when the session rewrote it, and nothing is reported when no .env changed (mutation: report every listed file as changed; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (f) nested: sub/.env, sub/.gemini/.env and a/b/c/d/.env (4 levels down) and
+# a link at x/.env, created in-session, are reported; a/b/c/d/e/.env and
+# a/b/c/d/e/.gemini/.env (5 levels) and node_modules/p/.env are not scanned.
+_S252_C=s252-nest; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_S252_W/sub/.gemini" "$_S252_W/a/b/c/d/e/.gemini" "$_S252_W/node_modules/p" "$_S252_W/x"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 \
+    S248_RUN='for f in sub/.env sub/.gemini/.env a/b/c/d/.env a/b/c/d/e/.env a/b/c/d/e/.gemini/.env node_modules/p/.env; do printf "X=1\n" > "$f"; done; ln -s ../sub/.env x/.env' \
+    PATH="$_S252_PATH"
+_S252_O="$_A6_DIR/$_S252_C/out"; _S252_K="$(_s252_block "$_S252_O" | LC_ALL=C sort)"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S252_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_S252_W/a/b/c/d/e/.env" ] && [ -f "$_S252_W/node_modules/p/.env" ] && [ -L "$_S252_W/x/.env" ] || echo "control: the session did not create them"
+    for _f in sub/.env sub/.gemini/.env a/b/c/d/.env; do
+        printf '%s\n' "$_S252_K" | grep -qxF "$_S252_W/$_f (created)" || echo "$_f not reported"
+    done
+    printf '%s\n' "$_S252_K" | grep -qxF "$_S252_W/x/.env (created; a symbolic link -> ../sub/.env)" || echo "the link is not reported as one"
+    for _f in a/b/c/d/e/.env a/b/c/d/e/.gemini/.env node_modules/p/.env; do
+        if printf '%s\n' "$_S252_K" | grep -qF "$_S252_W/$_f "; then echo "$_f was scanned"; fi
+    done
+    [ "$(printf '%s\n' "$_S252_K" | grep -c .)" = 4 ] || echo "$(printf '%s\n' "$_S252_K" | grep -c .) entries"
+    _s252_text "$_S252_O" | grep -qF "4 directory levels below it" || echo "the depth is not stated"
+    _s252_text "$_S252_O" | grep -qF "node_modules" || echo "the skip list is not stated"; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(f)" "$_S252_C"; printf '%s\n' "$_S252_K" | sed 's/^/      block: /'; fi
+check "§252(f) nested .env and .gemini/.env files created up to 4 levels below the root (and a link at one) are reported; deeper ones and node_modules are not scanned (mutation: drop the depth filter; drop node_modules from the skip list; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (g) a daemon supervisor's session-end report records the .env block in the
+# sandbox (#554): it goes through _sandy_session_end_protected_report.
+_S252_C=s252-dmn; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 A6_TERM_ON_DETACH=1 \
+    S248_RUN='printf "X=1\n" > .env' PATH="$_S252_PATH" -- --start --workspace "$_S252_W"
+_S252_REC="$(_a6_sandbox "$_S252_C")/.session-end-report"
+_S252_R="$( { [ -f "$_S252_W/.env" ] || echo "the agent run never happened (rc $_A6_RC)"
+    grep -qF ".env files CREATED or CHANGED during this session" "$_S252_REC" 2>/dev/null || echo "the record has no .env block"
+    grep -qF "$_S252_W/.env (created)" "$_S252_REC" 2>/dev/null || echo "the record does not name .env"; } 2>&1)" || true
+[ -z "$_S252_R" ] || _a6_diag "§252(g)" "$_S252_C"
+check "§252(g) a daemon session's .env report is recorded in its sandbox's session-end record (mutation: run the .env report from cleanup() instead of inside _sandy_session_end_protected_report; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (h)-(k) Inside the container Gemini CLI would load <ws>/.gemini/.env or
+# <ws>/.env as well, for any variable not already set, which would put a
+# credential, project or endpoint sandy did not select beside the one it did.
+# So in a gemini session every such variable nothing else forwards is set on
+# the argv: empty, or Gemini's own default for the two it reads with `??`; one
+# that is forwarded (env-file or argv) is never overridden.
+_s252_pin() { _a6_pair "$1" -e "$2"; }   # $1 = args  $2 = NAME=VALUE
+_s252_argv_has() { grep -q "^$2=" "$1"; }   # $1 = args  $2 = NAME: on the argv at all
+_s252_envfile() { grep -q "^$2=" "${1%.args}.envfile" 2>/dev/null; }   # $1 = args  $2 = NAME
+# Every pin but GEMINI_API_KEY and GOOGLE_APPLICATION_CREDENTIALS (which a case may forward),
+# written out here rather than read from sandy, so dropping one there fails (h)-(k).
+_S252_GPINS="GOOGLE_API_KEY= GOOGLE_CLOUD_PROJECT= GOOGLE_CLOUD_PROJECT_ID= GCLOUD_PROJECT= GOOGLE_CLOUD_QUOTA_PROJECT= GOOGLE_CLOUD_LOCATION= GOOGLE_CLOUD_REGION= GOOGLE_GENAI_USE_VERTEXAI= GOOGLE_GENAI_USE_GCA= GOOGLE_CLOUD_ACCESS_TOKEN= CLOUDSDK_CONFIG= GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES= GEMINI_CLI_USE_COMPUTE_ADC= GEMINI_DEFAULT_AUTH_TYPE= GEMINI_API_KEY_AUTH_MECHANISM= GEMINI_CLI_CUSTOM_HEADERS= GOOGLE_GEMINI_BASE_URL= GOOGLE_VERTEX_BASE_URL= CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com GEMINI_CLI_HOME= GEMINI_FORCE_FILE_STORAGE= GEMINI_FORCE_ENCRYPTED_FILE_STORAGE= google_application_credentials= gcloud_project= google_cloud_project= OTLP_GOOGLE_CLOUD_PROJECT= GCE_METADATA_HOST= GCE_METADATA_IP= METADATA_SERVER_DETECTION= GEMINI_TELEMETRY_ENABLED= GEMINI_TELEMETRY_TRACES_ENABLED= GEMINI_TELEMETRY_TARGET=local GEMINI_TELEMETRY_OTLP_ENDPOINT= GEMINI_TELEMETRY_OTLP_PROTOCOL=grpc GEMINI_TELEMETRY_OTLP_HEADERS= GEMINI_TELEMETRY_LOG_PROMPTS= GEMINI_TELEMETRY_OUTFILE= GEMINI_TELEMETRY_USE_COLLECTOR= GEMINI_TELEMETRY_USE_CLI_AUTH= OTEL_EXPORTER_OTLP_ENDPOINT= OTEL_EXPORTER_OTLP_HEADERS= OTEL_EXPORTER_OTLP_TRACES_ENDPOINT= OTEL_EXPORTER_OTLP_TRACES_HEADERS= OTEL_EXPORTER_OTLP_LOGS_ENDPOINT= OTEL_EXPORTER_OTLP_LOGS_HEADERS= OTEL_EXPORTER_OTLP_METRICS_ENDPOINT= OTEL_EXPORTER_OTLP_METRICS_HEADERS= HTTPS_PROXY= https_proxy= HTTP_PROXY= http_proxy= ALL_PROXY= all_proxy= NODE_TLS_REJECT_UNAUTHORIZED="
+# And sandy pins nothing this list does not name (so a new pin gets an assertion too).
+_S252_R="$( { _l="$(awk '/^_sandy_gemini_env_pins\(\) \{/ { f = 1; next } f && /^PINS$/ { exit } f && !/cat <</ { print }' "$SANDY_SCRIPT" | LC_ALL=C sort)"
+    _w="$(printf '%s\n' $_S252_GPINS GEMINI_API_KEY= GOOGLE_APPLICATION_CREDENTIALS= | sed 's/=$//' | LC_ALL=C sort)"
+    [ -n "$_l" ] || echo "the pin list was not extracted"
+    [ "$_l" = "$_w" ] || echo "sandy pins differ: $(printf '%s\n' "$_l" | LC_ALL=C comm -3 - <(printf '%s\n' "$_w") | tr '\n\t' '  ')"; } 2>&1)" || true
+check "§252(h0) _sandy_gemini_env_pins is exactly the list (h)-(k) assert (${_S252_R:-ok})" test -z "$_S252_R"
+# (h) API key selected: the key goes through the env-file and is not pinned;
+# the rest are; a workspace .env naming one is warned about by name only.
+_S252_C=s252-key; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+printf 'GOOGLE_CLOUD_PROJECT=ws-secret-project\nAPP=1\n' > "$_S252_W/.env"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6 PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s252_envfile "$_S252_A" GEMINI_API_KEY || echo "the key is not in the env-file"
+    if _s252_argv_has "$_S252_A" GEMINI_API_KEY; then echo "GEMINI_API_KEY on the argv (would override the selected key)"; fi
+    for _p in $_S252_GPINS GOOGLE_APPLICATION_CREDENTIALS=; do _s252_pin "$_S252_A" "$_p" || echo "no -e $_p"; done
+    _a6_pair "$_S252_A" -e GEMINI_SANDBOX=false || echo "GEMINI_SANDBOX=false lost"
+    grep -qF "Gemini: .env sets GOOGLE_CLOUD_PROJECT" "$_S252_O" || echo "no warning naming .env and GOOGLE_CLOUD_PROJECT"
+    if grep -qF ws-secret-project "$_S252_O"; then echo "the value was printed"; fi; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(h)" "$_S252_C"; fi
+check "§252(h) gemini with GEMINI_API_KEY: the key reaches it only through the env-file, every other credential/project/endpoint variable is pinned on the argv (empty, or Gemini's default for CODE_ASSIST_ENDPOINT and GOOGLE_CLOUD_UNIVERSE_DOMAIN), and a workspace .env setting one is named in a warning without its value (mutation: drop the pin call; pin forwarded names too; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (i) OAuth selected (SANDY_GEMINI_AUTH=oauth, a host key also set): the key
+# is withheld and pinned empty.
+_S252_C=s252-oauth; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_A6_DIR/$_S252_C/.gemini"; printf '{"access_token":"x"}\n' > "$_A6_DIR/$_S252_C/.gemini/oauth_creds.json"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini SANDY_GEMINI_AUTH=oauth GEMINI_API_KEY=sk-fixture-a6 PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    grep -qF "/home/sandy/.gemini/oauth_creds.json" "$_S252_A" || echo "control: the OAuth file is not mounted"
+    if _s252_envfile "$_S252_A" GEMINI_API_KEY; then echo "the key reached the env-file"; fi
+    if grep -qF sk-fixture-a6 "$_S252_A"; then echo "the key is on the argv"; fi
+    for _p in GEMINI_API_KEY= $_S252_GPINS GOOGLE_APPLICATION_CREDENTIALS=; do _s252_pin "$_S252_A" "$_p" || echo "no -e $_p"; done
+    grep -qF "GEMINI_API_KEY is withheld from the container" "$_S252_O" || echo "the withholding is not said"; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(i)" "$_S252_C"; fi
+check "§252(i) gemini with SANDY_GEMINI_AUTH=oauth and a host GEMINI_API_KEY: the key is withheld (said at launch) and pinned empty with the rest, so the OAuth credential is the only one (mutation: forward the key in oauth mode; drop the pin call; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (j) ADC selected with a host GOOGLE_CLOUD_PROJECT: the ADC path and the
+# project are what sandy forwards, and neither is overridden.
+_S252_C=s252-adc; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_A6_DIR/$_S252_C/.config/gcloud"; printf '{"type":"authorized_user"}\n' > "$_A6_DIR/$_S252_C/.config/gcloud/application_default_credentials.json"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini SANDY_GEMINI_AUTH=adc GOOGLE_CLOUD_PROJECT=host-proj PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s252_pin "$_S252_A" GOOGLE_APPLICATION_CREDENTIALS=/home/sandy/.config/gcloud/application_default_credentials.json || echo "control: no ADC path"
+    [ "$(grep -c '^GOOGLE_APPLICATION_CREDENTIALS=' "$_S252_A")" = 1 ] || echo "GOOGLE_APPLICATION_CREDENTIALS set $(grep -c '^GOOGLE_APPLICATION_CREDENTIALS=' "$_S252_A") times"
+    _s252_envfile "$_S252_A" GOOGLE_CLOUD_PROJECT || echo "the project is not in the env-file"
+    if _s252_argv_has "$_S252_A" GOOGLE_CLOUD_PROJECT; then echo "GOOGLE_CLOUD_PROJECT on the argv (would override the host's)"; fi
+    for _p in GEMINI_API_KEY= GOOGLE_API_KEY= GOOGLE_CLOUD_LOCATION= GOOGLE_GEMINI_BASE_URL= CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com; do _s252_pin "$_S252_A" "$_p" || echo "no -e $_p"; done; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(j)" "$_S252_C"; fi
+check "§252(j) gemini with ADC and a host GOOGLE_CLOUD_PROJECT: the ADC path is set once and the project only through the env-file, never overridden; the rest are pinned (mutation: pin without checking what is forwarded; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (k) gemini+opencode, SANDY_GEMINI_AUTH=oauth, a host GEMINI_API_KEY: opencode
+# reads the key, so it is forwarded and NOT pinned; the rest still are.
+_S252_C=s252-combo; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_A6_DIR/$_S252_C/.gemini"; printf '{"access_token":"x"}\n' > "$_A6_DIR/$_S252_C/.gemini/oauth_creds.json"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini,opencode SANDY_GEMINI_AUTH=oauth GEMINI_API_KEY=sk-fixture-a6 PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s252_envfile "$_S252_A" GEMINI_API_KEY || echo "the key opencode reads is not in the env-file"
+    if _s252_argv_has "$_S252_A" GEMINI_API_KEY; then echo "GEMINI_API_KEY on the argv (would blank opencode's key)"; fi
+    grep -qF "opencode is in this combo" "$_S252_O" || echo "the reason is not said"
+    for _p in $_S252_GPINS; do _s252_pin "$_S252_A" "$_p" || echo "no -e $_p"; done; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(k)" "$_S252_C"; fi
+check "§252(k) gemini+opencode with SANDY_GEMINI_AUTH=oauth: GEMINI_API_KEY, which opencode reads, is forwarded and not pinned; the other variables are (mutation: withhold the key in the combo too; pin forwarded names too; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (l)/(m) A workspace .gemini/settings.json outranks the user-scope auth type
+# sandy seeds, so with two credentials forwarded (auto: the key and the OAuth
+# file) it could pick the one sandy did not select. Sandy's system settings
+# file, which Gemini CLI merges last, pins security.auth.selectedType on every
+# gemini launch, merged with the effort overrides when SANDY_EFFORT is set.
+_s252_sysdoc() {   # $1 = args file  $2 = expected JSON -> nothing, or what is wrong
+    local src
+    src="$(sed -n 's|^\(.*\):/etc/sandy-gemini/effort.json:ro$|\1|p' "$1")"; src="${src%%$'\n'*}"
+    [ -n "$src" ] || { echo "no :ro mount of the system settings file"; return 0; }
+    _a6_pair "$1" -e GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json || echo "GEMINI_CLI_SYSTEM_SETTINGS_PATH does not name the mount"
+    python3 - "$src" "$2" <<'S252PY' || echo "content: $(tr -d '\n ' < "$src" 2>/dev/null)"
+import json, sys
+sys.exit(0 if json.load(open(sys.argv[1])) == json.loads(sys.argv[2]) else 1)
+S252PY
+}
+_S252_C=s252-sel; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_S252_W/.gemini" "$_A6_DIR/$_S252_C/.gemini"
+printf '{"security":{"auth":{"selectedType":"oauth-personal","enforcedType":"oauth-personal"}}}\n' > "$_S252_W/.gemini/settings.json"
+printf '{"access_token":"x"}\n' > "$_A6_DIR/$_S252_C/.gemini/oauth_creds.json"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6 PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s252_envfile "$_S252_A" GEMINI_API_KEY && grep -qF "/home/sandy/.gemini/oauth_creds.json" "$_S252_A" || echo "control: not both credentials forwarded"
+    grep -qxF "$_S252_W/.gemini/settings.json:/home/sandy/ws/.gemini/settings.json:ro" "$_S252_A" || echo "control: the workspace settings are not mounted"
+    _s252_sysdoc "$_S252_A" '{"security":{"auth":{"selectedType":"gemini-api-key","enforcedType":"gemini-api-key"}}}'; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(l)" "$_S252_C"; fi
+check "§252(l) gemini with a key and an OAuth file forwarded and a workspace .gemini/settings.json selecting and enforcing oauth-personal: the :ro system settings file pins security.auth.selectedType and enforcedType to the key sandy selected, with no SANDY_EFFORT (mutation: write the file only with SANDY_EFFORT; drop enforcedType; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+_S252_C=s252-selfx; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_A6_DIR/$_S252_C/.gemini"; printf '{"access_token":"x"}\n' > "$_A6_DIR/$_S252_C/.gemini/oauth_creds.json"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini SANDY_EFFORT=low PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s252_sysdoc "$_S252_A" '{"modelConfigs":{"customOverrides":[{"match":{"model":"chat-base-3"},"modelConfig":{"generateContentConfig":{"thinkingConfig":{"thinkingLevel":"LOW"}}}},{"match":{"model":"chat-base-2.5"},"modelConfig":{"generateContentConfig":{"thinkingConfig":{"thinkingBudget":1024}}}}]},"security":{"auth":{"selectedType":"oauth-personal","enforcedType":"oauth-personal"}}}'; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(m)" "$_S252_C"; fi
+check "§252(m) OAuth with SANDY_EFFORT=low: the one system settings file carries both the effort overrides and security.auth.selectedType oauth-personal (mutation: drop the auth pin when an effort is set; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (n) SANDY_GEMINI_AUTH=oauth with no host OAuth file and a host key: the key
+# is withheld, so Gemini would have no credential. A launch nobody can answer
+# (here: stdin is not a terminal) is refused before docker run, with the
+# .fatal marker a --start client exits 6 on.
+_S252_C=s252-nocred; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini SANDY_GEMINI_AUTH=oauth GEMINI_API_KEY=sk-fixture-a6 \
+    SANDY_DAEMON_LOG="$_A6_DIR/$_S252_C/dlog" PATH="$_S252_PATH"
+_S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { [ "$_A6_RC" != 0 ] || echo "launch rc 0"
+    if [ -n "$(_a6_agent_args "$_S252_C")" ]; then echo "the agent container ran"; fi
+    grep -qF "SANDY_GEMINI_AUTH=oauth but no host ~/.gemini/oauth_creds.json" "$_S252_O" || echo "no refusal naming the missing file"
+    [ -e "$_A6_DIR/$_S252_C/dlog.fatal" ] || echo "no .fatal marker"
+    if grep -qF "Gemini uses its oauth credential" "$_S252_O"; then echo "it claimed the oauth credential"; fi; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(n)" "$_S252_C"; fi
+check "§252(n) SANDY_GEMINI_AUTH=oauth with no OAuth file (and a host key, which this mode withholds), on a non-terminal launch: refused before docker run with the .fatal marker, naming the missing file (mutation: drop the refusal; count the withheld key as a credential; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+# (o) blind spots of the .env scan, all created in-session: a directory the
+# scan can enter but not list (mode 111) is named; a link named .gemini into
+# a skipped directory holding a .env is reported as a link; a FIFO named .env
+# and a directory named .env are reported as such (the FIFO is never opened:
+# the report would hang on it); a Python venv named .env (it holds pyvenv.cfg)
+# is neither entered nor reported. Running as a user who can list a mode-111
+# directory (root), the unreadable-directory part is a visible skip.
+_S252_C=s252-blind; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+mkdir -p "$_S252_W/node_modules/p" "$_S252_W/sub" "$_S252_W/fifo" "$_S252_W/dir"
+_a6_launch "$_S252_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 \
+    S248_RUN='mkdir hidden && printf "X=1\n" > hidden/.env && chmod 111 hidden; printf "X=1\n" > node_modules/p/.env; ln -s ../node_modules/p sub/.gemini; mkfifo fifo/.env; mkdir dir/.env; mkdir -p py/.env/lib && : > py/.env/pyvenv.cfg && printf "X=1\n" > py/.env/lib/.env' \
+    PATH="$_S252_PATH"
+_S252_O="$_A6_DIR/$_S252_C/out"; _S252_K="$(_s252_block "$_S252_O")"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S252_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ -p "$_S252_W/fifo/.env" ] && [ -L "$_S252_W/sub/.gemini" ] || echo "control: the session did not create them"
+    printf '%s\n' "$_S252_K" | grep -qxF "$_S252_W/sub/.gemini (created; a symbolic link -> ../node_modules/p)" || echo "the .gemini link is not reported"
+    printf '%s\n' "$_S252_K" | grep -qF "$_S252_W/fifo/.env (created; a FIFO" || echo "the FIFO is not reported"
+    printf '%s\n' "$_S252_K" | grep -qF "$_S252_W/dir/.env (created; a directory" || echo "the .env directory is not reported"
+    [ -f "$_S252_W/py/.env/lib/.env" ] || echo "control: the venv was not created"
+    if printf '%s\n' "$_S252_K" | grep -qF "$_S252_W/py/"; then echo "the venv named .env was reported or entered"; fi; } 2>&1)" || true
+_S252_U=""
+if [ ! -r "$_S252_W/hidden" ]; then
+    _S252_U="$( { grep -qF "1 directory could not be scanned for .env files" "$_S252_O" || echo "the unreadable directory is not counted"
+        grep -A3 "could not be scanned for .env files" "$_S252_O" | grep -qF "$_S252_W/hidden" || echo "the unreadable directory is not named"; } 2>&1)" || true
+    _S252_UR=1
+else
+    _S252_UR=0
+fi
+chmod 755 "$_S252_W/hidden" 2>/dev/null || true
+if [ -n "$_S252_R$_S252_U" ]; then _a6_diag "§252(o)" "$_S252_C"; printf '%s\n' "$_S252_K" | sed 's/^/      block: /'; fi
+check "§252(o) a link named .gemini into a skipped directory, a FIFO named .env and a directory named .env, created in-session, are each reported, and a venv named .env is not (mutation: drop the .gemini-link match; drop the FIFO/directory types; drop the venv prune; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+if [ "$_S252_UR" = 1 ]; then
+    check "§252(o2) a directory the scan can enter but not list (mode 111), created in-session, is counted and named (mutation: drop the unreadable-directory record, or its find filter; ${_S252_U:-ok})" \
+        test -z "$_S252_U"
+else
+    skip "§252(o2) this user can list a mode-111 directory (root), so the unreadable-directory report cannot be exercised here"
+fi
+# (p) the launch warning also reads this sandbox's ~/.gemini/.env (the
+# container's, agent-writable and kept across launches), never its value.
+_S252_C=s252-home; _S252_W="$_A6_DIR/$_S252_C/ws"; _s252_ws "$_S252_W"
+_S252_S="$(_a6_sandbox "$_S252_C")"; mkdir -p "$_S252_S/gemini"
+printf 'GEMINI_CLI_HOME=/home/sandy/ws/x\n' > "$_S252_S/gemini/.env"
+_a6_launch "$_S252_C" SANDY_AGENT=gemini GEMINI_API_KEY=sk-fixture-a6 PATH="$_S252_PATH"
+_S252_A="$(_a6_agent_args "$_S252_C")"; _S252_O="$_A6_DIR/$_S252_C/out"
+_S252_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S252_A" ]; then echo "launch rc $_A6_RC"; fi
+    _s252_pin "$_S252_A" GEMINI_CLI_HOME= || echo "GEMINI_CLI_HOME not pinned"
+    grep -qF "Gemini: this sandbox's ~/.gemini/.env" "$_S252_O" || echo "the sandbox's ~/.gemini/.env is not named"
+    grep -F "this sandbox's ~/.gemini/.env" "$_S252_O" | grep -qF "GEMINI_CLI_HOME" || echo "GEMINI_CLI_HOME is not named"
+    if grep -qF /home/sandy/ws/x "$_S252_O"; then echo "the value was printed"; fi; } 2>&1)" || true
+if [ -n "$_S252_R" ]; then _a6_diag "§252(p)" "$_S252_C"; fi
+check "§252(p) the sandbox's own ~/.gemini/.env setting GEMINI_CLI_HOME is named in the launch warning (value not printed) and GEMINI_CLI_HOME is pinned empty (mutation: check only the workspace files; ${_S252_R:-ok})" \
+    test -z "$_S252_R"
+unset _S252_PATH _S252_CWS _S252_C _S252_W _S252_A _S252_O _S252_R _S252_K _S252_REC _S252_GPINS _S252_S _S252_U _S252_UR _f _p _l _w
+unset -f _s252_ws _s252_block _s252_text _s252_pin _s252_argv_has _s252_envfile _s252_sysdoc
+
 unset _S248_SEEN _S248_DB _S248_DENV _S248_SUP
 unset -f chflags_stub_unlock
 unset _S248_MK _S248_B2
@@ -31807,7 +32125,8 @@ names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs'
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
          '_sandy_slug_for', '_sandy_note_session_created_sandy_dir',
          '_sandy_session_end_protected_report', '_sandy_session_report_path',
-         '_sandy_session_report_add', '_sandy_session_end_report']
+         '_sandy_session_report_add', '_sandy_session_end_report',
+         '_sandy_env_scan_skip_dirs', '_sandy_env_files', '_sandy_env_file_state', '_sandy_env_file_report']
 open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
 b = src.index('unset _lnk_snap _id_snap\n', a) + len('unset _lnk_snap _id_snap\n')
