@@ -296,6 +296,16 @@ class Job:
         return bool(self.reason or self.counts[1])
 
 
+class NothingAhead:
+    """No group runs beside the host group's sections."""
+
+    def busy(self):
+        return 0
+
+    def poll(self):
+        return True
+
+
 class SectionRun:
     """Run sections of the host script, each in its own process, `jobs` at a time.
 
@@ -304,8 +314,13 @@ class SectionRun:
     process group. Output is held per section and printed in file order; then
     the script's epilogue runs once on the totals and prints the one summary."""
 
-    def __init__(self, host, chosen, jobs, jobs_label, command, logs, root, cache, output, times_path, limit):
+    def __init__(self, host, chosen, jobs, jobs_label, command, logs, root, cache, output, times_path, limit,
+                 ahead=None):
         self.host, self.chosen, self.jobs, self.jobs_label = host, chosen, jobs, jobs_label
+        # Groups running beside the sections: they hold slots, and print first.
+        self.ahead = ahead or NothingAhead()
+        self.opened = False
+        self.preface = []
         self.interpreter, self.argv0 = command
         self.logs, self.root, self.cache, self.output = logs, root, cache, output
         self.times_path, self.limit = times_path, limit
@@ -522,13 +537,26 @@ class SectionRun:
         self.discard(home, paths)
         return complete
 
+    def gate(self):
+        """True once the groups ahead have printed; then the host block may print."""
+        if not self.opened and self.ahead.poll():
+            self.opened = True
+            for line in self.preface:
+                print(line, flush=True)
+            self.quiet_since = time.monotonic()
+        return self.opened
+
+    def slots(self):
+        return min(self.workers, self.jobs - self.ahead.busy())
+
     def run(self):
         seconds = load_times(self.times_path)
         waiting = start_order(self.chosen, seconds)
-        print("Host sections: {} of {}, {} at a time (--jobs {}), longest first ({})".format(
+        self.preface.append("Host sections: {} of {}, {} at a time (--jobs {}), longest first ({})".format(
             len(self.chosen), self.total, self.workers, self.jobs_label,
             "by the last run's times" if any(section.title in seconds for section in self.chosen)
-            else "by line count: no times from an earlier run"), flush=True)
+            else "by line count: no times from an earlier run"))
+        self.gate()
         restore = {}
 
         def interrupt(signum, frame):
@@ -539,13 +567,14 @@ class SectionRun:
             except ValueError:  # not the main thread: only Ctrl-C reaches us
                 pass
         try:
-            while waiting or self.running:
-                while waiting and len(self.running) < self.workers:
+            while waiting or self.running or not self.gate():
+                while waiting and len(self.running) < self.slots():
                     self.start(waiting.pop(0))
                 before = len(self.finished)
                 self.poll()
-                self.print_ready()
-                self.progress()
+                if self.gate():
+                    self.print_ready()
+                    self.progress()
                 if len(self.finished) == before:
                     time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:
@@ -572,6 +601,92 @@ class SectionRun:
                 checks[job.section.title] = sum(job.counts[:3])
         save_times(self.times_path, seconds, self.host.sections, checks)
         return 0 if complete and self.totals()[1] == 0 else 1
+
+
+class GroupsAlongside:
+    """Groups that run while the host group's sections do, each holding one --jobs slot while it runs.
+
+    Each keeps its own isolated root and log, exactly as when it runs alone.
+    Its output goes only to its log until it ends; then it is printed whole,
+    in group order, and the host block (`then`) prints after the last one."""
+
+    def __init__(self, groups, verbose, report, then):
+        self.groups, self.verbose, self.report, self.then = groups, verbose, report, then
+        self.printed = 0
+        self.opened = False
+
+    def start(self):
+        for group in self.groups:
+            group["start"] = time.monotonic()
+            group["rc"], group["process"], group["done"] = 0, None, False
+            if group["missing"]:
+                group["log"].write_text("Missing executable: " + group["missing"] + "\n")
+                self.end(group)
+                continue
+            group["output"] = group["log"].open("wb")
+            group["queue"] = list(group["commands"])
+            self.advance(group)
+
+    def advance(self, group):
+        """Start the group's next command; end the group when none is left."""
+        if group["queue"]:
+            group["process"] = subprocess.Popen(group["queue"].pop(0), cwd=ROOT, env=group["env"],
+                                                stdin=subprocess.DEVNULL, stdout=group["output"],
+                                                stderr=subprocess.STDOUT, start_new_session=True)
+        else:
+            group["output"].close()
+            self.end(group)
+
+    def end(self, group):
+        group["seconds"] = time.monotonic() - group["start"]
+        group["done"], group["process"] = True, None
+        group["temporary"].cleanup()
+
+    def busy(self):
+        return sum(1 for group in self.groups if not group["done"])
+
+    def poll(self):
+        """Advance the groups, print each finished one in turn; True once all have printed."""
+        for group in self.groups:
+            if group["process"] is not None:
+                code = group["process"].poll()
+                if code is not None:
+                    # The first failure decides the exit; later commands still run.
+                    group["rc"] = group["rc"] or code
+                    self.advance(group)
+        while self.printed < len(self.groups) and self.groups[self.printed]["done"]:
+            self.show(self.groups[self.printed])
+            self.printed += 1
+        if self.printed == len(self.groups) and not self.opened:
+            self.opened = True
+            self.then()
+        return self.opened
+
+    def show(self, group):
+        print("\n[{}/{}] {} ({})".format(group["index"], group["of"], GROUP_TITLES[group["name"]], group["name"]),
+              flush=True)
+        in_traceback = False
+        for line in group["log"].read_text(errors="replace").splitlines(True):
+            show, in_traceback = show_output(line, group["name"], self.verbose, in_traceback)
+            if show:
+                print(line, end="" if line.endswith("\n") else "\n")
+        sys.stdout.flush()
+        self.report(group)
+
+    def stop(self):
+        """An interrupt: end every group still running."""
+        running = [group for group in self.groups if group["process"] is not None]
+        for group in running:
+            signal_group(group["process"].pid, signal.SIGTERM)
+        deadline = time.monotonic() + KILL_GRACE
+        for group in running:
+            try:
+                group["process"].wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                signal_group(group["process"].pid, signal.SIGKILL)
+                group["process"].wait()
+            group["output"].close()
+            self.end(group)
 
 
 def show_output(line, group, verbose, in_traceback):
@@ -710,80 +825,133 @@ def main():
     print("The overall result appears after all selected groups finish.", flush=True)
     cache = os.environ.get("SANDY_HOME", str(Path.home() / ".sandy"))
     results = []
-    for index, name in enumerate(selected, 1):
-        start = time.monotonic()
-        log = logs / (name + ".log")
-        group_logs = logs / name
-        group_logs.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="sandy-test-" + name + ".") as temporary:
-            # macOS temp paths may use /var while pwd -P returns /private/var.
-            # Give subprocesses a consistent HOME/TMPDIR/SANDY_HOME identity.
-            root = Path(temporary).resolve()
-            env = isolated_env(root, group_logs, cache, name in ("host", "contracts", "harness"))
-            commands = commands_of(name)
-            print("\n[{}/{}] {} ({})".format(index, len(selected), GROUP_TITLES[name], name), flush=True)
-            missing = next((command[0] for command in commands if not shutil.which(command[0])), None)
-            # The host group runs one section per process when more than one may
-            # run at once, or when sections were chosen; else the whole file in
-            # one process, as it always did.
-            sections = None
-            if name == "host" and not missing:
-                workers = auto_jobs() if jobs == "auto" else jobs
-                host = None
-                if chosen or workers > 1:
-                    host, why = host_script()
-                    if host is None:
-                        print("\033[0;31m✗ The host script cannot be split into sections ({}); running the whole file "
-                              "in one process.\033[0m".format(why), flush=True)
-                    else:
-                        major = bash_major_seen if bash_major_seen is not None else bash_major(commands[0][0])
-                        why = bash_problem(major)
-                        if why:
-                            # Under an old bash the script refuses by itself; one process says so once.
-                            print("Not splitting the host group into sections: {}; running the whole file in one process.".format(why),
-                                  flush=True)
-                            host = None
-                elif jobs == "auto":
-                    # auto came to one worker (a tight process limit): the one
-                    # process keeps its own background checks to the same budget.
-                    env["SANDY_TEST_INNER_JOBS"] = "1"  # jobs // workers, as a section gets it
-                if host is not None:
-                    headroom = process_headroom()
-                    if headroom is not None and min(workers, len(chosen or host.sections)) > headroom:
-                        print("Note: --jobs {} is more than the process limit here leaves room for ({}); a section "
-                              "may fail with 'fork: Resource temporarily unavailable'.".format(workers, headroom),
-                              flush=True)
-                    sections = (host, chosen or host.sections, workers, str(jobs), commands[0], group_logs, root,
-                                cache)
-            if missing:
-                state, rc = ("failed", 1) if args.require_tools else ("skipped", 77)
-                log.write_text("Missing executable: " + missing + "\n")
-                print(log.read_text(), end="")
+
+    def record(name, index, state, rc, log, seconds):
+        output_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log.read_text(errors="replace"))
+        skips = int(state == "skipped") + len(re.findall(r"^\s*– skipped:", output_text, re.M))
+        skips += sum(int(count) for count in re.findall(r"OK \(skipped=(\d+)\)", output_text))
+        if state == "passed" and skips:
+            state = "partial"
+        results.append({"group": name, "state": state, "exit": rc,
+                        "skips": skips, "seconds": round(seconds, 2), "log": str(log)})
+        (logs / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+        print("{}: {} ({:.2f}s, {} skips)".format(name, state.upper(), results[-1]['seconds'], skips), flush=True)
+        if state == "failed":
+            print("Full failure details: " + str(log), flush=True)
+            if index < len(selected):
+                print("Continuing with remaining groups; the overall run will report failure.", flush=True)
+
+    def missing_of(name):
+        return next((command[0] for command in commands_of(name) if not shutil.which(command[0])), None)
+
+    def missing_state():
+        return ("failed", 1) if args.require_tools else ("skipped", 77)
+
+    # The host group runs one section per process when more than one may run
+    # at once, or when sections were chosen; else the whole file in one
+    # process, as it always did. Decided first: the groups before it may run
+    # beside its sections.
+    host, workers, notes, inner = None, 1, [], None
+    if "host" in selected and not missing_of("host"):
+        workers = auto_jobs() if jobs == "auto" else jobs
+        if chosen or workers > 1:
+            host, why = host_script()
+            if host is None:
+                notes.append("\033[0;31m✗ The host script cannot be split into sections ({}); running the whole file "
+                             "in one process.\033[0m".format(why))
             else:
-                rc = 0
-                with log.open("w", buffering=1) as output:
-                    if sections:
-                        rc = SectionRun(*sections, output, logs.parent / TIMES_FILE, limit).run()
-                        commands = []
-                    for command in commands:
-                        # The first failure decides the exit; later commands still run.
-                        code = run_command(command, ROOT / "proxy" if name == "proxy" else ROOT,
-                                           env, output, name, args.verbose)
-                        rc = rc or code
-                state = "passed" if rc == 0 else "failed"
-            output_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log.read_text())
-            skips = int(state == "skipped") + len(re.findall(r"^\s*– skipped:", output_text, re.M))
-            skips += sum(int(count) for count in re.findall(r"OK \(skipped=(\d+)\)", output_text))
-            if state == "passed" and skips:
-                state = "partial"
-            results.append({"group": name, "state": state, "exit": rc,
-                            "skips": skips, "seconds": round(time.monotonic() - start, 2), "log": str(log)})
-            (logs / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-            print("{}: {} ({:.2f}s, {} skips)".format(name, state.upper(), results[-1]['seconds'], skips), flush=True)
-            if state == "failed":
-                print("Full failure details: " + str(log), flush=True)
-                if index < len(selected):
-                    print("Continuing with remaining groups; the overall run will report failure.", flush=True)
+                major = bash_major_seen if bash_major_seen is not None else bash_major(commands_of("host")[0][0])
+                why = bash_problem(major)
+                if why:
+                    # Under an old bash the script refuses by itself; one process says so once.
+                    notes.append("Not splitting the host group into sections: {}; running the whole file in one "
+                                 "process.".format(why))
+                    host = None
+        elif jobs == "auto":
+            # auto came to one worker (a tight process limit): the one process
+            # keeps its own background checks to the same budget.
+            inner = "1"  # jobs // workers, as a section gets it
+        if host is not None:
+            headroom = process_headroom()
+            if headroom is not None and min(workers, len(chosen or host.sections)) > headroom:
+                notes.append("Note: --jobs {} is more than the process limit here leaves room for ({}); a section "
+                             "may fail with 'fork: Resource temporarily unavailable'.".format(workers, headroom))
+    # Harness and contracts are short and wait on little: while the sections
+    # run they share the --jobs slots, so they cost no time of their own.
+    before = selected[:selected.index("host")] if host is not None else []
+    alongside = before if before and all(name in ("harness", "contracts") for name in before) else []
+
+    def host_header():
+        print("\n[{}/{}] {} ({})".format(selected.index("host") + 1, len(selected), GROUP_TITLES["host"], "host"),
+              flush=True)
+        for note in notes:
+            print(note, flush=True)
+
+    beside = None
+    if alongside:
+        print("{} run beside the host group's sections, each holding one of the {} slots while it runs; each "
+              "group's output is printed whole, in the order above.".format(" and ".join(alongside), workers),
+              flush=True)
+        groups = []
+        for name in alongside:
+            group_logs = logs / name
+            group_logs.mkdir(exist_ok=True)
+            temporary = tempfile.TemporaryDirectory(prefix="sandy-test-" + name + ".")
+            groups.append({"name": name, "index": selected.index(name) + 1, "of": len(selected),
+                           "commands": commands_of(name), "log": logs / (name + ".log"), "temporary": temporary,
+                           "env": isolated_env(Path(temporary.name).resolve(), group_logs, cache, True),
+                           "missing": missing_of(name)})
+
+        def report(group):
+            state, rc = missing_state() if group["missing"] else (
+                "passed" if group["rc"] == 0 else "failed", group["rc"])
+            record(group["name"], group["index"], state, rc, group["log"], group["seconds"])
+        beside = GroupsAlongside(groups, args.verbose, report, host_header)
+        beside.start()
+    try:
+        for index, name in enumerate(selected, 1):
+            if name in alongside:
+                continue  # running already; printed in its turn by `beside`
+            start = time.monotonic()
+            log = logs / (name + ".log")
+            group_logs = logs / name
+            group_logs.mkdir(exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="sandy-test-" + name + ".") as temporary:
+                # macOS temp paths may use /var while pwd -P returns /private/var.
+                # Give subprocesses a consistent HOME/TMPDIR/SANDY_HOME identity.
+                root = Path(temporary).resolve()
+                env = isolated_env(root, group_logs, cache, name in ("host", "contracts", "harness"))
+                commands = commands_of(name)
+                if name == "host":
+                    if beside is None:
+                        host_header()
+                    if inner:
+                        env["SANDY_TEST_INNER_JOBS"] = inner
+                else:
+                    print("\n[{}/{}] {} ({})".format(index, len(selected), GROUP_TITLES[name], name), flush=True)
+                missing = missing_of(name)
+                if missing:
+                    state, rc = missing_state()
+                    log.write_text("Missing executable: " + missing + "\n")
+                    print(log.read_text(), end="")
+                else:
+                    rc = 0
+                    with log.open("w", buffering=1) as output:
+                        if name == "host" and host is not None:
+                            rc = SectionRun(host, chosen or host.sections, workers, str(jobs), commands[0], group_logs,
+                                            root, cache, output, logs.parent / TIMES_FILE, limit, beside).run()
+                            commands = []
+                        for command in commands:
+                            # The first failure decides the exit; later commands still run.
+                            code = run_command(command, ROOT / "proxy" if name == "proxy" else ROOT,
+                                               env, output, name, args.verbose)
+                            rc = rc or code
+                    state = "passed" if rc == 0 else "failed"
+                record(name, index, state, rc, log, time.monotonic() - start)
+    except BaseException:
+        if beside is not None:
+            beside.stop()
+        raise
     return finish_suite(results)
 
 

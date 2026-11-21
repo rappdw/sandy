@@ -822,6 +822,83 @@ class HostSections(unittest.TestCase):
                 # Part of the summary: after the totals.
                 self.assertLess(text.index('Host group: 1 checks passed.'), text.index('⚠ Host group:'))
 
+    def run_groups(self, groups, *arguments):
+        if self.BASH_MAJOR < 5:
+            self.skipTest('the host group needs bash 5 or newer on PATH')
+        logs = Path(groups['host'][1]).parent / 'logs'
+        console = io.StringIO()
+        with mock.patch.object(suite_runner, 'GROUPS', groups), \
+             mock.patch('sys.argv', ['runner', '--log-dir', str(logs)] + list(arguments)), \
+             contextlib.redirect_stdout(console):
+            code = suite_runner.main()
+        return code, self.plain(console.getvalue()), logs / 'latest'
+
+    def test_short_groups_run_beside_the_sections_and_report_in_group_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            marks = root / 'marks'
+            marks.mkdir()
+            # Each section records how many of the others (and the groups) run with it.
+            probe = ('check "{0}" bash -c \'touch "$1/{0}.start"; sleep 0.4; ls "$1" | grep "\\.start$" '
+                     '> "$1/{0}.seen"; rm "$1/{0}.start"\' _ "' + str(marks) + '"\n')
+            script = self.fixture(directory, ''.join('section "§{0}: s{0}"\n'.format(n) + probe.format('s' + str(n))
+                                                     for n in range(1, 5)))
+            group = ('import os, sys, time; from pathlib import Path; m = Path(sys.argv[1]); '
+                     '(m / (sys.argv[2] + ".start")).touch(); time.sleep(float(sys.argv[3])); '
+                     'print(sys.argv[2], "output", "line", 1); print(sys.argv[2], "output", "line", 2); '
+                     '(m / (sys.argv[2] + ".start")).unlink(); raise SystemExit(int(sys.argv[4]))')
+            groups = {'harness': [suite_runner.sys.executable, '-c', group, str(marks), 'harness', '1.0', '0'],
+                      'contracts': [[suite_runner.sys.executable, '-c', group, str(marks), 'contracts', '0.3', '5'],
+                                    [suite_runner.sys.executable, '-c', group, str(marks), 'contracts2', '0.3', '0']],
+                      'host': ['bash', str(script)]}
+            started = time.monotonic()
+            code, console, logs = self.run_groups(groups, '--host-only', '--jobs', '3')
+            elapsed = time.monotonic() - started
+            # A failing contracts group fails the run, beside the sections as alone.
+            self.assertEqual(code, 1, console)
+            self.assertIn('SUITE FAILED — failed groups: contracts (exit 1)', console)
+            rows = json.loads((logs / 'results.json').read_text())
+            self.assertEqual([(row['group'], row['state'], row['exit']) for row in rows],
+                             [('harness', 'passed', 0), ('contracts', 'failed', 5), ('host', 'passed', 0)])
+            summary = console[console.index('========== SUITE SUMMARY'):]
+            self.assertEqual(re.findall(r'^(\w+): (?:passed|failed|partial) ', summary, re.M),
+                             ['harness', 'contracts', 'host'])
+            self.assertIn('harness and contracts run beside the host group\'s sections, each holding one of the 3 slots',
+                          console)
+            # Each group's block is whole and in group order; the host block follows them.
+            blocks = re.split(r'^(?=\[\d/3\] )', console, flags=re.M)[1:]
+            self.assertEqual([block.split('\n', 1)[0] for block in blocks],
+                             ['[1/3] Test harness regressions (harness)', '[2/3] Production behavior contracts (contracts)',
+                              '[3/3] Host checks (host)'])
+            self.assertRegex(blocks[0], r'\nharness output line 1\nharness output line 2\nharness: PASSED [^\n]*\n$')
+            self.assertRegex(blocks[1], r'\ncontracts output line 1\ncontracts output line 2\ncontracts2 output line 1\n'
+                                        r'contracts2 output line 2\ncontracts: FAILED [^\n]*\nFull failure details: \S+\n'
+                                        r'Continuing with remaining groups; the overall run will report failure\.\n$')
+            self.assertTrue(blocks[2].startswith('[3/3] Host checks (host)\nHost sections: 4 of 4, 3 at a time'))
+            self.assertEqual(self.headers(blocks[2]), [1, 2, 3, 4])
+            self.assertIn('contracts output line 1', (logs / 'contracts.log').read_text())
+            # They ran at the same time as the sections, and never more than --jobs at once.
+            seen = [(marks / ('s{}.seen'.format(n))).read_text().split() for n in range(1, 5)]
+            self.assertLessEqual(max(len(names) for names in seen), 3, seen)
+            self.assertIn('harness.start', sum(seen, []), 'no section ran while the harness group did')
+            # Harness ended last but printed first: the order is the groups', not the finishing order.
+            self.assertLess(elapsed, 30)
+
+    def test_groups_run_one_after_another_unless_the_host_group_is_split(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: one"\ncheck "one" true\nsection "§2: two"\ncheck "two" true\n')
+            groups = {'harness': [suite_runner.sys.executable, '-c', 'print("harness ran")'],
+                      'contracts': [suite_runner.sys.executable, '-c', 'raise SystemExit(4)'],
+                      'host': ['bash', str(script)]}
+            for arguments in (('--host-only', '--jobs', '1'), ('--only', 'harness,contracts', '--jobs', '4')):
+                code, console, logs = self.run_groups(groups, *arguments)
+                self.assertEqual(code, 1, console)
+                self.assertNotIn('run beside the host group', console)
+                self.assertNotIn('Host sections:', console)
+                rows = json.loads((logs / 'results.json').read_text())
+                self.assertEqual([(row['group'], row['state']) for row in rows][:2],
+                                 [('harness', 'passed'), ('contracts', 'failed')])
+
     def test_jobs_follow_the_cpus_and_a_process_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             cgroup = Path(directory)
