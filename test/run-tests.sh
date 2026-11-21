@@ -162,8 +162,15 @@ _sleep_stub() {
 # runs `_bg_result KEY`, which prints that output and returns that status, so
 # check() sees what it would have seen running CMD itself; a lost job fails
 # it. _bg_reap waits for every job still running (a section's last step);
-# cleanup kills any left by an aborted run.
-_BG_JOBS=4
+# cleanup kills any left by an aborted run. SANDY_TEST_INNER_JOBS replaces the
+# cap of 4, here and for the launch harness (_a6_bg): a runner that already
+# runs the sections side by side sets 1.
+_BG_JOBS="${SANDY_TEST_INNER_JOBS:-4}"
+case "$_BG_JOBS" in *[!0-9]*) _BG_JOBS=0 ;; esac
+if [ "$_BG_JOBS" -lt 1 ]; then
+    printf 'SANDY_TEST_INNER_JOBS must be a whole number, 1 or more (got: %s)\n' "${SANDY_TEST_INNER_JOBS:-}" >&2
+    exit 2
+fi
 _BG_PIDS=()
 _BG_DIR=""
 _bg_run() {
@@ -264,14 +271,13 @@ _run_provenance() {
     printf "\033[0;36m── host group complete %s · commit %s (%s) · tree: %s\033[0m\n" "$ts" "$sha" "$desc" "$tree"
 }
 
-# Every host fixture lives under the runner-owned temporary directory.
-SANDBOX_DIR="$(mktemp -d)"
-mkdir -p "$SANDBOX_DIR/claude"
-_SCHEMA_CACHE="$(mktemp)"
+# cleanup() removes what the shared fixtures (below) made. They build on first
+# use, so each of these names is set only in a process that used its fixture.
 cleanup() {
     _emit_summary
     _bg_kill
-    rm -rf "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
+    rm -rf ${SANDBOX_DIR:+"$SANDBOX_DIR"} ${_SCHEMA_CACHE:+"$_SCHEMA_CACHE"} ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} \
+        ${_A6_DIR:+"$_A6_DIR"} 2>/dev/null || true
     [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -279,8 +285,29 @@ SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 SANDY_SCRIPT="$SCRIPT"
 SANDY_SCRIPT_PATH="$SCRIPT"
 _SANDY_SCRIPT_PATH="$SCRIPT"
-# Fast-path fixtures are created in the isolated SANDY_HOME, never the real home.
-bash "$SCRIPT" --print-protected-paths >/dev/null
+
+# --- Shared fixtures ---------------------------------------------------------
+# Each section of this file is a complete script once the lines above the first
+# section and the summary below the last are put around it, so a runner can
+# start the sections side by side, one process each. Two rules keep it so.
+#
+# 1. A section uses nothing another section defines, starts or leaves behind:
+#    no variable, function, file or background job. What two or more sections
+#    share is defined in this block, as a function named _fx_<what>, and each
+#    section that uses it calls it at its top. The first call in a process
+#    builds the fixture; a later call returns at once. No section unsets or
+#    removes what a fixture made (a later section may call it again);
+#    cleanup() removes the directories.
+# 2. This block only defines. Nothing here runs when the file starts: every
+#    section's process would pay for it. A fixture costs its forks in the
+#    sections that call it and in no other.
+#
+# The fixture bodies are the sections' own lines, moved here unchanged, which
+# is why they sit at column 0.
+
+# The launcher under the names two groups of sections call it by.
+_PX_SCRIPT="$SCRIPT"    # §49, §50
+_SBX_SCRIPT="$SCRIPT"   # §51, §60-§71, §102, §103, §242
 
 # ONE --print-schema run, read by every check that asserts on the schema's
 # CONTENT. Its output depends on nothing but the script (no HOME, SANDY_HOME,
@@ -289,7 +316,12 @@ bash "$SCRIPT" --print-protected-paths >/dev/null
 # spawns: §92, §93, §100, §185) still run it live, and so must any check that
 # runs a modified copy of sandy. Asserted here, before anything reads it: a run
 # that fails, prints nothing, or prints something other than one JSON document
-# stops the group rather than failing 40 checks.
+# stops the group rather than failing 40 checks. The run is about 450
+# processes, so it is made by the first section that reads it: a section that
+# reads $_SCHEMA_CACHE calls _fx_schema at its top.
+_fx_schema() {
+    [ -z "${_SCHEMA_CACHE:-}" ] || return 0
+    _SCHEMA_CACHE="$(mktemp)"
 _SCHEMA_CACHE_RC=0
 bash "$SCRIPT" --print-schema >"$_SCHEMA_CACHE" 2>/dev/null || _SCHEMA_CACHE_RC=$?
 _SCHEMA_CACHE_BAD=""
@@ -305,6 +337,462 @@ if [ -n "$_SCHEMA_CACHE_BAD" ]; then
         "$_SCHEMA_CACHE_BAD" >&2
     exit 1
 fi
+}
+
+# sandy makes $SANDY_HOME and its two empty read-only mount fixtures
+# (.empty-ro-file, .empty-ro-dir) on every invocation, the fast-path flags
+# included. This run makes them for a section that looks at the isolated
+# $SANDY_HOME itself (§39). It ran for every section; no other needs it.
+_fx_sandy_home() {
+    [ -z "${_FX_SANDY_HOME:-}" ] || return 0; _FX_SANDY_HOME=1
+# Fast-path fixtures are created in the isolated SANDY_HOME, never the real home.
+bash "$SCRIPT" --print-protected-paths >/dev/null
+}
+
+# SANDBOX_DIR, a scratch sandbox directory under the runner-owned temporary
+# directory, for a section that runs, in this shell, a block of sandy that
+# names it (§130). It was made for every section; no other expands it.
+_fx_sandbox_dir() {
+    [ -z "${SANDBOX_DIR:-}" ] || return 0
+SANDBOX_DIR="$(mktemp -d)"
+mkdir -p "$SANDBOX_DIR/claude"
+}
+
+# BUILD_CLAUDE_BODY, for §9z and §9z1.
+_fx_claude_body() {
+    [ -z "${_FX_CLAUDE_BODY:-}" ] || return 0; _FX_CLAUDE_BODY=1
+# build_claude_cmd plus the helpers it calls since the named-sessions refactor
+# (the session-wide flags and channels are decided once, in helpers, so a
+# background session gets exactly what the pane gets).
+BUILD_CLAUDE_BODY="$(awk '/^(build_claude_cmd|_sandy_claude_base_args|_sandy_claude_channel_args|_sandy_claude_cmd_tail)\(\)/,/^}$/' "$_SANDY_SCRIPT_PATH")"
+}
+
+# _HELPERS (the one-line _sandy_has_* helpers) and _BUILD_SHARED (the two
+# helpers every build_*_cmd calls), for §28, §28a, §28b and §28g.
+_fx_build_shared() {
+    [ -z "${_FX_BUILD_SHARED:-}" ] || return 0; _FX_BUILD_SHARED=1
+_HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex|opencode)\(\)' "$SANDY_SCRIPT")"
+_BUILD_SHARED="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")"
+}
+
+# _S81 (the launcher), _S81_DFBASE (its Dockerfile.base generator) and
+# _S81_SETTINGS (its settings.json seeding block), for §81 and §82.
+_fx_s81() {
+    [ -z "${_FX_S81:-}" ] || return 0; _FX_S81=1
+_S81="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S81_DFBASE="$(awk '/^generate_dockerfile_base\(\)/,/^}$/' "$_S81")"
+_S81_SETTINGS="$(awk '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/Seeded settings.json/' "$_S81")"
+}
+
+# _S108_TO and _s108_diag, for §108 and §109.
+_fx_s108() {
+    [ -z "${_FX_S108:-}" ] || return 0; _FX_S108=1
+# `timeout` is GNU coreutils and is NOT on a stock macOS (homebrew ships it as
+# `gtimeout`). Hardcoding it made the behavioral runs below exit 127 -- the
+# `|| true` then swallowed it and the greps searched "timeout: command not
+# found" for sandy output, so §108(10)/(11) and §109(3)-(5) FAILED on the
+# maintainer's machine while passing in CI. Resolve a real binary; with neither,
+# run unbounded -- every call site feeds </dev/null, so an approval prompt gets
+# EOF and returns rather than hanging.
+_S108_TO=""
+if command -v timeout >/dev/null 2>&1; then _S108_TO="timeout 60"
+elif command -v gtimeout >/dev/null 2>&1; then _S108_TO="gtimeout 60"
+fi
+# Same lesson as _s92_diag: a grep over captured output that fails without
+# showing the output is unactionable -- these two checks failed for a full
+# session with no way to see that the capture was "timeout: command not found".
+_s108_diag() {   # $1=captured output  $2=label
+    grep -q "Symlinks that point outside the workspace" <<<"$1" && return 0
+    printf '    \033[0;33m^ %s captured (first 200 bytes): %s\033[0m\n' \
+        "$2" "$(head -c 200 <<<"$1" | tr '\n' ' ' | cat -v)"
+}
+}
+
+# The stubbed-launch harness (§215-§219, §225, §226, §236, §227-§232,
+# §237-§239, §246, §248-§253): the REAL launcher run through a plain foreground
+# launch (-p, egress off, offline) against stubs, so a check can assert what
+# reached `docker run`. The stubs:
+#   docker    logs every call; answers the network queries (subnet, gateway,
+#             bridge name); saves each `run`'s argv one element per line, and a
+#             copy of its --env-file, under runs/; for the agent's run (the one
+#             with --name) it plays Docker's bind-mount auto-creation: each
+#             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
+#             is created in the workspace, and A6_AGENT_WRITES gets a file.
+#             With A6_SNAP_DST set, the source of the agent's mount onto that
+#             container path goes to runs/snap.src and the files it holds at
+#             that moment to runs/snap.files. A6_RUN_RC is the agent run's rc;
+#             A6_TERM_AT_RUN SIGTERMs the launcher (its parent) from inside
+#             the agent run. When the agent container is force-removed, whether
+#             that mount source still exists goes to runs/snap.at-rm.
+#             A6_NETFAIL makes `network create` fail.
+#             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
+#             With A6_TERM_ON_DETACH=1 a detached run (`run -d`, the --start
+#             supervisor's) is recorded and then SIGTERMs its caller, which
+#             is how --stop ends a supervisor, so §228 can drive one.
+#   curl      fails, except the two build-dependency probes when A6_NET=1, so a
+#             missing image builds instead of being deferred.
+#   gh        prints nothing and fails: no host token, no network round trip.
+#   sudo      logs and succeeds, so the Linux iptables rules "apply".
+#   security  fails: a macOS host's keychain is never read.
+#   uname     `uname -s` prints A6_OS (Linux unless a launch says otherwise),
+#             so every launch takes the same path on a macOS host as on CI,
+#             Linux-only ones included; everything else is the real uname.
+_fx_a6() {
+    [ -z "${_FX_A6:-}" ] || return 0; _FX_A6=1
+_A6_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_A6_DIR/bin"
+_A6_SCRIPT="$SANDY_SCRIPT"
+cat > "$_A6_DIR/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "$A6_LOG/events.log"
+case "$*" in
+    "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
+    "network inspect "*Gateway*) echo 172.30.0.1 ;;
+    "network inspect "*bridge.name*) echo br-sdy-a6 ;;
+    info) [ -z "${A6_DOCKER_INFO:-}" ] || printf '%s\n' "$A6_DOCKER_INFO" ;;
+esac
+if [ "${1:-}" = run ]; then
+    _n=0
+    while [ -e "$A6_LOG/runs/$_n.args" ]; do _n=$((_n + 1)); done
+    printf '%s\n' "$@" > "$A6_LOG/runs/$_n.args"
+    _prev=""; _agent=0
+    for _a in "$@"; do
+        if [ "$_prev" = --env-file ]; then cp "$_a" "$A6_LOG/runs/$_n.envfile"; fi
+        if [ "$_prev" = --name ]; then _agent=1; fi
+        _prev="$_a"
+    done
+    if [ "$_agent" = 1 ]; then
+        for _m in ${A6_MOUNTPOINTS:-}; do
+            for _a in "$@"; do
+                case "$_a" in
+                    *":$A6_CWS/$_m"|*":$A6_CWS/$_m:ro")
+                        mkdir -p "$A6_WS/$_m"
+                        printf 'mountpoint %s\n' "$_m" >> "$A6_LOG/events.log"
+                        if [ "${A6_AGENT_WRITES:-}" = "$_m" ]; then : > "$A6_WS/$_m/agent-file"; fi
+                        break ;;
+                esac
+            done
+        done
+        if [ -n "${A6_SNAP_DST:-}" ]; then
+            for _a in "$@"; do
+                case "$_a" in
+                    *":$A6_SNAP_DST")
+                        _src="${_a%":$A6_SNAP_DST"}"
+                        printf '%s\n' "$_src" > "$A6_LOG/runs/snap.src"
+                        (cd "$_src" 2>/dev/null && find . -type f | LC_ALL=C sort) > "$A6_LOG/runs/snap.files" ;;
+                esac
+            done
+        fi
+        if [ -n "${A6_TERM_AT_RUN:-}" ]; then kill -TERM "$PPID"; sleep 1; fi
+        [ -z "${A6_RUN_RC:-}" ] || exit "$A6_RUN_RC"
+    fi
+    if [ "${A6_TERM_ON_DETACH:-}" = 1 ] && [ "${2:-}" = -d ]; then kill -TERM "$PPID"; fi
+fi
+case "$*" in
+    "network create"*) [ -z "${A6_NETFAIL:-}" ] || exit 1 ;;
+    "rm -f sandy-ws-"*)
+        if [ -f "$A6_LOG/runs/snap.src" ]; then
+            if [ -e "$(cat "$A6_LOG/runs/snap.src")" ]; then echo present; else echo gone; fi > "$A6_LOG/runs/snap.at-rm"
+        fi ;;
+esac
+exit 0
+EOF
+cat > "$_A6_DIR/bin/curl" <<'EOF'
+#!/bin/sh
+printf 'curl %s\n' "$*" >> "$A6_LOG/events.log"
+case "$*" in
+    *deb.debian.org*|*registry.npmjs.org*) [ "${A6_NET:-0}" = 1 ] && exit 0 ;;
+esac
+exit 1
+EOF
+printf '#!/bin/sh\nprintf "gh %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 1\n' > "$_A6_DIR/bin/gh"
+printf '#!/bin/sh\nprintf "sudo %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 0\n' > "$_A6_DIR/bin/sudo"
+printf '#!/bin/sh\nprintf "security %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 44\n' > "$_A6_DIR/bin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ] && [ -n "${A6_OS:-}" ]; then echo "$A6_OS"; exit 0; fi\nexec %s "$@"\n' \
+    "$(command -v uname)" > "$_A6_DIR/bin/uname"
+chmod +x "$_A6_DIR/bin/docker" "$_A6_DIR/bin/curl" "$_A6_DIR/bin/gh" "$_A6_DIR/bin/sudo" "$_A6_DIR/bin/security" "$_A6_DIR/bin/uname"
+
+# _a6_launch CASE [VAR=value ...] [-- sandy-args ...]   (default: -p fixture)
+# CASE names a fixture under $_A6_DIR: CASE/ is $HOME, CASE/ws the workspace
+# and CASE/sh $SANDY_HOME, all kept across launches of the same CASE; the
+# events log and runs/ hold the latest launch only, and its output goes to
+# CASE/out. Every credential, agent and SANDY_* variable of the launching
+# shell is removed first (inside sandy, the live session's would leak in).
+# Sets _A6_RC.
+_a6_launch() {
+    local c="$_A6_DIR/$1"; shift
+    local envs args
+    envs=(); args=(-p fixture)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
+    rm -rf "$c/runs"; mkdir -p "$c/ws" "$c/sh" "$c/runs"; : > "$c/events.log"
+    _A6_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$c/ws" && env PATH="$_A6_DIR/bin:$PATH" HOME="$c" SANDY_HOME="$c/sh" \
+            A6_LOG="$c" A6_WS="$c/ws" A6_CWS=/home/sandy/ws A6_OS=Linux SANDY_EGRESS=off SANDY_OFFLINE=1 \
+            ${envs[@]+"${envs[@]}"} bash "$_A6_SCRIPT" ${args[@]+"${args[@]}"} </dev/null >"$c/out" 2>&1
+    ) || _A6_RC=$?
+}
+# The agent container's run: the saved argv carrying --name sandy-ws-<hash>.
+_a6_agent_args() {   # $1 = CASE -> path, or nothing
+    local f
+    for f in "$_A6_DIR/$1"/runs/*.args; do
+        [ -f "$f" ] || continue
+        if awk 'p=="--name" && index($0,"sandy-ws-")==1 {ok=1} {p=$0} END {exit ok?0:1}' "$f"; then printf '%s\n' "$f"; fi
+    done | tail -n 1
+}
+# One argv element equal to $2 directly followed by one equal to $3.
+_a6_pair() {   # $1 = args file  $2 $3
+    [ -f "$1" ] && awk -v a="$2" -v b="$3" 'p==a && $0==b {ok=1} {p=$0} END {exit ok?0:1}' "$1"
+}
+_a6_sandbox() {   # $1 = CASE -> its sandbox dir (the slug sandy computes)
+    local h
+    h="$(printf '%s' "$_A6_DIR/$1/ws" | { shasum -a 256 2>/dev/null || sha256sum; })"
+    h="${h%% *}"
+    printf '%s/%s/sh/sandboxes/ws-%s\n' "$_A6_DIR" "$1" "${h:0:8}"
+}
+_a6_diag() {   # $1 = label  $2 = CASE
+    printf '    \033[0;33m^ %s: rc %s, output (last 400 bytes): %s\033[0m\n' \
+        "$1" "${_A6_RC:-none}" "$(tail -c 400 "$_A6_DIR/$2/out" 2>/dev/null | tr '\n' ' ' | cat -v)"
+}
+
+# --- Independent launches run side by side (§236-§239) ----------------------
+# A launch through these stubs is a few hundred short-lived processes, about a
+# second each on a macOS host, and §236-§239 make about a hundred of them.
+# Each case has its own HOME, SANDY_HOME, workspace, events log and runs/,
+# and no launch reads or writes another case's files, so cases run in the
+# background, at most _A6_JOBS at once. Each check still runs here, in order,
+# after its own case's job has finished, and reads only that case's files.
+# _a6_bg CASE CMD [ARG...] runs CMD (which launches CASE, once or more, and
+# must never call check: the counters live in this shell); _a6_join CASE
+# waits for it and sets _A6_RC to its LAST launch's status, or "lost" when
+# the job died before recording one, which fails every check that reads it.
+_A6_JOBS="${SANDY_TEST_INNER_JOBS:-4}"
+_A6_BG_PIDS=()
+_a6_bg_key() { printf '%s/.bg/%s' "$_A6_DIR" "$(printf '%s' "$1" | tr '/' '_')"; }
+_a6_bg() {
+    local c="$1" k p live; shift
+    k="$(_a6_bg_key "$c")"
+    while :; do
+        live=()
+        for p in ${_A6_BG_PIDS[@]+"${_A6_BG_PIDS[@]}"}; do
+            if kill -0 "$p" 2>/dev/null; then live+=("$p"); fi
+        done
+        _A6_BG_PIDS=(${live[@]+"${live[@]}"})
+        [ "${#_A6_BG_PIDS[@]}" -ge "$_A6_JOBS" ] || break
+        sleep 0.05
+    done
+    mkdir -p "$_A6_DIR/.bg"; rm -f "$k.rc" "$k.pid"
+    ( _A6_RC=lost; "$@"; printf '%s\n' "$_A6_RC" > "$k.rc" ) &
+    printf '%s\n' "$!" > "$k.pid"
+    _A6_BG_PIDS+=("$!")
+}
+_a6_join() {   # $1 = CASE -> _A6_RC
+    local k
+    k="$(_a6_bg_key "$1")"
+    if [ -f "$k.pid" ]; then wait "$(cat "$k.pid")" 2>/dev/null || true; fi
+    _A6_RC="$(cat "$k.rc" 2>/dev/null || echo lost)"
+    rm -f "$k.pid"
+}
+# _a6_done is the last step of every section that uses this harness. Each
+# launch started in the background must be joined by the check that reads it:
+# a .pid left under .bg is a case started whose check never ran. One left by
+# the section that is ending fails here, in that section, and stays in
+# _A6_UNJOINED for the one §239(z) check of a whole-file run (at the end of
+# §253). It also waits for every launch still running and forgets the last
+# launch's status, so the next section starts as it would on its own.
+_A6_UNJOINED=""
+_a6_done() {
+    local u p
+    u="$(cd "$_A6_DIR/.bg" 2>/dev/null && ls -- *.pid 2>/dev/null || true)"
+    for p in ${_A6_BG_PIDS[@]+"${_A6_BG_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
+    _A6_BG_PIDS=()
+    unset _A6_RC
+    [ -n "$u" ] || return 0
+    (cd "$_A6_DIR/.bg" && rm -f -- *.pid)
+    u="$(printf '%s' "$u" | tr '\n' ' ')"
+    _A6_UNJOINED="${_A6_UNJOINED:+$_A6_UNJOINED }$u"
+    fail "§239(z) in this section: a launch started in the background was not joined before its check (unjoined: $u)"
+}
+}
+
+# _s236_mounts, _s236_unmet, _S236_ETC and _s236_seed: the mounts a launch
+# made and its approved-symlink list, for §236, §227, §228, §230, §232 and
+# §237-§239.
+_fx_s236() {
+    [ -z "${_FX_S236:-}" ] || return 0; _FX_S236=1
+    _fx_a6
+# The agent run's -v values whose host side is one of the fixture targets.
+_s236_mounts() {   # $1 = CASE  $2 = HOME
+    local a
+    a="$(_a6_agent_args "$1")"
+    [ -n "$a" ] || return 0
+    awk -v h="$2" 'p=="-v" && (index($0,h"/t")==1 || index($0,h"/wf:")==1) {print} {p=$0}' "$a" | LC_ALL=C sort
+}
+# rc 0, an agent run, the approved list unchanged, and exactly the expected
+# mounts. Prints the first unmet condition.
+_s236_unmet() {   # $1 = CASE  $2 = HOME  $3 = expected list  $4 = expected mounts
+    [ "$_A6_RC" = 0 ] || { echo "launch rc $_A6_RC"; return 0; }
+    [ -n "$(_a6_agent_args "$1")" ] || { echo "no agent docker run"; return 0; }
+    [ "$(LC_ALL=C sort "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list")" = "$3" ] \
+        || { echo "approved list changed: $(tr '\n' ';' < "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list")"; return 0; }
+    [ "$(_s236_mounts "$1" "$2")" = "$4" ] || echo "mounts: $(_s236_mounts "$1" "$2" | tr '\n' ' ')"
+}
+# The protected link's target as the scan records it (readlink -f): on macOS
+# /etc is a link to /private/etc.
+_S236_ETC="$(cd /etc && pwd -P)/hosts"
+_s236_seed() {   # $1 = CASE  $2 = list content
+    mkdir -p "$(_a6_sandbox "$1")"
+    printf '%s\n' "$2" > "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list"
+}
+}
+
+# _hardening_unmet, for §207 and §225. It stands in front of three fixtures
+# whose comments hold no apostrophe: lint-bash32.sh (APOSQ) reads the 80 lines
+# after the opening quote of its awk program as part of that program.
+_fx_hardening() {
+    [ -z "${_FX_HARDENING:-}" ] || return 0; _FX_HARDENING=1
+# _hardening_unmet ARGS-FILE PIDS MEMORY ALLOWED-CAPS prints every hardening
+# property the recorded docker-run argv (one element per line) fails, and
+# nothing when it holds them all. MEMORY "-" accepts any non-empty value.
+# Shared by §207 (the proxy's run) and §225 (the agent's run).
+_hardening_unmet() {
+    [ -s "$1" ] || { echo "no docker run argv recorded"; return 0; }
+    # Split --flag=value into two elements first: Docker accepts both spellings,
+    # and a later --pids-limit=-1 or --security-opt=seccomp=unconfined must not
+    # hide behind the space form the checks below read. A bool flag's explicit
+    # value is kept whole so --read-only=false is not read as --read-only.
+    awk '/^--(read-only|privileged)=/ { print; next }
+         match($0, /^--[a-z-]+=/) { print substr($0, 1, RLENGTH - 1); print substr($0, RLENGTH + 1); next }
+         { print }' "$1" |
+    awk -v pids="$2" -v mem="$3" -v allowed=" $4 " '
+        p == "--cap-drop" && $0 == "ALL" { cd = 1 }
+        p == "--security-opt" && $0 == "no-new-privileges:true" { nnp = 1 }
+        p == "--security-opt" && index($0, "unconfined") { bad = bad " --security-opt " $0 }
+        p == "--pids-limit" { pl = $0 }
+        p == "--memory" { m = $0 }
+        p == "--cap-add" && !index(allowed, " " $0 " ") { bad = bad " --cap-add " $0 }
+        index($0, "--cap-add=") == 1 || index($0, "--privileged") == 1 { bad = bad " " $0 }
+        (p == "--pid" || p == "--ipc" || p == "--uts" || p == "--userns" || p == "--network" || p == "--net" || p == "--cgroupns") && $0 == "host" { bad = bad " " p " host" }
+        $0 ~ /^--(pid|ipc|uts|userns|network|net)=host$/ { bad = bad " " $0 }
+        $0 == "--read-only" || $0 == "--read-only=true" { ro = 1 }
+        index($0, "--read-only=") == 1 && $0 != "--read-only=true" { ro = 0 }
+        { p = $0 }
+        END {
+            if (!ro) printf " no --read-only"
+            if (!cd) printf " no --cap-drop ALL"
+            if (!nnp) printf " no --security-opt no-new-privileges:true"
+            if (pl != pids) printf " --pids-limit is [%s], want %s", pl, pids
+            if (mem == "-" && m !~ /^[1-9][0-9]*[bkmg]?$/) printf " --memory is [%s], want a non-zero cap", m
+            if (mem != "-" && m != mem) printf " --memory is [%s], want %s", m, mem
+            if (bad != "") printf " loosened by:%s", bad
+        }'
+}
+}
+
+# _s228_ws, _s228_pass and _s228_sup: a --start case, as the approval pass and
+# then the supervisor, for §228-§230 and §232.
+_fx_s228() {
+    [ -z "${_FX_S228:-}" ] || return 0; _FX_S228=1
+    _fx_a6; _fx_s236
+_s228_ws() {   # $1 = CASE: HOME/t1..t5, ws links a -> t1 and b -> t2, both approved
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h/t1" "$h/t2" "$h/t3" "$h/t5" "$h/ws"
+    ln -s "$h/t1" "$h/ws/a"; ln -s "$h/t2" "$h/ws/b"
+    _s236_seed "$1" "$(printf '%s\n' "a -> $h/t1" "b -> $h/t2")"
+}
+_s228_pass() {   # $1 = CASE
+    rm -f "$_A6_DIR/$1/result"
+    _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_A6_DIR/$1/result" --
+}
+_s228_sup() {   # $1 = CASE
+    _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 \
+        A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/$1/ws"
+}
+}
+
+# _s230_refused and _s230_sup_after, for §230, §232, §237 and §238.
+_fx_s230() {
+    [ -z "${_FX_S230:-}" ] || return 0; _FX_S230=1
+    _fx_a6; _fx_s228
+_s230_refused() {   # $1 = CASE  $2 = the link that must be named
+    [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$1")" ] \
+        && grep -q "need interactive approval\|present at previous approval" "$_A6_DIR/$1/out" \
+        && ! grep -qF "dropping these keys" "$_A6_DIR/$1/out" \
+        && grep -qF -- "$2" "$_A6_DIR/$1/out"
+}
+# --start cases: links planted between the approval pass and the supervisor.
+# _s228_ws gives a -> t1, b -> t2, approved.
+_s230_sup_after() {   # $1 = CASE; runs the pass, then $2... (a command) , then the supervisor
+    local c="$1"; shift
+    _s228_ws "$c"; mkdir -p "$_A6_DIR/$c/secret" "$_A6_DIR/$c/other"
+    _s228_pass "$c"
+    "$@"
+    _s228_sup "$c"
+}
+}
+
+# The chflags, stat and docker stubs of §248 (_S248_B, _S248_PATH) and
+# _s248_block, for §248, §250 and §252.
+_fx_s248() {
+    [ -z "${_FX_S248:-}" ] || return 0; _FX_S248=1
+    _fx_a6
+# Stubs (in front of the A6 ones): chflags keeps the flag set in
+# CASE/flags and logs each call; stat answers `-f %Sf` from that set (and
+# runs the real stat otherwise); docker copies the flag set aside while the
+# agent "runs" and, with S248_WRITE=<rel>, rewrites that workspace file the
+# way a write through another spelling would, or, with S248_LINK=<rel>,
+# replaces it with a link.
+_S248_B="$_A6_DIR/s248bin"; mkdir -p "$_S248_B"
+cat > "$_S248_B/chflags" <<'S248EOF'
+#!/bin/sh
+printf 'chflags %s\n' "$*" >> "$A6_LOG/events.log"
+st="$A6_LOG/flags"; touch "$st"
+[ "$1" != -h ] || shift
+# S248_SWAP=<path>: another file is moved over that path just as it is locked
+# (the race the inode re-check is for); the flag lands on the file moved away.
+if [ "$1" = uchg ] && [ -n "${S248_SWAP:-}" ] && [ "$2" = "$S248_SWAP" ] && [ -f "$2.swap" ]; then
+    mv "$2" "$2.locked-away"; mv "$2.swap" "$2"
+    printf '%s\n' "$2.locked-away" >> "$st"; exit 0
+fi
+case "$1" in
+    uchg) grep -qxF "$2" "$st" || printf '%s\n' "$2" >> "$st" ;;
+    nouchg) grep -vxF "$2" "$st" > "$st.t" || true; mv "$st.t" "$st" ;;
+    *) exit 1 ;;
+esac
+S248EOF
+{ printf '#!/bin/sh\n'
+  printf 'if [ "$1" = -f ] && [ "$2" = %%Sf ]; then\n'
+  printf '    if grep -qxF "$3" "$A6_LOG/flags" 2>/dev/null; then echo uchg; else echo -; fi; exit 0\n'
+  printf 'fi\n'
+  printf 'if [ "$1" = -f ] && [ "$2" = %%c ]; then %q -c %%Z "$3" 2>/dev/null || %q -f %%c "$3"; exit 0; fi\n' "$(command -v stat)" "$(command -v stat)"
+  printf 'exec %q "$@"\n' "$(command -v stat)"; } > "$_S248_B/stat"
+{ printf '#!/bin/sh\n'
+  printf 'case " $* " in *" --name sandy-ws-"*)\n'
+  printf '    cp "$A6_LOG/flags" "$A6_LOG/flags-during-run" 2>/dev/null || : > "$A6_LOG/flags-during-run"\n'
+  printf '    if [ -n "${S248_WRITE:-}" ]; then printf "tampered\\n" >> "$A6_WS/$S248_WRITE"; fi\n'
+  printf '    if [ -n "${S248_WRITE_ABS:-}" ]; then printf "tampered\\n" >> "$S248_WRITE_ABS"; fi\n'
+  printf '    if [ -n "${S248_RUN:-}" ]; then (cd "$A6_WS" && sh -c "$S248_RUN"); fi\n'
+  printf '    if [ -n "${S248_LINK:-}" ]; then rm -f "$A6_WS/$S248_LINK"; ln -s elsewhere "$A6_WS/$S248_LINK"; fi ;;\n'
+  printf 'esac\n'
+  # S248_SURVIVE=1: the agent container is still there after its rm (a teardown
+  # interrupted by a reboot or a Docker restart).
+  # S248_SURVIVE=down: the daemon cannot be reached, so whether it is gone is unknown.
+  printf 'case "$*" in "inspect -f {{.Id}} "*) if [ "${S248_SURVIVE:-}" = down ]; then echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; fi; if [ -n "${S248_SURVIVE:-}" ]; then echo deadbeef; fi; exit 0 ;; esac\n'
+  printf 'exec %q "$@"\n' "$_A6_DIR/bin/docker"; } > "$_S248_B/docker"
+chmod +x "$_S248_B/chflags" "$_S248_B/stat" "$_S248_B/docker"
+_S248_PATH="$_S248_B:$_A6_DIR/bin:$PATH"
+# The CHANGED block of output file $1, one line per entry, prefix stripped.
+_s248_block() { awk '/Protected files CHANGED during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+}
+# --- end of the shared fixtures ------------------------------------------------
 
 # Container toolchain, persistence and isolation checks: test_container.py.
 info "9. Workspace .venv overlay — detection and materialization"
@@ -362,6 +850,7 @@ check "no leftover flock-based setup lock" \
 # ============================================================
 info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
 # ============================================================
+_fx_claude_body
 
 # Guard against regression of the `cmd || cmd_base` fallback pattern in
 # build_claude_cmd. Earlier versions appended `|| $cmd_base` after the
@@ -370,10 +859,6 @@ info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
 # --continue when a session exists, so the fallback is both unnecessary
 # and actively harmful. This test asserts it stays removed.
 _SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-# build_claude_cmd plus the helpers it calls since the named-sessions refactor
-# (the session-wide flags and channels are decided once, in helpers, so a
-# background session gets exactly what the pane gets).
-BUILD_CLAUDE_BODY="$(awk '/^(build_claude_cmd|_sandy_claude_base_args|_sandy_claude_channel_args|_sandy_claude_cmd_tail)\(\)/,/^}$/' "$_SANDY_SCRIPT_PATH")"
 # One absence check subsumes the old specific fallback-expression check.
 
 # Also assert that cmd_base is not referenced at all — it's the marker
@@ -386,6 +871,7 @@ check "build_claude_cmd no longer references cmd_base" \
 # ============================================================
 info "9z1. #30 — SANDY_CHANNELS expansion for build_claude_cmd"
 # ============================================================
+_fx_claude_body
 # Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
 # form the relay and install-loop already use. build_claude_cmd must expand
 # it to claude's space-separated plugin:<name>@<marketplace> --channels spec,
@@ -461,7 +947,6 @@ info "12. Variable ordering — WORK_DIR defined before Phase 3"
 # WORK_DIR= may be indented (since 1.1.0 it's assigned inside the --workspace
 # if/else), so match leading whitespace; `|| true` so a grep miss surfaces as
 # a FAILed check below instead of aborting the suite under set -euo pipefail.
-SCRIPT="$(dirname "$0")/../sandy"
 WORK_DIR_DEF="$(grep -nE -m1 '^[[:space:]]*WORK_DIR=' "$SCRIPT" | cut -d: -f1 || true)"
 SANDBOX_NAME_DEF="$(grep -nE -m1 '^[[:space:]]*SANDBOX_NAME=' "$SCRIPT" | cut -d: -f1 || true)"
 PHASE3_USE="$(grep -n -m1 'Phase 3.*Per-project image' "$SCRIPT" | cut -d: -f1 || true)"
@@ -712,6 +1197,7 @@ rm -rf "$SKILLS_TEST_DIR"
 
 info "28. Gemini CLI support — agent helpers and flag translation"
 # ============================================================
+_fx_build_shared
 # These tests extract helper functions directly from the sandy script via
 # sed range matches and source them into a subshell. Purely script-level —
 # no docker required. Tests will break if the function signatures in sandy
@@ -720,9 +1206,6 @@ info "28. Gemini CLI support — agent helpers and flag translation"
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Pull the two one-line helpers and the build_gemini_cmd function body.
 # Since M3 PR 3.2, build_*_cmd functions call shared helpers — extract them too.
-_HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex|opencode)\(\)' "$SANDY_SCRIPT")"
-_BUILD_SHARED="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
-$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")"
 _BUILD_GEMINI="$(sed -n '/^build_gemini_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
 if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ] || [ -z "$_BUILD_SHARED" ]; then
@@ -778,6 +1261,7 @@ fi
 # ============================================================
 info "28a. Shared build_*_cmd helpers (M3 PR 3.2)"
 # ============================================================
+_fx_build_shared
 # Two helpers extracted from the four build_*_cmd functions to consolidate
 # the per-agent arg-translation loop and the tmux-interactive exit-pause
 # wrapping. Each agent's surface-specific behavior (which flags translate
@@ -834,6 +1318,7 @@ _helper_script_test "_sandy_wrap_cmd_exit_pause interactive verbose escapes \$_e
 # ============================================================
 info "28a2. Grok Build support — selection, image, credentials, headless (#99)"
 # ============================================================
+_fx_schema
 _GROK_S="$SANDY_SCRIPT"
 check "grok is a valid agent (validation case)" \
     grep -q 'claude|gemini|codex|opencode|grok|mirror)' "$_GROK_S"
@@ -871,6 +1356,7 @@ check "--print-schema agents[] includes grok (sandy-grok)" \
 # ============================================================
 info "28b. Codex CLI support — agent helpers and flag translation"
 # ============================================================
+_fx_build_shared
 # build_codex_cmd calls the #427 resume helpers, so they are extracted with it.
 # Each probe gets an EMPTY CODEX_HOME: the helpers read $CODEX_HOME/sessions,
 # and the developer's own ~/.codex could otherwise turn "no args" into a resume.
@@ -1248,6 +1734,7 @@ check "codex synthkit seeds ~/.codex/skills/ with SKILL.md files" \
 # ============================================================
 info "28g. OpenCode CLI support — agent helpers and flag translation"
 # ============================================================
+_fx_build_shared
 _BUILD_OPENCODE="$(sed -n '/^build_opencode_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
 if [ -z "$_HELPERS" ] || [ -z "$_BUILD_OPENCODE" ] || [ -z "$_BUILD_SHARED" ]; then
@@ -2035,6 +2522,7 @@ check "companion-file change (Dockerfile unchanged) re-triggers approval → hea
 # ============================================================
 info "39. Sprint 1 — Empty ro-fixtures exist in SANDY_HOME"
 # ============================================================
+_fx_sandy_home
 # S1.0: ensure_build_files creates $SANDY_HOME/.empty-ro-file and .empty-ro-dir.
 # Verify they exist and are empty.
 
@@ -2148,6 +2636,7 @@ check "symlink approval uses comm -23 for new-entry detection" \
 # ============================================================
 info "44. Empty stub dir cleanup (post-session + pre-existing debris)"
 # ============================================================
+_fx_schema
 # Docker's bind-mount target auto-creation leaves empty stub dirs (.vscode/,
 # .idea/, etc.) on the host when sandy mounts .empty-ro-dir over a missing
 # protected path. Two cleanup mechanisms:
@@ -2211,7 +2700,7 @@ _STATE_JSON="$_INTRO_TMP/state.json"
 
 # --- --print-schema ---
 _SCHEMA_RC=0
-cp "$_SCHEMA_CACHE" "$_SCHEMA_JSON"; _SCHEMA_RC="$_SCHEMA_CACHE_RC"   # the one run near the top of this file
+cp "$_SCHEMA_CACHE" "$_SCHEMA_JSON"; _SCHEMA_RC="$_SCHEMA_CACHE_RC"   # the one cached run (_fx_schema)
 check "--print-schema exits 0" test "$_SCHEMA_RC" -eq 0
 check "--print-schema output is valid JSON" \
     python3 -m json.tool < "$_SCHEMA_JSON"
@@ -2536,6 +3025,7 @@ rm -rf "$_INTRO_TMP"
 # actually finds files, /ss reads them) are out of scope for the pure-script
 # suite — they belong in run-integration-tests.sh.
 info "45. Screenshot mount + /ss skill"
+_fx_schema
 
 _SS_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
@@ -2688,6 +3178,7 @@ check "no bare (root) channel-relay tmux exec remains" \
 # (env wins), then ~/.sandy/.secrets, then ~/.sandy/config; workspace sources
 # never supply values (security boundary).
 info "47. User-defined env passthrough (SANDY_EXTRA_ENV)"
+_fx_schema
 
 _EE_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
@@ -2967,7 +3458,6 @@ check "doctor.sh matches sandy's _sandy_doctor_host() heredoc" \
 # we lock in the generator shape and the version-tag pinning.
 info "49. Egress proxy image generator (M2.7)"
 
-_PX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Pull just the two functions and exercise them in isolation.
 _PX_FNS="$(sed -n '/^_sandy_proxy_ref()/,/^}$/p' "$_PX_SCRIPT")
 $(sed -n '/^_sandy_proxy_local_src()/,/^}$/p' "$_PX_SCRIPT")
@@ -3127,6 +3617,7 @@ check "proxy image named sandy-proxy" \
 # topology / ssh ProxyCommand seams so a refactor can't silently drop them.
 # ------------------------------------------------------------
 info "50. Egress proxy launcher wiring (M2.7 tri-state)"
+_fx_schema
 
 # Config tiers: SANDY_EGRESS_PROXY is passive (per-project opt-in); the
 # allowlist expander SANDY_ALLOW_HOSTS is privileged (it widens reach).
@@ -3258,7 +3749,6 @@ info "51. Sandbox compatibility floor (M4 PR 4.2)"
 # Unit-test the pure classifier here (the launch path that consumes it needs
 # Docker — see run-integration-tests.sh §14). Extract _ver_lt + the classifier
 # from source and pin the floor so the test is independent of the live value.
-_SBX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _sbx_classify() {
     bash -c "
         $(sed -n '/^_ver_lt()/,/^}$/p' "$_SBX_SCRIPT")
@@ -4218,6 +4708,7 @@ rm -rf "$_DD_BIN" "$_DD_HOME" "$_DD_WS"
 echo ""
 section "§71: sandy --update-sessions — fleet image refresh + rolling restart (#41, milestone 1.2.0)"
 # ============================================================
+_fx_schema
 # 71.1 — structural, non-tautological static checks.
 check "cli_flags includes --update-sessions (mutation: remove the cli_flags entry -> fails)" \
     bash -c '
@@ -4705,6 +5196,7 @@ check "refresh child runs non-interactively (</dev/null) so an approval fails cl
 echo ""
 section "§77: SANDY_AGENT_ARGS — persistent per-workspace agent args from config (#59)"
 # ============================================================
+_fx_schema
 _S77="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
 # (a) Registered privileged-tier, NOT passive/env-only. Table-driven: this one
@@ -5464,7 +5956,7 @@ check "SANDY_TEST_PANE_TAGS has NO _sandy_key_metadata row (never in --print-sch
 # ============================================================
 section "§81: Status lines — outer tmux bar (#42) + Claude Code statusLine (#67)"
 # ============================================================
-_S81="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_fx_s81
 
 # --- (a) tmux status bar: reads runtime env via #{E:}, all three egress
 # postures color-coded, and the window-status blanking lines are present. ---
@@ -5494,8 +5986,6 @@ check "window-status-current-format is blanked" \
 
 # --- (b) Dockerfile.base bakes the sandy-claude-statusline helper. ---
 
-_S81_DFBASE="$(awk '/^generate_dockerfile_base\(\)/,/^}$/' "$_S81")"
-
 check "Dockerfile.base bakes /usr/local/bin/sandy-claude-statusline" \
     bash -c 'printf "%s" "$1" | grep -q "/usr/local/bin/sandy-claude-statusline"' -- "$_S81_DFBASE"
 check "Dockerfile.base chmod +x's sandy-claude-statusline" \
@@ -5523,8 +6013,6 @@ check "extracted jq expression: effort payload -> 'Opus · high · 42% ctx'" \
     ' -- "$_S81_JQ"
 
 # --- (d) all three settings.json branches add statusLine, only-if-absent. ---
-
-_S81_SETTINGS="$(awk '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/Seeded settings.json/' "$_S81")"
 
 check "node branch: defaults object includes statusLine -> sandy-claude-statusline" \
     bash -c 'printf "%s" "$1" | grep -q "const defaults = " && printf "%s" "$1" | grep "const defaults = " | grep -q "statusLine" && printf "%s" "$1" | grep "const defaults = " | grep -q "sandy-claude-statusline"' -- "$_S81_SETTINGS"
@@ -5557,6 +6045,7 @@ check "no STATUSLINE key was added to _sandy_key_metadata" \
 # ============================================================
 section "§82: Tool-use audit hook (SANDY_TOOL_AUDIT, HF-incident Issue 6)"
 # ============================================================
+_fx_s81
 # Reuses §81's _S81 / _S81_DFBASE / _S81_SETTINGS extractions. Seeds a PreToolUse
 # audit hook ONLY when SANDY_TOOL_AUDIT=1, only-if-absent so a user's own hook is
 # never clobbered; the baked helper writes {ts,tool,args} JSONL.
@@ -5612,6 +6101,7 @@ check "_sandy_head_display: refs/heads/<b>→<b>; detached:<sha>→detached HEAD
 echo ""
 section "§84: SANDY_EFFORT — pin Claude Code reasoning effort + record it (#effort)"
 # ============================================================
+_fx_schema
 # Plumbs a reasoning-effort knob to the inner claude (mirrors SANDY_MODEL):
 # passive key, validated host-side, applied as `claude --effort <level>`, and
 # recorded in sandy-session.json so a run's effort is provable after the fact.
@@ -6115,6 +6605,7 @@ check "cleanup() removes its own .claude-perm-mode-at-launch snapshot" \
 echo ""
 section "§91: parser <-> cli_flags lockstep (#156)"
 # ============================================================
+_fx_schema
 # Purpose: --print-schema's cli_flags array is hand-curated (see the comment
 # directly above it in sandy) -- nothing enforces that every flag the real
 # parsers accept is actually advertised there, or vice versa. #156 was exactly
@@ -9365,6 +9856,7 @@ check "§107(10) a deferred refresh is reported at session end (mutation: droppi
 
 echo ""
 section "§108: --start resolves first-encounter approvals pre-fork, and classifies its failures (#221)"
+_fx_s108
 # WHY. `--start` forks the supervisor with stdin on /dev/null, and container
 # bring-up happens THERE. A first-encounter dangerous-symlink approval reached
 # that supervisor, could not prompt, failed closed, and left the user no way to
@@ -9412,18 +9904,6 @@ check "§108(8) the failure branch exits with the classified code, not a literal
 check "§108(9) the new codes do not collide with the DEC-C table (--attach 3/4/5, --stop 4/5)" \
     bash -c '! grep -qE "_sandy_start_rc=[345]$" "$1"' -- "$_S108"
 
-# `timeout` is GNU coreutils and is NOT on a stock macOS (homebrew ships it as
-# `gtimeout`). Hardcoding it made the behavioral runs below exit 127 -- the
-# `|| true` then swallowed it and the greps searched "timeout: command not
-# found" for sandy output, so §108(10)/(11) and §109(3)-(5) FAILED on the
-# maintainer's machine while passing in CI. Resolve a real binary; with neither,
-# run unbounded -- every call site feeds </dev/null, so an approval prompt gets
-# EOF and returns rather than hanging.
-_S108_TO=""
-if command -v timeout >/dev/null 2>&1; then _S108_TO="timeout 60"
-elif command -v gtimeout >/dev/null 2>&1; then _S108_TO="gtimeout 60"
-fi
-
 # --- behavioral: APPROVE_ONLY actually reaches the approval -----------------
 # Driven against the REAL script with a stubbed docker, in a workspace holding
 # an escaping symlink. Non-TTY here, so the correct outcome is the fail-closed
@@ -9446,14 +9926,6 @@ ln -s "$_S108_T/outside" "$_S108_T/ws/escape"
 _S108_ABS="$(cd "$(dirname "$_S108")" && pwd -P)/$(basename "$_S108")"
 _S108_OUT="$( cd "$_S108_T/ws" && PATH="$_S108_T/bin:$PATH" SANDY_HOME="$_S108_T/home" \
     HOME="$_S108_T" SANDY_APPROVE_ONLY=1 $_S108_TO bash "$_S108_ABS" </dev/null 2>&1 || true )"
-# Same lesson as _s92_diag: a grep over captured output that fails without
-# showing the output is unactionable -- these two checks failed for a full
-# session with no way to see that the capture was "timeout: command not found".
-_s108_diag() {   # $1=captured output  $2=label
-    grep -q "Symlinks that point outside the workspace" <<<"$1" && return 0
-    printf '    \033[0;33m^ %s captured (first 200 bytes): %s\033[0m\n' \
-        "$2" "$(head -c 200 <<<"$1" | tr '\n' ' ' | cat -v)"
-}
 _s108_diag "$_S108_OUT" "§108(10/11) APPROVE_ONLY run"
 check "§108(10) APPROVE_ONLY REACHES the symlink approval (mutation: the pre-fix early exit produces no symlink output at all)" \
     bash -c 'printf "%s" "$1" | grep -q "Symlinks that point outside the workspace"' -- "$_S108_OUT"
@@ -9464,6 +9936,7 @@ unset _S108 _S108_ABS _S108_SBX _S108_EXIT _S108_BUILD _S108_T _S108_OUT
 
 echo ""
 section "§109: symlinks never mount \$SANDY_HOME; stranded proxies are reaped (#209, #222)"
+_fx_s108
 _S109="$SANDY_SCRIPT"
 
 # --- #209: a workspace symlink must not mount sandy's own state -------------
@@ -9792,6 +10265,7 @@ unset _S113_RE
 
 echo ""
 section "§114: SANDY_CROSS_SESSION_INBOUND + SANDY_HANDOFF_RELAY (1.10.0)"
+_fx_schema
 # WHY. Claude Code's crossSessionInbound gate decides whether another local
 # process (same uid, same container, out of a session's process ancestry) may
 # inject a turn with no human checkpoint. accept is the surface a handoff
@@ -10803,6 +11277,7 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
 # ============================================================
 section "§116: codex OAuth credentials are seeded into the rw sandbox, not overlaid :ro"
 # ============================================================
+_fx_schema
 # WHY. The old design overlaid an ephemeral copy of the host's ~/.codex/auth.json
 # READ-ONLY at /home/sandy/.codex/auth.json, so `codex login`, `codex logout`
 # and in-session token refresh all died with EROFS inside the container -- while
@@ -10879,6 +11354,7 @@ section "§115: the run's own summary is actually the last thing that runs"
 # ============================================================
 section "§117: ANTHROPIC_API_KEY is not forwarded when host OAuth credentials are mounted"
 # ============================================================
+_fx_schema
 # WHY. Claude Code resolves an environment API key AHEAD of the account
 # credentials file, so forwarding both had two failure modes and no good one:
 # the key silently wins and bills per-use, or -- if that key has never been
@@ -11132,6 +11608,7 @@ check "§118(7) with both, ONLY the top-level one is rewritten" \
 # ============================================================
 section "§119: every config key and flag in --print-schema is documented in the configuration guide"
 # ============================================================
+_fx_schema
 # WHY. CLAUDE.md's own rule is "also update README.md if user-facing behavior
 # changes", and that rule was followed for CLAUDE.md and SPECIFICATION.md and
 # silently missed for README twice in one release: SANDY_CLAUDE_AUTH and
@@ -12757,6 +13234,7 @@ unset _S129_DIR _S129_FILE _S129_DIRL _S129_IN _S129_OK
 # ============================================================
 section "§130: a repository cannot choose what gets bind-mounted (R5)"
 # ============================================================
+_fx_sandbox_dir
 # WHY, in three parts, all measured before anything was changed.
 #
 # R5a -- the `gitdir:` line in a `.git` FILE is REPOSITORY CONTENT, and it was
@@ -15332,6 +15810,7 @@ unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY 
 echo ""
 section "§148: feature manifests contribute per-agent launch arguments (#348)"
 # ============================================================
+_fx_schema
 # A manifest could mount files and export variables but had no way to make the
 # agent READ them, so anything agent-facing still needed a per-sandbox write
 # after selection. `agent_args` closes that: a list of strings per agent,
@@ -15905,6 +16384,7 @@ unset _S152_INT _S152_TOTAL _S152_GUARDED
 echo ""
 section "§153: agent_args compose — a second contributor of a non-repeatable flag must not vanish"
 # ============================================================
+_fx_schema
 # #363. agent_args is additive in the argv sandy BUILDS; whether it is additive
 # in EFFECT is decided by the parser of the agent, and for a flag that parser reads
 # once the second occurrence silently DISCARDS the first. Measured on Claude
@@ -17291,6 +17771,7 @@ unset _S164_SP _S164_SPV _S164_RX _S164_RXA _S164_MK
 unset -f _s164_run _s164_sp _s164_mk
 echo ""
 section "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three; the prompt names its provenance (#296, #295)"
+_fx_schema
 # WHY. `--start` answers launch approvals on the CLIENT tty in a SANDY_APPROVE_ONLY
 # pre-pass, because the supervisor it forks has stdin on /dev/null. That pass
 # covered the config keys and the symlinks but exited ~2500 lines before the
@@ -19042,6 +19523,7 @@ unset -f _s172_adopt _s172_marker_fe 2>/dev/null || true
 echo ""
 section "§173: receives — the default keyed on a DECLARED NEED, not the relay (#380)"
 # ============================================================
+_fx_schema
 # #380 (option B): the unset SANDY_CROSS_SESSION_INBOUND default now resolves
 # from a feature manifest's own `"receives": ["cross_session"]` rather than
 # from "an entry will start". The old rule ("an entry will start" alone
@@ -20325,6 +20807,7 @@ unset _S175_MISS _s175_t
 # ============================================================
 section "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
 # ============================================================
+_fx_schema
 # Companion units fill in (a)-(h) as they land, each an inversion of the
 # corresponding 2.5.0 announcement (§175) into "it is gone". Lettering
 # follows decisions.md verbatim (not the order §175's checks happen to run
@@ -23656,6 +24139,7 @@ fi
 
 section "§197: #437 — SANDY_CLAUDE_AUTH=oauth withholds CLAUDE_CODE_OAUTH_TOKEN; connectors that cannot load are named at launch"
 # ============================================================
+_fx_schema
 # Claude Code loads claude.ai connectors only for an account login, and it
 # resolves a long-lived CLAUDE_CODE_OAUTH_TOKEN ahead of that login. oauth used
 # to forward the token anyway, so a host with one in ~/.sandy/.secrets had no
@@ -23721,6 +24205,7 @@ unset -f _s197 2>/dev/null || true
 
 section "§198: install.sh and --upgrade install the latest RELEASE; SANDY_CHANNEL=dev installs main pinned to its commit"
 # ============================================================
+_fx_schema
 # Decision 1 (2026-10-05). Both used to download main: a stranger got
 # unreleased code, --upgrade moved a stable user onto the dev line, and a dev
 # install never updated (it compared only the version string). Runs the REAL
@@ -23818,6 +24303,7 @@ unset -f _s198_up _s198_inst 2>/dev/null || true
 
 section "§199: every config key in --print-schema carries a base_type derived from its type"
 # ============================================================
+_fx_schema
 # Decision 3 (2026-10-05). A consumer rendering keys by `type` broke on the
 # first `path` field it met; base_type gives every key a JSON kind to fall
 # back on (bool, int, or string), so a type added later degrades instead.
@@ -24025,6 +24511,7 @@ unset -f _s201 2>/dev/null || true
 echo ""
 section "§202: protected feature submounts — source authority and launch wiring"
 # ============================================================
+_fx_schema
 # Standard-library driver only; no pip, image pulls or runtime access. Each
 # mutation starts from a fresh scratch copy of sandy. The real launch check
 # invokes the entire script against docker/curl stubs and records actual argv.
@@ -24798,6 +25285,7 @@ unset _S204_WRITER _S204_FEBODY _S204_JESC _S204_PS _S204_FM _S204_RF _S204_GUAR
 
 
 section "§205: which gh account a sandbox uses — chosen on the host, recorded in the marker, shown by --accounts"
+_fx_schema
 # The host-side picker and its push check, extracted from sandy and run
 # against a stub gh that answers repos/<r> with push=true only for tokens in
 # STUB_PUSH, logs its argv and environment token, fails every call when
@@ -24906,6 +25394,7 @@ unset -f _s205 _s205f _s205_ct
 # ============================================================
 section "§208: Reflection AI's Mirror CLI as a single-agent (#463)"
 # ============================================================
+_fx_schema
 # decisions/2026-10-20-mirror-agent.md. Every check runs the REAL code: the
 # command builder against a stub `mirror` that records the argv it receives,
 # the container-side config.json seed under python3, the credential probe,
@@ -25126,6 +25615,7 @@ unset -f _s206_argv
 # ============================================================
 section "§207: #461 — the egress proxy can read its config under any umask, and a failed sidecar attach names why"
 # ============================================================
+_fx_hardening
 # The proxy runs as root with --cap-drop ALL, so it opens its host-written
 # config through the file's OTHER bits only. Written with a bare redirect, the
 # mode came from the operator's umask: under 077 the proxy died on
@@ -25137,43 +25627,6 @@ section "§207: #461 — the egress proxy can read its config under any umask, a
 # SPECIFICATION.md §8) on the argv the stub recorded for its `docker run`. The
 # proxy-section greps this replaces matched the whole of sandy, so a comment or
 # the AGENT's own flag satisfied them with the proxy's flag deleted.
-#
-# _hardening_unmet ARGS-FILE PIDS MEMORY ALLOWED-CAPS prints every hardening
-# property the recorded docker-run argv (one element per line) fails, and
-# nothing when it holds them all. MEMORY "-" accepts any non-empty value.
-# Shared with §225 (the agent's run), which unsets it.
-_hardening_unmet() {
-    [ -s "$1" ] || { echo "no docker run argv recorded"; return 0; }
-    # Split --flag=value into two elements first: Docker accepts both spellings,
-    # and a later --pids-limit=-1 or --security-opt=seccomp=unconfined must not
-    # hide behind the space form the checks below read. A bool flag's explicit
-    # value is kept whole so --read-only=false is not read as --read-only.
-    awk '/^--(read-only|privileged)=/ { print; next }
-         match($0, /^--[a-z-]+=/) { print substr($0, 1, RLENGTH - 1); print substr($0, RLENGTH + 1); next }
-         { print }' "$1" |
-    awk -v pids="$2" -v mem="$3" -v allowed=" $4 " '
-        p == "--cap-drop" && $0 == "ALL" { cd = 1 }
-        p == "--security-opt" && $0 == "no-new-privileges:true" { nnp = 1 }
-        p == "--security-opt" && index($0, "unconfined") { bad = bad " --security-opt " $0 }
-        p == "--pids-limit" { pl = $0 }
-        p == "--memory" { m = $0 }
-        p == "--cap-add" && !index(allowed, " " $0 " ") { bad = bad " --cap-add " $0 }
-        index($0, "--cap-add=") == 1 || index($0, "--privileged") == 1 { bad = bad " " $0 }
-        (p == "--pid" || p == "--ipc" || p == "--uts" || p == "--userns" || p == "--network" || p == "--net" || p == "--cgroupns") && $0 == "host" { bad = bad " " p " host" }
-        $0 ~ /^--(pid|ipc|uts|userns|network|net)=host$/ { bad = bad " " $0 }
-        $0 == "--read-only" || $0 == "--read-only=true" { ro = 1 }
-        index($0, "--read-only=") == 1 && $0 != "--read-only=true" { ro = 0 }
-        { p = $0 }
-        END {
-            if (!ro) printf " no --read-only"
-            if (!cd) printf " no --cap-drop ALL"
-            if (!nnp) printf " no --security-opt no-new-privileges:true"
-            if (pl != pids) printf " --pids-limit is [%s], want %s", pl, pids
-            if (mem == "-" && m !~ /^[1-9][0-9]*[bkmg]?$/) printf " --memory is [%s], want a non-zero cap", m
-            if (mem != "-" && m != mem) printf " --memory is [%s], want %s", m, mem
-            if (bad != "") printf " loosened by:%s", bad
-        }'
-}
 _S207_FN="$(sed -n '/^_sandy_launch_dir()/p' "$SANDY_SCRIPT")
 $(sed -n '/^_sandy_term_lines() {/,/^}$/p' "$SANDY_SCRIPT")
 $(sed -n '/^start_proxy_sidecar() {/,/^}$/p' "$SANDY_SCRIPT")"
@@ -25241,6 +25694,7 @@ unset -f _s207
 # ============================================================
 section "§209: agent_wrapper — a feature's launcher runs in front of an agent's interactive command"
 # ============================================================
+_fx_schema
 # A feature names an executable on its read-only payload; the agent's
 # interactive pane runs `<wrapper> <agent> <sandy's args...>`. Asserted on what
 # actually runs: a stub wrapper records the argv it RECEIVES and execs it, a
@@ -25864,210 +26318,14 @@ unset -f _s214_run _s214_rc _s214_diag _s214_fg _s214_fg_refused
 
 section "§215: credentials reach the agent container the way sandy says: CLAUDE_CODE_OAUTH_TOKEN blanked, OPENAI_API_KEY never on docker's argv"
 # ============================================================
+_fx_a6
 # Sections 215-219 drive the REAL launcher through a plain foreground launch
 # (-p, egress off, offline) against stubs, the way §214(6)-(8) does, and assert
 # what reached `docker run`. They replace presence greps that the 2026-11-15
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
-#
-# The stubs, shared by 215-219, 225, 226 and the B2 sections 236, 227-232, 237
-# and 238 (removed at the end of §238, which follows §226, which follows §225,
-# which follows §219):
-#   docker    logs every call; answers the network queries (subnet, gateway,
-#             bridge name); saves each `run`'s argv one element per line, and a
-#             copy of its --env-file, under runs/; for the agent's run (the one
-#             with --name) it plays Docker's bind-mount auto-creation: each
-#             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
-#             is created in the workspace, and A6_AGENT_WRITES gets a file.
-#             With A6_SNAP_DST set, the source of the agent's mount onto that
-#             container path goes to runs/snap.src and the files it holds at
-#             that moment to runs/snap.files. A6_RUN_RC is the agent run's rc;
-#             A6_TERM_AT_RUN SIGTERMs the launcher (its parent) from inside
-#             the agent run. When the agent container is force-removed, whether
-#             that mount source still exists goes to runs/snap.at-rm.
-#             A6_NETFAIL makes `network create` fail.
-#             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
-#             With A6_TERM_ON_DETACH=1 a detached run (`run -d`, the --start
-#             supervisor's) is recorded and then SIGTERMs its caller, which
-#             is how --stop ends a supervisor, so §228 can drive one.
-#   curl      fails, except the two build-dependency probes when A6_NET=1, so a
-#             missing image builds instead of being deferred.
-#   gh        prints nothing and fails: no host token, no network round trip.
-#   sudo      logs and succeeds, so the Linux iptables rules "apply".
-#   security  fails: a macOS host's keychain is never read.
-#   uname     `uname -s` prints A6_OS (Linux unless a launch says otherwise),
-#             so every launch takes the same path on a macOS host as on CI,
-#             Linux-only ones included; everything else is the real uname.
-_A6_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
-mkdir -p "$_A6_DIR/bin"
-_A6_SCRIPT="$SANDY_SCRIPT"
-cat > "$_A6_DIR/bin/docker" <<'EOF'
-#!/usr/bin/env bash
-printf 'docker %s\n' "$*" >> "$A6_LOG/events.log"
-case "$*" in
-    "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
-    "network inspect "*Gateway*) echo 172.30.0.1 ;;
-    "network inspect "*bridge.name*) echo br-sdy-a6 ;;
-    info) [ -z "${A6_DOCKER_INFO:-}" ] || printf '%s\n' "$A6_DOCKER_INFO" ;;
-esac
-if [ "${1:-}" = run ]; then
-    _n=0
-    while [ -e "$A6_LOG/runs/$_n.args" ]; do _n=$((_n + 1)); done
-    printf '%s\n' "$@" > "$A6_LOG/runs/$_n.args"
-    _prev=""; _agent=0
-    for _a in "$@"; do
-        if [ "$_prev" = --env-file ]; then cp "$_a" "$A6_LOG/runs/$_n.envfile"; fi
-        if [ "$_prev" = --name ]; then _agent=1; fi
-        _prev="$_a"
-    done
-    if [ "$_agent" = 1 ]; then
-        for _m in ${A6_MOUNTPOINTS:-}; do
-            for _a in "$@"; do
-                case "$_a" in
-                    *":$A6_CWS/$_m"|*":$A6_CWS/$_m:ro")
-                        mkdir -p "$A6_WS/$_m"
-                        printf 'mountpoint %s\n' "$_m" >> "$A6_LOG/events.log"
-                        if [ "${A6_AGENT_WRITES:-}" = "$_m" ]; then : > "$A6_WS/$_m/agent-file"; fi
-                        break ;;
-                esac
-            done
-        done
-        if [ -n "${A6_SNAP_DST:-}" ]; then
-            for _a in "$@"; do
-                case "$_a" in
-                    *":$A6_SNAP_DST")
-                        _src="${_a%":$A6_SNAP_DST"}"
-                        printf '%s\n' "$_src" > "$A6_LOG/runs/snap.src"
-                        (cd "$_src" 2>/dev/null && find . -type f | LC_ALL=C sort) > "$A6_LOG/runs/snap.files" ;;
-                esac
-            done
-        fi
-        if [ -n "${A6_TERM_AT_RUN:-}" ]; then kill -TERM "$PPID"; sleep 1; fi
-        [ -z "${A6_RUN_RC:-}" ] || exit "$A6_RUN_RC"
-    fi
-    if [ "${A6_TERM_ON_DETACH:-}" = 1 ] && [ "${2:-}" = -d ]; then kill -TERM "$PPID"; fi
-fi
-case "$*" in
-    "network create"*) [ -z "${A6_NETFAIL:-}" ] || exit 1 ;;
-    "rm -f sandy-ws-"*)
-        if [ -f "$A6_LOG/runs/snap.src" ]; then
-            if [ -e "$(cat "$A6_LOG/runs/snap.src")" ]; then echo present; else echo gone; fi > "$A6_LOG/runs/snap.at-rm"
-        fi ;;
-esac
-exit 0
-EOF
-cat > "$_A6_DIR/bin/curl" <<'EOF'
-#!/bin/sh
-printf 'curl %s\n' "$*" >> "$A6_LOG/events.log"
-case "$*" in
-    *deb.debian.org*|*registry.npmjs.org*) [ "${A6_NET:-0}" = 1 ] && exit 0 ;;
-esac
-exit 1
-EOF
-printf '#!/bin/sh\nprintf "gh %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 1\n' > "$_A6_DIR/bin/gh"
-printf '#!/bin/sh\nprintf "sudo %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 0\n' > "$_A6_DIR/bin/sudo"
-printf '#!/bin/sh\nprintf "security %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 44\n' > "$_A6_DIR/bin/security"
-printf '#!/bin/sh\nif [ "$1" = -s ] && [ -n "${A6_OS:-}" ]; then echo "$A6_OS"; exit 0; fi\nexec %s "$@"\n' \
-    "$(command -v uname)" > "$_A6_DIR/bin/uname"
-chmod +x "$_A6_DIR/bin/docker" "$_A6_DIR/bin/curl" "$_A6_DIR/bin/gh" "$_A6_DIR/bin/sudo" "$_A6_DIR/bin/security" "$_A6_DIR/bin/uname"
-
-# _a6_launch CASE [VAR=value ...] [-- sandy-args ...]   (default: -p fixture)
-# CASE names a fixture under $_A6_DIR: CASE/ is $HOME, CASE/ws the workspace
-# and CASE/sh $SANDY_HOME, all kept across launches of the same CASE; the
-# events log and runs/ hold the latest launch only, and its output goes to
-# CASE/out. Every credential, agent and SANDY_* variable of the launching
-# shell is removed first (inside sandy, the live session's would leak in).
-# Sets _A6_RC.
-_a6_launch() {
-    local c="$_A6_DIR/$1"; shift
-    local envs args
-    envs=(); args=(-p fixture)
-    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
-    if [ $# -gt 0 ]; then shift; args=("$@"); fi
-    rm -rf "$c/runs"; mkdir -p "$c/ws" "$c/sh" "$c/runs"; : > "$c/events.log"
-    _A6_RC=0
-    (
-        for _v in $(compgen -e); do
-            case "$_v" in
-                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
-            esac
-        done
-        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
-        cd "$c/ws" && env PATH="$_A6_DIR/bin:$PATH" HOME="$c" SANDY_HOME="$c/sh" \
-            A6_LOG="$c" A6_WS="$c/ws" A6_CWS=/home/sandy/ws A6_OS=Linux SANDY_EGRESS=off SANDY_OFFLINE=1 \
-            ${envs[@]+"${envs[@]}"} bash "$_A6_SCRIPT" ${args[@]+"${args[@]}"} </dev/null >"$c/out" 2>&1
-    ) || _A6_RC=$?
-}
-# The agent container's run: the saved argv carrying --name sandy-ws-<hash>.
-_a6_agent_args() {   # $1 = CASE -> path, or nothing
-    local f
-    for f in "$_A6_DIR/$1"/runs/*.args; do
-        [ -f "$f" ] || continue
-        if awk 'p=="--name" && index($0,"sandy-ws-")==1 {ok=1} {p=$0} END {exit ok?0:1}' "$f"; then printf '%s\n' "$f"; fi
-    done | tail -n 1
-}
-# One argv element equal to $2 directly followed by one equal to $3.
-_a6_pair() {   # $1 = args file  $2 $3
-    [ -f "$1" ] && awk -v a="$2" -v b="$3" 'p==a && $0==b {ok=1} {p=$0} END {exit ok?0:1}' "$1"
-}
-_a6_sandbox() {   # $1 = CASE -> its sandbox dir (the slug sandy computes)
-    local h
-    h="$(printf '%s' "$_A6_DIR/$1/ws" | { shasum -a 256 2>/dev/null || sha256sum; })"
-    h="${h%% *}"
-    printf '%s/%s/sh/sandboxes/ws-%s\n' "$_A6_DIR" "$1" "${h:0:8}"
-}
-_a6_diag() {   # $1 = label  $2 = CASE
-    printf '    \033[0;33m^ %s: rc %s, output (last 400 bytes): %s\033[0m\n' \
-        "$1" "${_A6_RC:-none}" "$(tail -c 400 "$_A6_DIR/$2/out" 2>/dev/null | tr '\n' ' ' | cat -v)"
-}
-
-# --- Independent launches run side by side (§236-§239) ----------------------
-# A launch through these stubs is a few hundred short-lived processes, about a
-# second each on a macOS host, and §236-§239 make about a hundred of them.
-# Each case has its own HOME, SANDY_HOME, workspace, events log and runs/,
-# and no launch reads or writes another case's files, so cases run in the
-# background, at most _A6_JOBS at once. Each check still runs here, in order,
-# after its own case's job has finished, and reads only that case's files.
-# _a6_bg CASE CMD [ARG...] runs CMD (which launches CASE, once or more, and
-# must never call check: the counters live in this shell); _a6_join CASE
-# waits for it and sets _A6_RC to its LAST launch's status, or "lost" when
-# the job died before recording one, which fails every check that reads it.
-_A6_JOBS=4
-_A6_BG_PIDS=()
-_a6_bg_key() { printf '%s/.bg/%s' "$_A6_DIR" "$(printf '%s' "$1" | tr '/' '_')"; }
-_a6_bg() {
-    local c="$1" k p live; shift
-    k="$(_a6_bg_key "$c")"
-    while :; do
-        live=()
-        for p in ${_A6_BG_PIDS[@]+"${_A6_BG_PIDS[@]}"}; do
-            if kill -0 "$p" 2>/dev/null; then live+=("$p"); fi
-        done
-        _A6_BG_PIDS=(${live[@]+"${live[@]}"})
-        [ "${#_A6_BG_PIDS[@]}" -ge "$_A6_JOBS" ] || break
-        sleep 0.05
-    done
-    mkdir -p "$_A6_DIR/.bg"; rm -f "$k.rc" "$k.pid"
-    ( _A6_RC=lost; "$@"; printf '%s\n' "$_A6_RC" > "$k.rc" ) &
-    printf '%s\n' "$!" > "$k.pid"
-    _A6_BG_PIDS+=("$!")
-}
-_a6_join() {   # $1 = CASE -> _A6_RC
-    local k
-    k="$(_a6_bg_key "$1")"
-    if [ -f "$k.pid" ]; then wait "$(cat "$k.pid")" 2>/dev/null || true; fi
-    _A6_RC="$(cat "$k.rc" 2>/dev/null || echo lost)"
-    rm -f "$k.pid"
-}
-# §227(5)'s launch waits out a 6 s scan (sandy prints the duration only past
-# 5 whole seconds), so it starts here, with the harness, and runs beside the
-# launches of §215-§227; §227 joins it. Its fixture is defined here for that
-# reason.
-_S227_SB="$_A6_DIR/s227-slowbin"
-mkdir -p "$_S227_SB" "$_A6_DIR/s227s/ws"
-printf '#!/bin/sh\ncase " $* " in *" -maxdepth 8 "*) sleep 6 ;; esac\nexec %s "$@"\n' "$(command -v find)" > "$_S227_SB/find"
-chmod +x "$_S227_SB/find"
-_a6_bg s227s _a6_launch s227s PATH="$_S227_SB:$_A6_DIR/bin:$PATH" SANDY_APPROVE_ONLY=1 --
+# The stubs and the helpers that launch through them are the _fx_a6 fixture, at
+# the top of this file.
 
 # --- CLAUDE_CODE_OAUTH_TOKEN: every launch that does not forward the token
 # blanks it (`-e CLAUDE_CODE_OAUTH_TOKEN=`), so a stray value can never reach
@@ -26142,9 +26400,11 @@ for _A6_AG in codex opencode; do
 done
 unset _A6_CRED _A6_WHY _A6_A _A6_AG
 unset -f _a6_blanked
+_a6_done
 
 section "§216: cmux: the Notification hook is installed and registered once, never twice"
 # ============================================================
+_fx_a6
 # §22's greps for 'Notification' and 'cmux-notify' each had other matches, so
 # they survived deleting the registration (C03) and the dedup (C04), and its
 # "functional test" ran a jq copy of the merge written in this file, never
@@ -26209,9 +26469,11 @@ else
     unset -f _a6_cmux_count
     unset _A6_SB _A6_ONE _A6_N1 _A6_N2 _A6_N3 _A6_N4
 fi
+_a6_done
 
 section "§217: build hashes: each agent image keeps its own, and a skill-pack rebuild carries through to the project image"
 # ============================================================
+_fx_a6
 # Replaces greps for `.build_hash_codex`, `.build_hash_opencode`,
 # `SKILLS_REBUILT` and `skills_build_hash`, each of which also matched a line
 # that is not the behaviour (C30, C39, C16, C17 survived everything). Builds
@@ -26268,9 +26530,11 @@ check "§217(4) --rebuild clears the skill-pack hash: after \`--rebuild --build-
     _ "$_A6_R4" "$_A6_R5" "$_A6_B4" "$_A6_B5"
 unset _A6_B1 _A6_B2 _A6_B3 _A6_B4 _A6_B5 _A6_R1 _A6_R2 _A6_R3 _A6_R4 _A6_R5 _A6_SKV _A6_PRJ
 unset -f _a6_built
+_a6_done
 
 section "§218: Linux local LLM: the agent gets host.docker.internal, and the iptables ACCEPT is inserted before it starts"
 # ============================================================
+_fx_a6
 # Replaces two greps that each matched a sibling line: the proxy's own
 # --add-host (C35) and the cleanup's `iptables -D` of the same rule (C36).
 # `uname -s` answers Linux (A6_OS), so this runs the Linux branch on any host;
@@ -26294,9 +26558,11 @@ _A6_DEL="$(grep -n -m1 -xF -- "${_A6_RULE/ -I / -D }" "$_A6_DIR/llm/events.log" 
 check "§218(2) ...and the tcp ACCEPT for the gateway's port is INSERTED before the agent starts, then deleted after it exits (mutation C36: the insert replaced by \`:\`; lines insert=${_A6_INS:-none} run=${_A6_RUN:-none} delete=${_A6_DEL:-none})" \
     bash -c 'test -n "$1" && test -n "$2" && test -n "$3" && test "$1" -lt "$2" && test "$2" -lt "$3"' _ "$_A6_INS" "$_A6_RUN" "$_A6_DEL"
 unset _A6_LLM _A6_RULE _A6_A _A6_INS _A6_RUN _A6_DEL
+_a6_done
 
 section "§219: the empty stub directories a session's mounts created in the workspace are removed when it exits"
 # ============================================================
+_fx_a6
 # §44's grep found `.session-created-stubs` and `rmdir` in cleanup() even with
 # the whole removal loop deleted (C45). A claude sandbox with its own
 # workspace-commands and workspace-agents overlays mounts them over
@@ -26313,9 +26579,11 @@ check "§219(1) at exit the empty mount point sandy's session created is gone, a
     bash -c 'test ! -e "$1/.claude/commands" && test -d "$1/.claude" && test ! -e "$2/.session-created-stubs"' _ "$_A6_DIR/stubs/ws" "$(_a6_sandbox stubs)"
 check "§219(2) ...while the one the agent wrote into is kept, with its file, and the launch says why" \
     bash -c 'test -f "$1/.claude/agents/agent-file" && grep -qF "$1/.claude/agents: not empty" "$2"' _ "$_A6_DIR/stubs/ws" "$_A6_DIR/stubs/out"
+_a6_done
 
 section "§225: the agent's docker run is hardened the way SPECIFICATION.md §18 says"
 # ============================================================
+_fx_a6; _fx_hardening
 # §23's "cap-drop ALL is configured" grepped the whole of sandy, so it passed
 # with both the agent's and the proxy's --cap-drop deleted: a comment matched.
 # This drives a real foreground launch (the §215 harness) and asserts on the
@@ -26373,10 +26641,11 @@ check "§225(5) control: SANDY_GPU=all without the NVIDIA runtime warns and pass
 unset _A6_NV
 unset -f _a6_gpus
 unset _A6_A _A6_WHY
-unset -f _hardening_unmet
+_a6_done
 
 section "§226: a SANDY_CLAUDE_AUTH=profile launch removes its copy of the profile's credentials when it exits"
 # ============================================================
+_fx_a6
 # cleanup() removed the profile copy (PROFILE_TMPDIR) only inside its
 # CRED_TMPDIR block, and profile mode empties CRED_JSON, so CRED_TMPDIR never
 # exists on a profile launch: every one left a 0700 dir in $TMPDIR holding a
@@ -26504,9 +26773,11 @@ check "§226(5) an exit between arming the trap and the credential setup leaves 
     test -z "$_A6_WHY"
 unset _A6_WHY _A6_V _A6_VARS _A6_ENVS _A6_N _A6_PID
 unset -f _a6_profile_residue _a6_profile_fixture
+_a6_done
 
 section "§236: the symlink scan prunes node_modules, .venv* and .git and finds what the filtered scan found; a workspace under such a path is scanned too (optimization pass B2, decision D2)"
 # ============================================================
+_fx_a6; _fx_s236
 # WHY. The scan used `-not -path` filters, so find still walked every
 # node_modules, .venv* and .git tree and dropped what it found there (on one
 # workspace 123 s of a 264 s --start, run twice). -prune stops the walk. Two
@@ -26542,29 +26813,6 @@ _s236_expect() {   # $1 = HOME -> the gate's set for _s236_tree, C-sorted
 }
 _s236_expect_mounts() {   # $1 = HOME -> the symlink mounts for _s236_tree, C-sorted
     printf '%s\n' "$1/t1:$1/t1" "$1/t2:$1/t2" "$1/t2:/home/sandy/t2" "$1/t3:$1/t3" | LC_ALL=C sort
-}
-# The agent run's -v values whose host side is one of the fixture targets.
-_s236_mounts() {   # $1 = CASE  $2 = HOME
-    local a
-    a="$(_a6_agent_args "$1")"
-    [ -n "$a" ] || return 0
-    awk -v h="$2" 'p=="-v" && (index($0,h"/t")==1 || index($0,h"/wf:")==1) {print} {p=$0}' "$a" | LC_ALL=C sort
-}
-# rc 0, an agent run, the approved list unchanged, and exactly the expected
-# mounts. Prints the first unmet condition.
-_s236_unmet() {   # $1 = CASE  $2 = HOME  $3 = expected list  $4 = expected mounts
-    [ "$_A6_RC" = 0 ] || { echo "launch rc $_A6_RC"; return 0; }
-    [ -n "$(_a6_agent_args "$1")" ] || { echo "no agent docker run"; return 0; }
-    [ "$(LC_ALL=C sort "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list")" = "$3" ] \
-        || { echo "approved list changed: $(tr '\n' ';' < "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list")"; return 0; }
-    [ "$(_s236_mounts "$1" "$2")" = "$4" ] || echo "mounts: $(_s236_mounts "$1" "$2" | tr '\n' ' ')"
-}
-# The protected link's target as the scan records it (readlink -f): on macOS
-# /etc is a link to /private/etc.
-_S236_ETC="$(cd /etc && pwd -P)/hosts"
-_s236_seed() {   # $1 = CASE  $2 = list content
-    mkdir -p "$(_a6_sandbox "$1")"
-    printf '%s\n' "$2" > "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list"
 }
 
 
@@ -26617,9 +26865,12 @@ for _S236_P in node_modules .venv; do
         test "$_S236_OK" = 0
 done
 unset _S236_H _S236_WHY _S236_P _S236_C _S236_OK
+unset -f _s236_tree _s236_expect _s236_expect_mounts
+_a6_done
 
 section "§227: SANDY_SYMLINK_SCAN_SKIP leaves a directory out of the symlink scan, never a protected path, and names an entry that matches nothing (optimization pass B2, decision D12a)"
 # ============================================================
+_fx_a6; _fx_s236
 # Leaving a directory out removes mounts: a link the scan never sees is
 # neither prompted for nor mounted, and dangles in the container. The one link
 # the scan must still see is one at a path sandy mounts by name, which the
@@ -26627,6 +26878,14 @@ section "§227: SANDY_SYMLINK_SCAN_SKIP leaves a directory out of the symlink sc
 # privileged (a hidden link never reaches the gate, §237), so these launches
 # set it from the WORKSPACE config with SANDY_AUTO_APPROVE_PRIVILEGED=1 (the
 # config-key approval, never the symlink gate's) and no terminal.
+# (5)'s launch waits out a 6 s scan (sandy prints the duration only past 5
+# whole seconds), so it starts first and runs beside the launches below; (5),
+# the last check, joins it.
+_S227_SB="$_A6_DIR/s227-slowbin"
+mkdir -p "$_S227_SB" "$_A6_DIR/s227s/ws"
+printf '#!/bin/sh\ncase " $* " in *" -maxdepth 8 "*) sleep 6 ;; esac\nexec %s "$@"\n' "$(command -v find)" > "$_S227_SB/find"
+chmod +x "$_S227_SB/find"
+_a6_bg s227s _a6_launch s227s PATH="$_S227_SB:$_A6_DIR/bin:$PATH" SANDY_APPROVE_ONLY=1 --
 _s227_tree() {   # $1 = HOME  $2 = WS
     mkdir -p "$1/t1" "$1/t2" "$1/t3" "$1/wf" "$2/scratch/deep" "$2/.github" "$2/.sandy"
     ln -s "$1/t2" "$2/scratch/far"; ln -s "$1/t1" "$2/scratch/deep/x"; ln -s /etc/hosts "$2/scratch/.npmrc"
@@ -26673,15 +26932,18 @@ check "§227(4) control: without the key the same launch refuses scratch/far, sc
 # prints its duration and names the key. A find stub delays only the scan's
 # own find (the one with -maxdepth 8) by 6 s; the approval pass is enough to
 # run it. The fast launches above print neither line. (The launch started at
-# the harness, in §215, so its 6 s run beside the launches since.)
+# the top of this section, so its 6 s ran beside the launches above.)
 _a6_join s227s
 check "§227(5) a slow scan says it is scanning after 2 s, then prints its duration naming SANDY_SYMLINK_SCAN_SKIP; a fast one prints neither (mutations: the 2 s notice or the duration line removed; rc ${_A6_RC:-none})" \
     bash -c 'test "$1" = 0 && grep -qF "Scanning workspace for symlinks" "$2" && grep -q "Symlink scan took [0-9]*s\..*SANDY_SYMLINK_SCAN_SKIP" "$2" && ! grep -qF "Scanning workspace for symlinks" "$3" && ! grep -q "Symlink scan took" "$3"' \
     _ "$_A6_RC" "$_A6_DIR/s227s/out" "$_A6_DIR/s227/out"
 unset _S227_H _S227_A _S227_WHY _S227_SB
+unset -f _s227_tree
+_a6_done
 
 section "§228: under --start the supervisor scans the workspace again and gates as main does: a link planted after the approval pass is refused wherever it is (optimization pass B2, decision D12c withdrawn)"
 # ============================================================
+_fx_a6; _fx_s236; _fx_s228
 # The --start client's approval pass (SANDY_APPROVE_ONLY) scans and resolves
 # the gate on the client's terminal; the supervisor then scans the workspace
 # again and runs the same gate under /dev/null, as on main. (B2 first had the
@@ -26693,20 +26955,6 @@ section "§228: under --start the supervisor scans the workspace again and gates
 # agent run, the approved list unchanged. The supervisor is driven for real
 # (SANDY_DAEMON_SUPERVISOR=1, the argv the client re-execs); the docker stub
 # records its detached run and then SIGTERMs it, as --stop does.
-_s228_ws() {   # $1 = CASE: HOME/t1..t5, ws links a -> t1 and b -> t2, both approved
-    local h="$_A6_DIR/$1"
-    mkdir -p "$h/t1" "$h/t2" "$h/t3" "$h/t5" "$h/ws"
-    ln -s "$h/t1" "$h/ws/a"; ln -s "$h/t2" "$h/ws/b"
-    _s236_seed "$1" "$(printf '%s\n' "a -> $h/t1" "b -> $h/t2")"
-}
-_s228_pass() {   # $1 = CASE
-    rm -f "$_A6_DIR/$1/result"
-    _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_A6_DIR/$1/result" --
-}
-_s228_sup() {   # $1 = CASE
-    _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 \
-        A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/$1/ws"
-}
 # _s228_after CASE PLANT: the fixture, the approval pass, PLANT (a command,
 # run between the two), then the supervisor; a whole case, for _a6_bg.
 _s228_after() {
@@ -26762,9 +27010,11 @@ check "§228(5) a .gstack link planted after the pass is refused by the supervis
     _ "$_A6_DIR/s228g/out" "$(_a6_agent_args s228g)" "$_A6_DIR/s228g"
 unset _S228_SB _S228_H _S228_M _S228_OK
 unset -f _s228_n _s228_p _s228_g _s228_after
+_a6_done
 
 section "§229: the --start approval pass makes no docker call and generates no build files (optimization pass B2, F5)"
 # ============================================================
+_fx_a6; _fx_s228
 # The pass decides nothing from Docker; it used to run `docker info` and both
 # reapers (`network ls`, `ps -a`) and generate the build files, all of which
 # the supervisor does again. It runs from a client that has just passed the
@@ -26780,8 +27030,11 @@ check "§229(2) ...and generated no build files: no Dockerfile*, entrypoint.sh o
 _a6_launch s229 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
 check "§229(3) control: a plain launch through the same stubs calls docker info and writes the build files (rc ${_A6_RC:-none})" \
     bash -c 'grep -q "^docker info" "$1" && test -f "$2/Dockerfile.base"' _ "$_A6_DIR/s229/events.log" "$_A6_DIR/s229/sh"
+unset _S229_LOG
+_a6_done
 section "§230: the scan key never hides a link at a path sandy copies or mounts by name, nor at an ancestor of one, and the --start supervisor refuses one planted after the pass (B2 send-back)"
 # ============================================================
+_fx_a6; _fx_s236; _fx_s228; _fx_s230
 # .claude/{commands,agents,plugins} and .gemini/{extensions,commands} are
 # COPIED into the sandbox by name (`cp -r`, then mounted read-write); the
 # protected paths and .gstack are mounted by name. Docker and cp -r follow a
@@ -26792,21 +27045,6 @@ section "§230: the scan key never hides a link at a path sandy copies or mounts
 # the copied trees' contents when they change after the approval pass (cases
 # a5, a6). Each case here refuses without a terminal; before the fix each
 # launched with rc 0.
-_s230_refused() {   # $1 = CASE  $2 = the link that must be named
-    [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$1")" ] \
-        && grep -q "need interactive approval\|present at previous approval" "$_A6_DIR/$1/out" \
-        && ! grep -qF "dropping these keys" "$_A6_DIR/$1/out" \
-        && grep -qF -- "$2" "$_A6_DIR/$1/out"
-}
-# --start cases: links planted between the approval pass and the supervisor.
-# _s228_ws gives a -> t1, b -> t2, approved.
-_s230_sup_after() {   # $1 = CASE; runs the pass, then $2... (a command) , then the supervisor
-    local c="$1"; shift
-    _s228_ws "$c"; mkdir -p "$_A6_DIR/$c/secret" "$_A6_DIR/$c/other"
-    _s228_pass "$c"
-    "$@"
-    _s228_sup "$c"
-}
 _s230_a5() { mkdir -p "$_A6_DIR/s230-a5/ws/.claude"; ln -s "$_A6_DIR/s230-a5/secret" "$_A6_DIR/s230-a5/ws/.claude/commands"; }
 _s230_a6() { printf '{}\n' > "$_A6_DIR/s230-a6/other/settings.json"; rm -rf "$_A6_DIR/s230-a6/ws/.claude"; ln -s "$_A6_DIR/s230-a6/other" "$_A6_DIR/s230-a6/ws/.claude"; }
 _s230_a7() { mkdir -p "$_A6_DIR/s230-a7/ws/.claude/commands"; ln -s "$_A6_DIR/s230-a7/secret" "$_A6_DIR/s230-a7/ws/.claude/commands/x"; }
@@ -26865,10 +27103,12 @@ _S230=s230-a8; _a6_join "$_S230"
 check "§230(7) an approved .claude link retargeted after the pass is judged with its new target and refused (rc ${_A6_RC:-none})" \
     _s230_refused "$_S230" ".claude -> $_A6_DIR/$_S230/o2"
 unset _S230
-unset -f _s230_a5 _s230_a6 _s230_a7 _s230_a8   # _s230_refused/_s230_sup_after: §232 uses them
+unset -f _s230_a5 _s230_a6 _s230_a7 _s230_a8
+_a6_done
 
 section "§231: skip entries are literal and workspace-relative (B2 send-back)"
 # ============================================================
+_fx_a6
 # I6: an entry is a literal path. With a directory literally named `.*`
 # present, the entry `.*` names it and prunes it alone -- not every
 # dot-directory, as an unescaped find -path pattern would. The link under
@@ -26888,9 +27128,11 @@ _S231=s231-dots; _a6_join "$_S231"
 check "§231(2) an entry with a .. component, or an absolute one, is refused by name, not used (mutation: the ./.. check removed; rc ${_A6_RC:-none})" \
     bash -c 'grep -qF "'"'"'sub/../scratch'"'"' is not a directory inside the workspace" "$1" && grep -qF "'"'"'/abs'"'"' is not a directory inside the workspace" "$1"' _ "$_A6_DIR/$_S231/out"
 unset _S231
+_a6_done
 
 section "§232: a path sandy mounts or copies by name is judged where it RESOLVES, through any internal link, whatever the key hides; copied trees are copied with cp -R (B2 send-back 2)"
 # ============================================================
+_fx_a6; _fx_s236; _fx_s228; _fx_s230
 # Round 2 of the verifier: `.claude -> vendor` with `vendor/hooks ->
 # ~/secret` and SANDY_SYMLINK_SCAN_SKIP=vendor launched with the secret
 # mounted at .claude/hooks, because the sweep judged only the first link it
@@ -27071,10 +27313,12 @@ _S232_C=s232-case; _a6_join "$_S232_C"
 check "§232(case) an entry spelled in another case than the directory (.CLAUDE for .claude) is named in a warning" \
     grep -qF "'.CLAUDE' matches no directory" "$_A6_DIR/$_S232_C/out"
 unset _S232_K _S232_C _S232_T _S232_A _S232_CP _S232_W _S232_N _S232_P _S232_R _S232_E _S232_OK _S232_ALIASES _S232_TREES
-unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8 _s232_at _s232_in _s232_once _s232_b8_case   # _s230_refused/_s230_sup_after: §237 uses them
+unset -f _s232_alias _s232_b3 _s232_n4 _s232_b8 _s232_at _s232_in _s232_once _s232_b8_case
+_a6_done
 
 section "§237: paths under .git are judged like every by-name path, even through a .git link, and SANDY_SYMLINK_SCAN_SKIP from a workspace config needs approval (B2 send-back 3)"
 # ============================================================
+_fx_a6; _fx_s236; _fx_s230
 # Round 3 of the verifier (g4, g5): `.git -> vendor/fakegit`, with
 # vendor/fakegit/config -> ~/.aws/credentials and vendor/fakegit/hooks -> an
 # outside directory, launched with both mounted at /home/sandy/ws/.git/config
@@ -27204,8 +27448,12 @@ check "§237(6) ...and the same from the environment (rc ${_A6_RC:-none})" \
 _a6_join s237-kc
 check "§237(7) control: the same tree with no key is refused for vendor/x, so (5) and (6) ran because of the prune (rc ${_A6_RC:-none})" \
     _s230_refused s237-kc "vendor/x -> $_A6_DIR/s237-kc/secret"
+unset _S237 _S237_OK
+unset -f _s237_git _s237_seed _s237_held _s237_g5 _s237_g5o _s237_kt _s237_pruned
+_a6_done
 section "§238: every path sandy mounts by name is judged, a gitdir named by a .git FILE and the submodule gitdirs under .git/modules included, and every -v source is re-checked before docker run by where it physically lies (B2 send-backs 4 and 5)"
 # ============================================================
+_fx_a6; _fx_s236; _fx_s230
 # Round 4 of the verifier: a .git FILE (`gitdir: vendor/fakegit`) whose
 # config or hooks link out of the workspace, `gitdir: lnk` with lnk -> an
 # outside git directory, and `.git -> vendor/fakegit` whose
@@ -27536,12 +27784,12 @@ unset -f _s238_noescape _s238_fg _s238_p _s238_p2 _s238_p3 _s238_pd _s238_pu
 unset _S238_N _S238_R _S238_O
 unset _S238_OK _S238_K _S238_C _S238_W _S238_A _S238_G _S238_D _S238_R1 _S238_R2 _S238_R3 _S238_R4 _S238_R5 _S238_R6 _S238_R7 _S238_R8 _S238_R9 _f _x
 unset -f _s238_fakegit _s238_home _s238_refused _s238_ab _s238_s1 _s238_s1h _s238_s3 _s238_m1 _s238_seed _s238_okstart _s238_chk _s238_sa
-unset _S237 _S237_OK
-unset -f _s237_git _s237_seed _s237_held _s237_g5 _s237_g5o _s237_kt _s237_pruned _s230_refused _s230_sup_after
+_a6_done
 
 
 section "§239: a copied tree is never mounted or copied as a link, and no stub or debris rmdir goes through a workspace link (symlink holes 26 and 28)"
 # ============================================================
+_fx_a6; _fx_s236
 # Issue 26: `.claude/commands -> <dir outside $HOME>` (and the other copied
 # trees) was copied with `cp -R SRC DST`, which copies a linked SRC as the
 # link, and Docker followed it: the target was mounted read-write over
@@ -27787,12 +28035,11 @@ check "§239(h) the copy-time check prints an unjudged .claude/commands -> outsi
 rm -rf "$_S239_D"
 unset _S239_KC _S239_KG _S239_T _S239_C _S239_O _S239_H _S239_S _S239_CP _S239_OK _S239_M _S239_D _S239_R1 _S239_R2 _S239_TREES
 unset -f _s239_snap _s239_src _s239_noescape _s239_pu _s239_case _s239_cp _s239_launch
-
-unset _S229_LOG _S236_ETC
-unset -f _s236_tree _s236_expect _s236_expect_mounts _s236_mounts _s236_unmet _s236_seed _s227_tree _s228_ws _s228_pass _s228_sup
+_a6_done
 
 section "§246: every directory between the workspace root and a path mounted inside it is pinned as a mount point of its own, read-write, before the deeper mounts"
 # ============================================================
+_fx_a6
 # WHY. A bind mount cannot be renamed or removed, but renaming a directory
 # ABOVE one carries it along: an ancestor rename could move protected mounts
 # aside. Sandy binds every in-workspace ancestor of a mount onto itself
@@ -27945,9 +28192,11 @@ check "§246(f) a core.hooksPath spelled tools/x/../githooks pins tools (where D
     test -z "$_S246_R"
 unset _S246_CWS _S246_C _S246_W _S246_A _S246_ERR _S246_F _S246_P _S246_R
 unset -f _s246_pinned _s246_nopin
+_a6_done
 
 section "§248: protected FILE contents are recorded at launch and a change is reported at session end; macOS locks them for the session; a link inside the workspace above a protected path needs the symlink approval"
 # ============================================================
+_fx_a6; _fx_s248
 # WHY. A :ro bind holds a path, not the file behind it: on a case-insensitive
 # host file system another spelling of a protected file's name, looked up
 # through the read-write workspace mount, reaches the same file. So (1) the
@@ -27960,51 +28209,8 @@ section "§248: protected FILE contents are recorded at launch and a change is r
 # dangerous-symlink approval: refused headless or without a terminal, and not
 # covered by SANDY_AUTO_APPROVE_PRIVILEGED.
 #
-# Stubs (in front of the A6 ones): chflags keeps the flag set in
-# CASE/flags and logs each call; stat answers `-f %Sf` from that set (and
-# runs the real stat otherwise); docker copies the flag set aside while the
-# agent "runs" and, with S248_WRITE=<rel>, rewrites that workspace file the
-# way a write through another spelling would, or, with S248_LINK=<rel>,
-# replaces it with a link.
-_S248_B="$_A6_DIR/s248bin"; mkdir -p "$_S248_B"
-cat > "$_S248_B/chflags" <<'S248EOF'
-#!/bin/sh
-printf 'chflags %s\n' "$*" >> "$A6_LOG/events.log"
-st="$A6_LOG/flags"; touch "$st"
-[ "$1" != -h ] || shift
-# S248_SWAP=<path>: another file is moved over that path just as it is locked
-# (the race the inode re-check is for); the flag lands on the file moved away.
-if [ "$1" = uchg ] && [ -n "${S248_SWAP:-}" ] && [ "$2" = "$S248_SWAP" ] && [ -f "$2.swap" ]; then
-    mv "$2" "$2.locked-away"; mv "$2.swap" "$2"
-    printf '%s\n' "$2.locked-away" >> "$st"; exit 0
-fi
-case "$1" in
-    uchg) grep -qxF "$2" "$st" || printf '%s\n' "$2" >> "$st" ;;
-    nouchg) grep -vxF "$2" "$st" > "$st.t" || true; mv "$st.t" "$st" ;;
-    *) exit 1 ;;
-esac
-S248EOF
-{ printf '#!/bin/sh\n'
-  printf 'if [ "$1" = -f ] && [ "$2" = %%Sf ]; then\n'
-  printf '    if grep -qxF "$3" "$A6_LOG/flags" 2>/dev/null; then echo uchg; else echo -; fi; exit 0\n'
-  printf 'fi\n'
-  printf 'if [ "$1" = -f ] && [ "$2" = %%c ]; then %q -c %%Z "$3" 2>/dev/null || %q -f %%c "$3"; exit 0; fi\n' "$(command -v stat)" "$(command -v stat)"
-  printf 'exec %q "$@"\n' "$(command -v stat)"; } > "$_S248_B/stat"
-{ printf '#!/bin/sh\n'
-  printf 'case " $* " in *" --name sandy-ws-"*)\n'
-  printf '    cp "$A6_LOG/flags" "$A6_LOG/flags-during-run" 2>/dev/null || : > "$A6_LOG/flags-during-run"\n'
-  printf '    if [ -n "${S248_WRITE:-}" ]; then printf "tampered\\n" >> "$A6_WS/$S248_WRITE"; fi\n'
-  printf '    if [ -n "${S248_WRITE_ABS:-}" ]; then printf "tampered\\n" >> "$S248_WRITE_ABS"; fi\n'
-  printf '    if [ -n "${S248_RUN:-}" ]; then (cd "$A6_WS" && sh -c "$S248_RUN"); fi\n'
-  printf '    if [ -n "${S248_LINK:-}" ]; then rm -f "$A6_WS/$S248_LINK"; ln -s elsewhere "$A6_WS/$S248_LINK"; fi ;;\n'
-  printf 'esac\n'
-  # S248_SURVIVE=1: the agent container is still there after its rm (a teardown
-  # interrupted by a reboot or a Docker restart).
-  # S248_SURVIVE=down: the daemon cannot be reached, so whether it is gone is unknown.
-  printf 'case "$*" in "inspect -f {{.Id}} "*) if [ "${S248_SURVIVE:-}" = down ]; then echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; fi; if [ -n "${S248_SURVIVE:-}" ]; then echo deadbeef; fi; exit 0 ;; esac\n'
-  printf 'exec %q "$@"\n' "$_A6_DIR/bin/docker"; } > "$_S248_B/docker"
-chmod +x "$_S248_B/chflags" "$_S248_B/stat" "$_S248_B/docker"
-_S248_PATH="$_S248_B:$_A6_DIR/bin:$PATH"
+# The chflags, stat and docker stubs (in front of the A6 ones) and _s248_block
+# are the _fx_s248 fixture, at the top of this file.
 _s248_repo() {   # $1 = workspace: a git dir, .envrc, .mcp.json
     mkdir -p "$1/.git/objects" "$1/.git/refs"
     printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
@@ -28019,8 +28225,6 @@ _s248_rec() {
     if [ "$1" = preset ]; then printf 'preset\t%s\n' "$h"; return 0; fi
     printf 'locked\t%s\t%s\t%s\n' "$h" "${3:-$(ls -di "$2" | awk '{print $1}')}" "${4:--}"
 }
-# The CHANGED block of output file $1, one line per entry, prefix stripped.
-_s248_block() { awk '/Protected files CHANGED during this session/ { on = 1; next } on && /^\[sandy\]   / { sub(/^\[sandy\]   /, ""); print; next } on { exit }' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
 # Every case below with a single agent launch runs side by side (the
 # _a6_bg of §236-§239): each builds its own CASE fixture here, in the order
 # of the checks, and starts its launch; its check, further down, joins it
@@ -28624,14 +28828,25 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
 if [ -n "$_S248_R" ]; then _a6_diag "§248(y)" "$_S248_C"; printf '%s\n' "$_S248_B2" | sed 's/^/      block: /'; fi
 check "§248(y) links planted or re-pointed during the session at .git/modules/<n>, a submodule gitdir's modules/, and .git/worktrees/<x> are reported with their targets; an untouched link is not; no removal offered (mutation: drop the #gitlink snapshot, or the link report; ${_S248_R:-ok})" \
     test -z "$_S248_R"
+unset _S248_SEEN _S248_DB _S248_DENV _S248_SUP
+unset -f chflags_stub_unlock
+unset _S248_MK _S248_B2
+unset _S248_D1 _S248_D2
+unset -f _s248_gd _s248_wta
+unset _S248_G _S248_A
+unset -f _s248_wt
+unset _S248_L _S248_C_S248_W _S248_H0 _S248_O _S248_CP _S248_R _S248_E _S248_F _S248_S _S248_RD _S248_ED _S248_RL _S248_EL
+unset -f _s248_repo _s248_sha _s248_rec _s248_gate
+_a6_done
 section "§250: a workspace .gemini/settings.json (Gemini CLI mcpServers) is protected like .claude/settings.json: :ro with its .gemini ancestor pinned, hashed, locked on macOS, and reported when created (#558)"
 # ============================================================
+_fx_a6; _fx_s248
 # WHY. Gemini CLI reads <workspace>/.gemini/settings.json, whose mcpServers are
 # commands it starts. Written in a session, it ran at the next HOST
 # gemini run there. It is now in _sandy_protected_files (and the macOS lock
 # list), so everything derived from that list applies; asserted on the agent
 # docker run argv in a CODEX session, so no gemini overlay pins .gemini for it.
-# Uses the §248 stubs and helpers (it runs before their unset).
+# Uses the §248 stubs and _s248_block (the _fx_s248 fixture).
 _S250_PATH="$_S248_PATH"; _S250_CWS=/home/sandy/ws
 _s250_ws() {   # $1 = workspace: a git dir and a .gemini/settings.json
     mkdir -p "$1/.git/objects" "$1/.git/refs" "$1/.gemini"
@@ -28692,9 +28907,11 @@ check "§250(d) SANDY_AGENT=claude, runs as SANDY_AGENT=claude with the claude i
     test -z "$_S250_R"
 unset _S250_PATH _S250_CWS _S250_C _S250_W _S250_A _S250_O _S250_R
 unset -f _s250_ws
+_a6_done
 
 section "§251: a workspace .gstack link is judged by the dangerous-symlink gate wherever it points, and sandy never creates or migrates gstack state through one (#544, #545)"
 # ============================================================
+_fx_a6
 # WHY. With the gstack pack on (SANDY_SKILL_PACKS is passive, so a workspace
 # .sandy/config can turn it on), the launch mounts $WORK_DIR/.gstack
 # read-write at ~/.gstack, and Docker follows a link at a -v source on the
@@ -29069,9 +29286,11 @@ unset -f _s251_k
 rm -rf "$_S251_D"
 unset _S251_SKV _S251_C _S251_O _S251_R _S251_R1 _S251_R2 _S251_D _S251_W
 unset -f _s251_ws _s251_gmount _s251_chk
+_a6_done
 
 section "§252: a workspace .gemini/.env is protected like .gemini/settings.json; a plain .env and nested .env / .gemini/.env files created or changed in-session are reported at session end (detection only), recorded for a daemon too; in a gemini session only sandy's credential selection reaches Gemini CLI"
 # ============================================================
+_fx_a6; _fx_s248
 # WHY. A host-side Gemini CLI run loads the first .gemini/.env or .env it
 # finds from its working directory upward into its own environment, so one
 # a session writes changes that host run. The root .gemini/.env is now a
@@ -29081,7 +29300,8 @@ section "§252: a workspace .gemini/.env is protected like .gemini/settings.json
 # _SANDY_ENV_SCAN_DEPTH (4) directory levels below, skipping dependency and
 # cache trees (node_modules, .git, .venv, ...), and the session end names
 # those created or changed, with no removal offered. Asserted on a CODEX
-# session (no gemini overlay pins .gemini). Uses the §248 stubs and helpers.
+# session (no gemini overlay pins .gemini). Uses the §248 stubs and _s248_block
+# (the _fx_s248 fixture).
 _S252_PATH="$_S248_PATH"; _S252_CWS=/home/sandy/ws
 _s252_ws() {   # $1 = workspace: a git dir
     mkdir -p "$1/.git/objects" "$1/.git/refs"
@@ -29386,19 +29606,11 @@ check "§252(p) the sandbox's own ~/.gemini/.env setting GEMINI_CLI_HOME is name
     test -z "$_S252_R"
 unset _S252_PATH _S252_CWS _S252_C _S252_W _S252_A _S252_O _S252_R _S252_K _S252_REC _S252_GPINS _S252_S _S252_U _S252_UR _f _p _l _w
 unset -f _s252_ws _s252_block _s252_text _s252_pin _s252_argv_has _s252_envfile _s252_sysdoc
-
-unset _S248_SEEN _S248_DB _S248_DENV _S248_SUP
-unset -f chflags_stub_unlock
-unset _S248_MK _S248_B2
-unset _S248_D1 _S248_D2
-unset -f _s248_gd _s248_wta
-unset _S248_G _S248_A
-unset -f _s248_wt
-unset _S248_L _S248_B _S248_PATH _S248_C_S248_W _S248_H0 _S248_O _S248_CP _S248_R _S248_E _S248_F _S248_S _S248_RD _S248_ED _S248_RL _S248_EL
-unset -f _s248_repo _s248_sha _s248_rec _s248_block _s248_gate
+_a6_done
 
 section "§249: a daemon session's session-end report is recorded in its sandbox, printed by the next --start, --attach, --stop and terminal launch, and cleared by --ack-report (#554)"
 # ============================================================
+_fx_a6
 # WHY. The stderr of a daemon session is $SANDY_HOME/sandboxes/.daemon-start-<pid>.log,
 # which nobody reads, so the session-end report (protected paths that appeared,
 # changed or were replaced in the workspace) reached nobody, and --stop of a
@@ -29671,10 +29883,12 @@ unset _S249_DENV
 unset -f _s249_hex
 unset _S249_B _S249_PATH _S249_ENV _S249_C _S249_W _S249_S _S249_REC _S249_R _S249_D _S249_SUP _S249_PTY _S249_KEEP
 unset -f _s249_n
+_a6_done
 
 # ============================================================
 section "§253: the gemini agent is deprecated (2.10.0, removal 3.0.0): every launch that includes it warns once, a Google-account OAuth login warns that personal accounts are no longer served, and introspection prints neither"
 # ============================================================
+_fx_a6
 # Real foreground launches through the A6 stubs (-p, egress off, offline), so
 # what is asserted is what a user sees, not the presence of a warn line in the
 # source. §138(2) separately forces the deprecation warning to be announced in
@@ -29768,15 +29982,14 @@ unset _S253_AG _S253_AGOK
 unset _S253_DEP _S253_OAU _S253_IERR _s253_cmd _s253_rc
 unset -f _s253_seed_oauth _s253_n
 
-# Every background launch was joined by the check that reads it: a .pid left
-# under .bg is a case started whose check never ran.
-_A6_UNJOINED="$(cd "$_A6_DIR/.bg" 2>/dev/null && ls -- *.pid 2>/dev/null || true)"
-for _A6_P in ${_A6_BG_PIDS[@]+"${_A6_BG_PIDS[@]}"}; do wait "$_A6_P" 2>/dev/null || true; done
+# Every background launch was joined by the check that reads it. _a6_done, the
+# last step of every section that uses the harness, fails in the section that
+# left one unjoined and keeps it in _A6_UNJOINED. This is the one named check,
+# over every such section this process has run: all of them in a whole-file
+# run, this one when the section runs on its own.
+_a6_done
 check "§239(z) every launch started in the background was joined before its check (unjoined: ${_A6_UNJOINED:-none})" \
     test -z "$_A6_UNJOINED"
-rm -rf "$_A6_DIR"
-unset _A6_DIR _A6_SCRIPT _A6_RC _A6_JOBS _A6_BG_PIDS _A6_UNJOINED _A6_P
-unset -f _a6_launch _a6_agent_args _a6_pair _a6_sandbox _a6_diag _a6_bg _a6_bg_key _a6_join
 
 section "§220: every registered config key is honoured from a config file, and SANDY_SKILL_PACKS / SANDY_GEMINI_AUTH from a workspace one without approval"
 # ============================================================
@@ -31984,6 +32197,7 @@ unset _S244_SANDY _S244_D _S244_FULL _S244_WS _S244_H _S244_N
 # ============================================================
 section "§241: --print-state measures sandbox sizes only with --sizes (B7b)"
 # ============================================================
+_fx_schema
 # The du walk behind size_bytes was ~55 of ~70 s of a full-mode call on a host
 # with 84 sandboxes, long enough to time two consumers out, so since 2.9.0 it
 # is opt-in. The property, measured with a du stub that logs every call: full
