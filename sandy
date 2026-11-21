@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="2.10.1-dev"
+SANDY_VERSION="2.10.1"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 # What a SANDY_VERSION may look like: X.Y.Z, X.Y.Z-rcN, X.Y.Z-dev and
 # X.Y.Z-rcN-dev (main during an rc soak). --upgrade refuses a downloaded file
