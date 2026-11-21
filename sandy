@@ -19,6 +19,11 @@ set -euo pipefail
 
 SANDY_VERSION="2.10.1-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
+# What a SANDY_VERSION may look like: X.Y.Z, X.Y.Z-rcN, X.Y.Z-dev and
+# X.Y.Z-rcN-dev (main during an rc soak). --upgrade refuses a downloaded file
+# whose version does not match, without printing it (#547). install.sh holds
+# a byte-identical copy of this line (it cannot source sandy); §254 checks it.
+_SANDY_VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?(-dev)?$'
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
 # Bumped when existing fields change semantics; additive changes do not bump.
@@ -397,14 +402,38 @@ else
     RED='' GREEN='' YELLOW='' NC=''
 fi
 
-info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
-error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
-# The same lines for text that carries a path or other outside data: printed
-# literally, never through echo -e, so a backslash in a workspace name is not
-# collapsed and a "\e[31m" in it is not turned into a terminal escape.
-error_lit() { printf '%b[sandy]%b %s\n' "$RED" "$NC" "$*" >&2; }
-warn_lit()  { printf '%b[sandy]%b %s\n' "$YELLOW" "$NC" "$*"; }
+# #547: the message is printed with %s, never through `echo -e` or as part of
+# a printf format, so a backslash sequence in it (backslash-033, backslash-n,
+# backslash-c, ...) is printed as typed: a workspace name, a session label or
+# a build log line cannot become a terminal escape, and a backslash in a path
+# is not collapsed. Only the colour codes go through %b. A caller that wants
+# a line break passes a real newline or makes two calls. %s stops escape
+# INTERPRETATION only: raw control bytes in the argument still reach the
+# terminal, so text a container, a build or an agent wrote goes through
+# _sandy_term_text first.
+info()  { printf '%b[sandy]%b %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[sandy]%b %s\n' "$YELLOW" "$NC" "$*"; }
+error() { printf '%b[sandy]%b %s\n' "$RED" "$NC" "$*" >&2; }
+# Before #547 only these two printed the message literally. They are now the
+# same as error and warn, kept so existing callers and test stubs still work.
+error_lit() { error "$@"; }
+warn_lit()  { warn "$@"; }
+# Outside text (a container-written file, a build log line, an agent's output)
+# reduced to printable ASCII before it is printed on the host terminal: every
+# other byte, newlines included, becomes `?`. Deleting only C0 and DEL would
+# let UTF-8 C1 controls through (U+009B CSI and U+009D OSC are the bytes
+# 0xC2 0x9B and 0xC2 0x9D), which a UTF-8 terminal honours like ESC [ and ESC ].
+# The em dash sandy itself writes into the lines a child logs becomes `-`
+# first, so they stay readable. _sandy_term_text takes its arguments (one
+# line); _sandy_term_lines filters a stream (a log tail), keeps its newlines
+# and tabs, and first drops SGR colour sequences (ESC [ digits ; m), which a
+# sandy log written with colours on carries on every line.
+_sandy_term_text() { local _t="$*"; printf '%s' "${_t//—/-}" | LC_ALL=C tr -c '\040-\176' '?'; }
+_sandy_term_lines() {
+    local _esc
+    _esc="$(printf '\033')"
+    LC_ALL=C sed -e "s/${_esc}\\[[0-9;]*m//g" -e 's/—/-/g' | LC_ALL=C tr -c '\011\012\040-\176' '?'
+}
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 # #493: give the terminal back in a usable state after an interactive client
@@ -580,8 +609,15 @@ sandy_self_update() {
         exit 1
     fi
     new_ver="$(grep -m1 '^SANDY_VERSION=' "$tmp" | cut -d'"' -f2)" || new_ver=""
-    if [ -z "$new_ver" ] || { [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; }; then
-        error "Downloaded file does not look like sandy ${tag:-from main} (SANDY_VERSION=${new_ver:-none})."
+    # The version is printed below, so it must be a version string first
+    # (_SANDY_VERSION_RE); anything else is refused without echoing it (#547).
+    if ! [[ $new_ver =~ $_SANDY_VERSION_RE ]]; then
+        error "Downloaded file does not look like sandy ${tag:-from main} (no valid SANDY_VERSION in it)."
+        rm -f "$tmp"
+        exit 1
+    fi
+    if [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; then
+        error "Downloaded file does not look like sandy $tag (SANDY_VERSION=$new_ver)."
         rm -f "$tmp"
         exit 1
     fi
@@ -7151,7 +7187,7 @@ _sandy_accounts() {
 # path; empty or gone means sandy --stop cannot reach it at all (it resolves
 # the path first), so the advice says how to get there. Paths go through %q so
 # the printed command round-trips when pasted into a shell; callers print the
-# result with error_lit/warn_lit, never error()/warn() (echo -e would undo %q).
+# result with error or warn, which print it with %s (#547), so %q survives.
 _sandy_live_session_advice() {
     local _w="${1:-}"
     if [ -n "$_w" ] && [ -d "$_w" ]; then
@@ -15158,9 +15194,9 @@ _sandy_ew_failure_text() {
     printf '%s' "$_v" | LC_ALL=C tr -c '\040-\176' '?'
 }
 # Print a `failed` verdict's message on stderr. The text is agent-controlled,
-# so it is printed as a printf %s ARGUMENT, never through error(): that is
-# `echo -e`, which would turn a literal backslash-033 back into a real ESC
-# after _sandy_ew_failure_text removed the control bytes.
+# so it is printed as a printf %s ARGUMENT (error() also does this since
+# #547; before, it was `echo -e`, which turned a literal backslash-033 back
+# into a real ESC after _sandy_ew_failure_text removed the control bytes).
 _sandy_ew_report() {
     printf "${RED:-}[sandy]${NC:-} %s\n" "A feature entry exited during its startup window: $(_sandy_ew_failure_text "$1")" >&2
 }
@@ -15216,7 +15252,8 @@ _sandy_cs_start_check() {
         [ "$slug" = launch ] && continue
         [ -n "$slug" ] || continue
         if [ "$st" != up ]; then
-            error "Named Claude session '$name' ($slug) is not up: $st${reason:+ - $reason}"
+            # Every field was written by the container (#547).
+            error "$(_sandy_term_text "Named Claude session '$name' ($slug) is not up: $st${reason:+ - $reason}")"
             bad=1
         fi
     done <<< "$out"
@@ -15558,10 +15595,10 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # tmux session never appeared) — dump it alongside the supervisor log.
         if [ -n "$_sandy_daemon_container" ]; then
             error "Container log tail (docker logs $_sandy_daemon_container):"
-            docker logs --tail 30 "$_sandy_daemon_container" 2>&1 | sed 's/^/[sandy]   /' >&2 || true
+            docker logs --tail 30 "$_sandy_daemon_container" 2>&1 | _sandy_term_lines | sed 's/^/[sandy]   /' >&2 || true
         fi
         error "Supervisor log tail ($_sandy_daemon_log):"
-        tail -n 20 "$_sandy_daemon_log" >&2 2>/dev/null || true
+        { tail -n 20 "$_sandy_daemon_log" 2>/dev/null || true; } | _sandy_term_lines >&2 || true
         # A failed start must not leave the wreckage running: under
         # --restart unless-stopped a crash-looping container restarts FOREVER
         # (observed post-1.1.0: a stale project image looped "open terminal
@@ -15989,36 +16026,71 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         # "--update-sessions hangs on one session" bug. With /dev/null the child's
         # stdin is non-interactive, so the approval fails closed (drops the keys,
         # which the build doesn't need) and the refresh proceeds.
-        { ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1
-          echo "$?" > "$_upd_done"; } &
+        #
+        # #546: the group inherits `set -e`, so a bare `( … ); echo "$?" > marker`
+        # exited on a failed child before writing the marker, and the poll below
+        # waited forever. The rc is captured with `|| _upd_rc=$?` instead, and a
+        # TERM or HUP still writes a (failing) marker. The marker is written to
+        # a temp name and renamed, so the poll never reads a half-written one.
+        { _upd_rc=0
+          _upd_sigmark() { _upd_rc="$1"; printf '%s\n' "$_upd_rc" > "$_upd_done.tmp"; mv -f "$_upd_done.tmp" "$_upd_done"; exit "$_upd_rc"; }
+          trap '_upd_sigmark 143' TERM
+          trap '_upd_sigmark 129' HUP
+          ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1 || _upd_rc=$?
+          printf '%s\n' "$_upd_rc" > "$_upd_done.tmp"
+          mv -f "$_upd_done.tmp" "$_upd_done"; } &
         _upd_build_pid=$!
         _upd_hb=0
+        _upd_gone=0
         while [ ! -f "$_upd_done" ]; do
             sleep 1
             [ -f "$_upd_done" ] && break
             _upd_hb=$((_upd_hb + 1))
+            # The bound (#546): a build may legitimately run for many minutes,
+            # so time is not capped. What is caught is the group ending without
+            # a marker (killed with SIGKILL, or a regression of the capture
+            # above): bash's own job table, never `kill -0`, says it is no
+            # longer running, and 3s later there is still no marker. `jobs -pr`
+            # and not `jobs -p`: a non-interactive bash never reports a done
+            # job to -p, so -p would list it for ever. A SIGSTOPped child stays
+            # in -r (without job control bash does not see the stop), so it
+            # is waited for like a slow build, never counted as gone.
+            jobs -pr > "$_upd_build_log.jobs" 2>/dev/null || true
+            if grep -qx "$_upd_build_pid" "$_upd_build_log.jobs" 2>/dev/null; then
+                _upd_gone=0
+            else
+                _upd_gone=$((_upd_gone + 1))
+                if [ "$_upd_gone" -ge 3 ] && [ ! -f "$_upd_done" ]; then
+                    error "  The image refresh for $_upd_sess ended without reporting a result; counting it as a failed build."
+                    break
+                fi
+            fi
             if [ $((_upd_hb % 20)) -eq 0 ]; then
-                _upd_phase="$(tail -n 1 "$_upd_build_log" 2>/dev/null | sed -E 's/^\[sandy\] +//; s/\.\.\.[[:space:]]*$//')"
+                # The child's last log line is build output: printable ASCII
+                # only, so it cannot drive the terminal (#547).
+                _upd_phase="$(_sandy_term_text "$(tail -n 1 "$_upd_build_log" 2>/dev/null | sed -E 's/^\[sandy\] +//; s/\.\.\.[[:space:]]*$//' || true)")"
                 info "  ...still refreshing $_upd_sess (${_upd_hb}s${_upd_phase:+: $_upd_phase})"
             fi
         done
+        rm -f "$_upd_build_log.jobs" 2>/dev/null || true
         wait "$_upd_build_pid" 2>/dev/null || true
         # B8 G7: a child that skipped (or recorded) a failed agent rebuild
         # succeeds, so its warning would otherwise stay in the captured log.
         # Only sandy's own line counts: anchored at "[sandy]", and the LAST one,
         # since the child writes it after any docker build output. The text is
-        # printed with %s, control characters stripped: neither it nor the
+        # printed with %s, reduced to printable ASCII: neither it nor the
         # session label is ever interpreted.
         _upd_note="$(grep -E '^\[sandy\] +(Skipping the agent image rebuild|Not retrying this build)' "$_upd_build_log" 2>/dev/null | tail -n 1 | sed -E 's/^\[sandy\] +//' || true)"
         if [ -n "$_upd_note" ]; then
-            printf "${YELLOW}[sandy]${NC} %s\n" "$(printf '  %s: %s' "$_upd_sess" "$_upd_note" | LC_ALL=C tr -d '\000-\037\177')"
+            warn "$(_sandy_term_text "  $_upd_sess: $_upd_note")"
         fi
         if [ "$(cat "$_upd_done" 2>/dev/null || echo 1)" != "0" ]; then
             error "  Build failed for $_upd_sess — tail of output:"
-            tail -n 20 "$_upd_build_log" | sed 's/^/[sandy]   /' >&2
+            # Build output, printable ASCII per line (#547).
+            tail -n 20 "$_upd_build_log" | _sandy_term_lines | sed 's/^/[sandy]   /' >&2
             _upd_build_failed[$_upd_i]=1
         fi
-        rm -f "$_upd_build_log" "$_upd_done" 2>/dev/null || true
+        rm -f "$_upd_build_log" "$_upd_done" "$_upd_done.tmp" 2>/dev/null || true
     done
 
     # Steps 3+4 — staleness check, then (only when --idle-for was given) the
@@ -19595,7 +19667,7 @@ start_proxy_sidecar() {
     if ! docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null; then
         error "Could not attach the egress proxy to its sidecar network. Proxy state: $(docker inspect -f '{{.State.Status}} (exit {{.State.ExitCode}}, restarts {{.RestartCount}})' "$PROXY_CONTAINER" 2>/dev/null || echo unknown)"
         error "Proxy logs:"
-        docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
         exit 1
     fi
 
@@ -19644,7 +19716,7 @@ start_proxy_sidecar() {
     done
     if [ "$_proxy_up" != true ]; then
         error "Egress proxy failed to become ready. Logs:"
-        docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
         exit 1
     fi
     # Running but already restarted ⇒ it crashed at least once and the restart
@@ -19652,7 +19724,7 @@ start_proxy_sidecar() {
     # signal worth surfacing — a clean proxy never exits (it blocks forever).
     if [ "$(docker inspect -f '{{.RestartCount}}' "$PROXY_CONTAINER" 2>/dev/null)" != "0" ]; then
         warn "Egress proxy restarted during startup (crash-loop?) — recent logs:"
-        docker logs --tail 20 "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs --tail 20 "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
     fi
 
     # Persist the proxy's logs to a host file so a post-mortem survives cleanup's
@@ -21944,6 +22016,8 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # (a TeX or CUDA toolchain) can take many minutes, and a silent build
         # reads as a hung launch. Progress is forced plain there, since tee
         # would otherwise hand buildkit a pipe and the log its cursor moves.
+        # The live copy is reduced to printable ASCII (tab, newline kept) by
+        # ONE tr: a second filter stage would block-buffer the progress.
         _sandy_proj_log="$(mktemp "${TMPDIR:-/tmp}/sandy-project-build.XXXXXX" 2>/dev/null)" || _sandy_proj_log=/dev/null
         if [ -t 2 ]; then
             BUILDKIT_PROGRESS=plain docker build --no-cache \
@@ -21952,7 +22026,7 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
                 -t "$PROJECT_IMAGE_NAME" \
                 -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" 2>&1 \
                 | tee "$_sandy_proj_log" \
-                | LC_ALL=C tr -d '\000-\010\013-\037\177' >&2 || _sandy_proj_build_rc=$?
+                | LC_ALL=C tr -c '\011\012\040-\176' '?' >&2 || _sandy_proj_build_rc=$?
         else
             { docker build --no-cache \
                 --label sandy.managed=1 \
@@ -21964,9 +22038,10 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         rm -rf "$_sandy_proj_ctx"
         if [ "$_sandy_proj_build_rc" -ne 0 ]; then
             error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc). Last lines of the build output:"
-            # Control characters stripped (tab and newline kept): the output
-            # includes whatever the Dockerfile's RUN steps fetched and printed.
-            tail -n 40 "$_sandy_proj_log" | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed 's/^/    /' >&2
+            # Printable ASCII only, tab and newline kept (#547; deleting only
+            # C0 let C1 CSI/OSC through): the output includes whatever the
+            # Dockerfile's RUN steps fetched and printed.
+            tail -n 40 "$_sandy_proj_log" | _sandy_term_lines | sed 's/^/    /' >&2
             [ "$_sandy_proj_log" = /dev/null ] || error "Full build log: $_sandy_proj_log"
             error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
             error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
@@ -22334,7 +22409,7 @@ cleanup() {
         # window. Dump it on demand before teardown.
         if [ "${SANDY_DEBUG_PROXY:-0}" = "1" ]; then
             echo "sandy: [debug] egress proxy logs ($PROXY_CONTAINER):" >&2
-            docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+            docker logs "$PROXY_CONTAINER" 2>&1 | _sandy_term_lines | sed 's/^/    /' >&2 || true
         fi
         docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
     fi

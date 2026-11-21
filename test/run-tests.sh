@@ -4680,8 +4680,10 @@ section "§76: --update-sessions refresh emits a progress heartbeat (no silent m
 # hung. The refresh must background the child, poll a done-marker (not kill -0,
 # which reads a reaped child as alive), and emit an elapsed heartbeat.
 _S76="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-check "refresh runs the child build in the background with a done-marker" \
-    bash -c 'grep -qF "echo \"\$?\" > \"\$_upd_done\"" "$1"' -- "$_S76"
+# The marker is written whatever the child's exit status (#546); §254 runs a
+# failing child and asserts the run ends.
+check "refresh runs the child build in the background with a done-marker, its rc captured so a failure cannot skip the write" \
+    bash -c 'grep -qF "2>&1 || _upd_rc=\$?" "$1" && grep -qF "mv -f \"\$_upd_done.tmp\" \"\$_upd_done\"; } &" "$1"' -- "$_S76"
 check "refresh polls the done-marker (not kill -0 on a reap-prone child)" \
     bash -c 'grep -qF "while [ ! -f \"\$_upd_done\" ]; do" "$1"' -- "$_S76"
 check "refresh emits an elapsed-time progress heartbeat" \
@@ -24679,7 +24681,8 @@ check "§204(8b) ...an explicit value still wins over it, and no claimant falls 
     "$(_s204_csi _SANDY_CS_ACTIVE=1 _SANDY_CS_CROSS=liaison SANDY_CROSS_SESSION_INBOUND=hold)" "$(_s204_csi _SANDY_CS_ACTIVE=1)"
 
 # --- (9) --start readiness: exit 9 when a declared session is not up -----------
-_S204_SC="$(sed -n '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
+# With _sandy_term_text, which it prints the container-written fields through (#547).
+_S204_SC="$(sed -n -e '/^_sandy_term_text()/p' -e '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
 mkdir -p "$_S204_D/bin9"
 # The stub RUNS the script --start sends into the container (the launch-id
 # match lives there), against a fixture file in place of the in-container path.
@@ -25164,6 +25167,7 @@ _hardening_unmet() {
         }'
 }
 _S207_FN="$(sed -n '/^_sandy_launch_dir()/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_term_lines() {/,/^}$/p' "$SANDY_SCRIPT")
 $(sed -n '/^start_proxy_sidecar() {/,/^}$/p' "$SANDY_SCRIPT")"
 _S207_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S207_D/bin"
@@ -31946,7 +31950,7 @@ check "§244(3) --version still prints the version whatever follows it, and touc
 # `sandy --stop --workspace` hint survives a shell round trip for a path with
 # a space and a backslash: echo -e (error()) would collapse the %q backslashes
 # and the pasted command would name another directory.
-# Mutation: print the hint with error instead of error_lit and (4b) fails.
+# Mutation: restore echo -e in error() (see §254) and (4b) fails.
 _S244_WS="$_S244_D/ws one\\back"
 mkdir -p "$_S244_WS"
 _S244_WS="$(cd "$_S244_WS" && pwd -P)"
@@ -32857,6 +32861,191 @@ check "§247(8) the runner calls the summary writer after the final line, guarde
 unset -f _s247_run
 rm -rf "$_S247_D"
 unset _S247_INTEG _S247_D _S247_N
+
+# ============================================================
+section "§254: --update-sessions ends when a session's image refresh fails (#546), and info/warn/error never turn message text into terminal escapes (#547)"
+# ============================================================
+# #546: the refresh child ran as `{ ( … ); echo "$?" > marker; } &` under the
+# inherited `set -e`, so a failing child ended the group before the marker was
+# written and the poll waited forever. #547: info/warn/error printed with
+# `echo -e`, so a literal backslash-033 in a message became a real ESC, and
+# the --update-sessions heartbeat printed the child's last build-log line
+# through info.
+# Fixture: one daemon session (docker ps stub) whose --build-only child fails
+# at its first docker build. That build first writes a payload to the log:
+# real ESC and C1 (U+009B) bytes plus a literal backslash-033 sequence, then
+# waits long enough for one heartbeat. Colours are off (stdout is a file), so
+# no ESC byte may appear anywhere in the output.
+# Mutations: drop `|| _upd_rc=$?` and (1) fails (the bound reports the missing
+# marker); remove the bound as well and the run hangs, (1) fails; print the
+# heartbeat phase without _sandy_term_text and (2) fails; restore echo -e in
+# info/warn/error and (4) fails; let _sandy_term_text keep bytes outside
+# printable ASCII and (5) fails. (3) runs a copy with the capture removed and
+# proves the bound alone ends the run (mutation: remove the bound, (3) fails).
+_S254_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S254_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S254_D/bin" "$_S254_D/home/.sandy" "$_S254_D/ws" "$_S254_D/cwd"
+_S254_REALSLEEP="$(command -v sleep)"
+cat > "$_S254_D/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    ps) printf 'cid254|s254-session|%s|sandy-claude-code\n' "$S254_WS"; exit 0 ;;
+    info) exit 0 ;;
+    build)
+        printf '[sandy] Skipping the agent image rebuild: note \033]0;NOTE\007 c1:\302\235 end\n' >&2
+        printf 'step 1/9 \033]0;PWNED\007 c1:\302\233 lit:\\033]0;X\\007\n' >&2
+        "$S254_SLEEP" "${S254_BUILD_SECS:-0}"
+        exit 1 ;;
+esac
+exit 1
+STUB
+chmod +x "$_S254_D/bin/docker"
+# sandy's `sleep 1` poll waits 0.05s, so 20 polls (one heartbeat) take ~1s.
+printf '#!/usr/bin/env bash\nexec %q 0.05\n' "$_S254_REALSLEEP" > "$_S254_D/bin/sleep"
+chmod +x "$_S254_D/bin/sleep"
+# _s254_run TAG SCRIPT BUILD_SECS: run --update-sessions --yes with a clean
+# environment (no inherited SANDY_*), at most 60s; TAG.rc is written only when
+# it ended by itself, TAG.timeout when it had to be killed.
+_s254_run() {
+    local _tag="$1" _script="$2" _secs="$3" _n=0 _pid
+    rm -f "$_S254_D/$_tag.rc" "$_S254_D/$_tag.timeout"
+    ( cd "$_S254_D/cwd" && _rc=0 && env -i HOME="$_S254_D/home" SANDY_HOME="$_S254_D/home/.sandy" \
+        PATH="$_S254_D/bin:/usr/local/bin:/usr/bin:/bin" TMPDIR="${TMPDIR:-/tmp}" TERM=dumb S254_WS="$_S254_D/ws" \
+        S254_SLEEP="$_S254_REALSLEEP" S254_BUILD_SECS="$_secs" \
+        bash "$_script" --update-sessions --yes </dev/null >"$_S254_D/$_tag.out" 2>&1 || _rc=$?
+      echo "$_rc" > "$_S254_D/$_tag.rc" ) &
+    _pid=$!
+    while [ ! -f "$_S254_D/$_tag.rc" ] && [ "$_n" -lt 600 ]; do
+        "$_S254_REALSLEEP" 0.1; _n=$((_n + 1))
+    done
+    if [ ! -f "$_S254_D/$_tag.rc" ]; then
+        : > "$_S254_D/$_tag.timeout"
+        pkill -P "$_pid" 2>/dev/null || true
+        kill "$_pid" 2>/dev/null || true
+    fi
+    wait "$_pid" 2>/dev/null || true
+}
+_s254_run fixed "$_S254_SANDY" 4
+check "§254(1) a failing refresh child ends the run: it exits 0 (the documented contract: a failed build is reported and skipped), names the session in \"Build failed for\", plans it as skip (build failed), and the done-marker path reported it (no \"ended without reporting\") (mutations: drop || _upd_rc=\$?; also drop the bound and the run hangs)" \
+    bash -c '[ ! -e "$1.timeout" ] && [ "$(cat "$1.rc")" = 0 ] && grep -q "Build failed for s254-session" "$1.out" && grep "^s254-session " "$1.out" | grep -q "skip (build failed)" && ! grep -q "ended without reporting" "$1.out" || { ls "$1".*; cat "$1.rc" "$1.out" 2>/dev/null; exit 1; }' _ "$_S254_D/fixed"
+check "§254(2) the heartbeat prints the build-log line it read, reduced to printable ASCII: the output has no ESC or C1 byte, and the payload text is there with its literal backslash sequence intact (mutation: print the phase without _sandy_term_text)" \
+    bash -c 'grep -q "still refreshing s254-session (.*PWNED" "$1.out" && grep -qF "lit:\\033]0;X\\007" "$1.out" && [ "$(LC_ALL=C tr -dc "\\033\\233" < "$1.out" | wc -c | tr -d " ")" = 0 ] || { cat -v "$1.out"; exit 1; }' _ "$_S254_D/fixed"
+check "§254(6) the repeated \"Skipping the agent image rebuild\" note (B8 G7) is printed with the session name and reduced to printable ASCII: no ESC or C1 byte on that line (mutation: print it without _sandy_term_text)" \
+    bash -c 'l="$(grep "s254-session: Skipping the agent image rebuild: note" "$1.out")" && [ -n "$l" ] && case "$l" in *"?]0;NOTE? c1:?? end"*) : ;; *) false ;; esac && [ "$(printf "%s" "$l" | LC_ALL=C tr -dc "\\033\\235" | wc -c | tr -d " ")" = 0 ] || { cat -v "$1.out"; exit 1; }' _ "$_S254_D/fixed"
+# (3) The bound on its own: a copy with the rc capture removed (the #546 bug
+# restored) must still end, and say why.
+sed 's# </dev/null >"\$_upd_build_log" 2>&1 || _upd_rc=\$?$# </dev/null >"$_upd_build_log" 2>\&1#' "$_S254_SANDY" > "$_S254_D/sandy-nocap"
+chmod +x "$_S254_D/sandy-nocap"
+_S254_CAPDIFF="$(diff "$_S254_SANDY" "$_S254_D/sandy-nocap" 2>/dev/null | grep -c '^>' || true)"
+_s254_run nocap "$_S254_D/sandy-nocap" 0
+check "§254(3) with the rc capture removed (the copy differs by exactly one line: $_S254_CAPDIFF), the poll bound still ends the run, says the refresh ended without reporting a result, and reports the build as failed (mutation: remove the bound)" \
+    bash -c '[ "$2" = 1 ] && [ ! -e "$1.timeout" ] && [ "$(cat "$1.rc")" = 0 ] && grep -q "The image refresh for s254-session ended without reporting a result" "$1.out" && grep -q "Build failed for s254-session" "$1.out" || { ls "$1".*; cat "$1.out" 2>/dev/null; exit 1; }' _ "$_S254_D/nocap" "$_S254_CAPDIFF"
+# (4)/(5) The helpers themselves, cut out of sandy (info() through
+# _sandy_term_lines), with the colours on and off.
+awk '/^info\(\)  \{/{on=1} on{print} /^_sandy_term_lines\(\)/{t=1} t&&/^}$/{exit}' "$_S254_SANDY" > "$_S254_D/helpers.sh"
+# install.sh carries its own three (the curl | bash installer cannot source sandy).
+grep -E '^(info|warn|error)\(\) ' "$(dirname "$_S254_SANDY")/install.sh" > "$_S254_D/helpers-install.sh" || true
+_s254_helpers() {
+    # $1 = on|off, $2 = helper file, $3 = also the _lit pair (yes|no).
+    # Prints every helper's output for the payload on stdout.
+    bash -c '
+        set -euo pipefail
+        if [ "$1" = on ]; then RED="\033[0;31m" GREEN="\033[0;32m" YELLOW="\033[1;33m" NC="\033[0m"; else RED="" GREEN="" YELLOW="" NC=""; fi
+        . "$2"
+        p="x \\033]0;PWNED\\007 \\e[31m \\n \\c y"
+        { info "$p"; warn "$p"; error "$p"; [ "$3" = no ] || { warn_lit "$p"; error_lit "$p"; }; } 2>&1
+    ' _ "$1" "$2" "$3"
+}
+_s254_helpers on "$_S254_D/helpers.sh" yes > "$_S254_D/h.on" 2>&1 || true
+_s254_helpers off "$_S254_D/helpers.sh" yes > "$_S254_D/h.off" 2>&1 || true
+_s254_helpers on "$_S254_D/helpers-install.sh" no > "$_S254_D/i.on" 2>&1 || true
+_s254_helpers off "$_S254_D/helpers-install.sh" no > "$_S254_D/i.off" 2>&1 || true
+# With colours on, only the colour codes may carry ESC: remove those exact
+# sequences and nothing escape-like may be left.
+for _s254_f in h i; do
+    LC_ALL=C sed -e "s/$(printf '\033')\[0;3[12]m//g; s/$(printf '\033')\[1;33m//g; s/$(printf '\033')\[0m//g" "$_S254_D/$_s254_f.on" > "$_S254_D/$_s254_f.on.msg"
+done
+_s254_lit_lines() {  # DIR PREFIX COUNT: both colour variants print the payload as typed, COUNT times, and no ESC from it
+    local f
+    for f in "$1/$2.off" "$1/$2.on.msg"; do
+        [ "$(grep -cxF '[sandy] x \033]0;PWNED\007 \e[31m \n \c y' "$f")" = "$3" ] \
+            && [ "$(LC_ALL=C tr -dc '\033' < "$f" | wc -c | tr -d ' ')" = 0 ] || { cat -v "$f"; return 1; }
+    done
+    [ "$(LC_ALL=C tr -dc '\033' < "$1/$2.on" | wc -c | tr -d ' ')" -ge $(($3 * 2)) ] || { echo "colours were not on"; cat -v "$1/$2.on"; return 1; }
+}
+check "§254(4) sandy's info, warn, error, warn_lit and error_lit print a message with backslash-033, -e, -n and -c sequences as typed, with no ESC byte from the message, colours on and off ($(grep -c . "$_S254_D/helpers.sh" || true) helper lines cut out; mutation: restore echo -e)" \
+    _s254_lit_lines "$_S254_D" h 5
+check "§254(4b) ...and so do install.sh's info, warn and error ($(grep -c . "$_S254_D/helpers-install.sh" || true) helper lines cut out; mutation: restore echo -e there)" \
+    _s254_lit_lines "$_S254_D" i 3
+check "§254(5) _sandy_term_text turns ESC, BEL, C1 and newline bytes into ? and the em dash into -; _sandy_term_lines drops SGR colour codes, keeps line breaks and tabs, and turns any other escape into ? (mutation: delete only C0 controls)" \
+    bash -c '. "$1"; a="$(_sandy_term_text "$(printf "a\033]0;X\007b\302\233c\nd — e")")"; b="$(printf "l1 \033[0;31m[sandy]\033[0m \033]0;X\007\tT\nl2 —\n" | _sandy_term_lines)"; [ "$a" = "a?]0;X?b??c?d - e" ] && [ "$b" = "$(printf "l1 [sandy] ?]0;X?\tT\nl2 -")" ] || { printf "%s\n%s\n" "$a" "$b" | cat -v; exit 1; }' _ "$_S254_D/helpers.sh"
+# (7) install.sh and sandy --upgrade validate the downloaded file's
+# SANDY_VERSION before they print it: a version carrying an escape is refused
+# and never echoed; a well-formed X.Y.Z-rcN-dev (main during an rc soak)
+# installs (the control, so the refusal is not just a broken fixture).
+mkdir -p "$_S254_D/ibin" "$_S254_D/idir"
+printf '#!/usr/bin/env bash\ncat "$S254_FILE"\n' > "$_S254_D/ibin/curl"
+chmod +x "$_S254_D/ibin/curl"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="2.10.1\033]0;PWNED\007"\nSANDY_COMMIT=""\n' > "$_S254_D/bad.sandy"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="1.0.0-rc2-dev"\nSANDY_COMMIT=""\n' > "$_S254_D/good.sandy"
+_s254_install() {  # TAG FILE
+    local _rc=0
+    rm -rf "$_S254_D/idir"; mkdir -p "$_S254_D/idir"
+    env -i HOME="$_S254_D/home" PATH="$_S254_D/ibin:/usr/bin:/bin" INSTALL_DIR="$_S254_D/idir" \
+        SANDY_URL="https://example.invalid/sandy" S254_FILE="$2" \
+        bash "$(dirname "$_S254_SANDY")/install.sh" </dev/null >"$_S254_D/$1.out" 2>&1 || _rc=$?
+    echo "$_rc" > "$_S254_D/$1.rc"
+    [ -f "$_S254_D/idir/sandy" ] && echo yes > "$_S254_D/$1.installed" || echo no > "$_S254_D/$1.installed"
+}
+_s254_install ibad "$_S254_D/bad.sandy"
+_s254_install igood "$_S254_D/good.sandy"
+check "§254(7) install.sh refuses a downloaded file whose SANDY_VERSION is not a version string, installs nothing and never echoes it (no ESC beyond its own colour codes, which are always on); a well-formed X.Y.Z-rcN-dev installs (mutations: drop the version-string check; the old regex without -rcN-dev)" \
+    bash -c 'e="$(printf "\\033")"; [ "$(cat "$1/ibad.rc")" = 1 ] && [ "$(cat "$1/ibad.installed")" = no ] && grep -q "no valid SANDY_VERSION" "$1/ibad.out" && ! grep -q PWNED "$1/ibad.out" && [ "$(LC_ALL=C sed "s/${e}\\[[0-9;]*m//g" "$1/ibad.out" | LC_ALL=C tr -dc "\\033" | wc -c | tr -d " ")" = 0 ] && [ "$(cat "$1/igood.rc")" = 0 ] && [ "$(cat "$1/igood.installed")" = yes ] || { cat -v "$1/ibad.out" "$1/igood.out"; cat "$1/ibad.rc" "$1/igood.rc"; exit 1; }' _ "$_S254_D"
+# --upgrade, SANDY_CHANNEL=dev: the stub curl answers the commit lookup with
+# a sha and the download (-o FILE) with the fixture. A copy of sandy is
+# upgraded, so a success replaces the copy.
+mkdir -p "$_S254_D/ubin"
+cat > "$_S254_D/ubin/curl" <<'STUB'
+#!/usr/bin/env bash
+prev=""
+for a in "$@"; do
+    if [ "$prev" = -o ]; then cat "$S254_FILE" > "$a"; exit 0; fi
+    prev="$a"
+done
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+STUB
+chmod +x "$_S254_D/ubin/curl"
+_s254_upgrade() {  # TAG FILE
+    local _rc=0
+    cp "$_S254_SANDY" "$_S254_D/$1.self"
+    env -i HOME="$_S254_D/home" SANDY_HOME="$_S254_D/home/.sandy" PATH="$_S254_D/ubin:/usr/bin:/bin" \
+        TMPDIR="${TMPDIR:-/tmp}" SANDY_CHANNEL=dev S254_FILE="$2" \
+        bash "$_S254_D/$1.self" --upgrade </dev/null >"$_S254_D/$1.out" 2>&1 || _rc=$?
+    echo "$_rc" > "$_S254_D/$1.rc"
+    grep -m1 '^SANDY_VERSION=' "$_S254_D/$1.self" | cut -d'"' -f2 > "$_S254_D/$1.ver" || true
+}
+_s254_upgrade ubad "$_S254_D/bad.sandy"
+_s254_upgrade ugood "$_S254_D/good.sandy"
+_S254_OWNVER="$(grep -m1 '^SANDY_VERSION=' "$_S254_SANDY" | cut -d'"' -f2)"
+check "§254(7b) sandy --upgrade refuses the same escape-carrying SANDY_VERSION, leaves itself unchanged ($_S254_OWNVER) and prints no ESC; an X.Y.Z-rcN-dev upgrade goes through (mutations: drop the check; the old regex)" \
+    bash -c '[ "$(cat "$1/ubad.rc")" = 1 ] && [ "$(cat "$1/ubad.ver")" = "$2" ] && grep -q "no valid SANDY_VERSION" "$1/ubad.out" && ! grep -q PWNED "$1/ubad.out" && [ "$(LC_ALL=C tr -dc "\\033" < "$1/ubad.out" | wc -c | tr -d " ")" = 0 ] && [ "$(cat "$1/ugood.rc")" = 0 ] && [ "$(cat "$1/ugood.ver")" = 1.0.0-rc2-dev ] || { cat -v "$1/ubad.out" "$1/ugood.out"; cat "$1/ubad.rc" "$1/ugood.rc"; exit 1; }' _ "$_S254_D" "$_S254_OWNVER"
+check "§254(7c) the version pattern is one line, byte-identical in sandy and install.sh, and sandy's own SANDY_VERSION matches it (mutation: change either copy; a SANDY_VERSION bump to a form the pattern refuses)" \
+    bash -c 'a="$(grep -x "_SANDY_VERSION_RE=.*" "$1")"; b="$(grep -x "_SANDY_VERSION_RE=.*" "$2")"; [ -n "$a" ] && [ "$a" = "$b" ] && [ "$(grep -c "^_SANDY_VERSION_RE=" "$1")" = 1 ] && [ "$(grep -c "^_SANDY_VERSION_RE=" "$2")" = 1 ] && eval "$a" && [[ $3 =~ $_SANDY_VERSION_RE ]] || { printf "%s\n%s\nown: %s\n" "$a" "$b" "$3"; exit 1; }; for v in 1.2.3 1.0.0-rc2 2.10.1-dev 1.0.0-rc2-dev; do [[ $v =~ $_SANDY_VERSION_RE ]] || { echo "refused $v"; exit 1; }; done; for v in 1.2 1.2.3-dev-rc1 1.2.3-beta "1.2.3 " v1.2.3; do [[ $v =~ $_SANDY_VERSION_RE ]] && { echo "accepted $v"; exit 1; }; done; exit 0' _ "$_S254_SANDY" "$(dirname "$_S254_SANDY")/install.sh" "$_S254_OWNVER"
+# (8) Ratchet: every dump of a container's or a build's log onto the terminal
+# goes through _sandy_term_lines (or _sandy_term_text). The behaviour of the
+# filter is (5); this only keeps a new dump from skipping it.
+_s254_dumps() {
+    local _all _bad
+    _all="$(grep -cE 'docker logs (--tail [0-9]+ )?"\$[A-Za-z_]+" 2>&1 \||tail -n [0-9]+ "\$_(sandy_daemon_log|sandy_proj_log|upd_build_log)"' "$1" || true)"
+    _bad="$(grep -nE 'docker logs (--tail [0-9]+ )?"\$[A-Za-z_]+" 2>&1 \||tail -n [0-9]+ "\$_(sandy_daemon_log|sandy_proj_log|upd_build_log)"' "$1" | grep -v '_sandy_term_lines\|_sandy_term_text' || true)"
+    [ "$_all" -ge 9 ] && [ -z "$_bad" ] || { echo "dumps: $_all"; printf '%s\n' "$_bad"; return 1; }
+}
+check "§254(8) all nine log dumps onto the terminal (failed --start container and supervisor logs, proxy logs, the project-build tail, the update-sessions tail and heartbeat) go through the term filter (mutation: drop it from one)" \
+    _s254_dumps "$_S254_SANDY"
+unset -f _s254_run _s254_helpers _s254_lit_lines _s254_install _s254_upgrade _s254_dumps
+unset _s254_f
+rm -rf "$_S254_D"
+unset _S254_SANDY _S254_D _S254_REALSLEEP _S254_CAPDIFF _S254_OWNVER
 
 # BEGIN SUMMARY
 # ============================================================

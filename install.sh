@@ -17,15 +17,22 @@ SANDY_CHANNEL="${SANDY_CHANNEL:-release}"
 SANDY_REPO_RAW="https://raw.githubusercontent.com/rappdw/sandy"
 SANDY_API_URL="https://api.github.com/repos/rappdw/sandy/releases/latest"
 SANDY_API_MAIN_URL="https://api.github.com/repos/rappdw/sandy/commits/main"
+# What a SANDY_VERSION may look like: X.Y.Z, X.Y.Z-rcN, X.Y.Z-dev and
+# X.Y.Z-rcN-dev. A byte-identical copy of sandy's line (this installer cannot
+# source sandy); sandy's run-tests §254 checks that they match.
+_SANDY_VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?(-dev)?$'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
-error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
+# The message is printed with %s, never through `echo -e`, so a backslash
+# sequence in it is printed as typed and cannot become a terminal escape
+# (sandy#547). Only the colour codes go through %b.
+info()  { printf '%b[sandy]%b %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[sandy]%b %s\n' "$YELLOW" "$NC" "$*"; }
+error() { printf '%b[sandy]%b %s\n' "$RED" "$NC" "$*" >&2; }
 
 # --- Check prerequisites ---
 if ! command -v docker &>/dev/null; then
@@ -115,9 +122,16 @@ else
         exit 1
     fi
     new_ver="$(grep -m1 '^SANDY_VERSION=' "$INSTALL_DIR/sandy.tmp.$$" | cut -d'"' -f2)" || new_ver=""
-    if [ -z "$new_ver" ] || { [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; }; then
+    # The version is printed, so it must be a version string first
+    # (_SANDY_VERSION_RE); anything else is refused without echoing it.
+    if ! [[ $new_ver =~ $_SANDY_VERSION_RE ]]; then
         rm -f "$INSTALL_DIR/sandy.tmp.$$"
-        error "The downloaded file does not look like sandy ${tag:-} (SANDY_VERSION=${new_ver:-none})."
+        error "The downloaded file does not look like sandy ${tag:-} (no valid SANDY_VERSION in it)."
+        exit 1
+    fi
+    if [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; then
+        rm -f "$INSTALL_DIR/sandy.tmp.$$"
+        error "The downloaded file does not look like sandy $tag (SANDY_VERSION=$new_ver)."
         exit 1
     fi
     mv "$INSTALL_DIR/sandy.tmp.$$" "$INSTALL_DIR/sandy"
