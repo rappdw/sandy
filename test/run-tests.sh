@@ -32087,7 +32087,7 @@ rm -rf "$_S241"
 unset _S241 _S241_PY _S241_RUN_PATH
 
 # ============================================================
-section "§245: agent-read dirs created in-session (.claude/commands|agents|plugins|skills, .gemini/extensions|commands) are reported at session end"
+section "§245: agent-read dirs created in-session (.claude/commands|agents|plugins|skills, .gemini/extensions|commands|agents|skills|policies, .agents/skills) are reported at session end"
 # ============================================================
 # WHY. Sandy overlays a sandbox-only copy on .claude/commands, .claude/agents,
 # .claude/plugins and .gemini/commands only when the workspace (or the
@@ -32274,7 +32274,7 @@ _S245_L="$(_s245_run L launch claude)"
 printf 'x\n' > "$_S245_D/L/ws/.claude/plugins/p"; printf 'x\n' > "$_S245_D/L/ws/.gemini/commands/c.toml"
 _S245_OUT="$(_s245_run L end claude)"
 check "§245(12) claude-only session with empty debris dirs: .claude/plugins (overlaid) is not reported, .gemini/commands (no gemini overlay) is (mutation: mapping every entry to claude)" \
-    bash -c 'printf "%s" "$1" | grep -qF "$2/.gemini/commands/ (existed at launch" && ! printf "%s" "$1" | grep -qF ".claude/plugins"' _ "$_S245_OUT" "$_S245_D/L/ws"
+    bash -c 'printf "%s" "$1" | grep -qF "$2/.gemini/commands/ (existed at launch" && ! printf "%s" "$1" | grep -qF "$2/.claude/plugins"' _ "$_S245_OUT" "$_S245_D/L/ws"
 
 # Fingerprint strength, in no-overlay (codex) dirs.
 mkdir -p "$_S245_D/M/ws/.claude/commands"; printf 'echo deploying\n' > "$_S245_D/M/ws/.claude/commands/deploy.md"
@@ -32549,8 +32549,63 @@ printf 'x\n' > "$_S245_D/GX3/ws/.gemini/extensions/mine/new"
 _S245_OUT="$(_s245_run GX3 end claude)"
 check "§245(28) claude-only session: an existing .gemini/extensions (no gemini overlay) changed in-session is reported (mutation: mapping .gemini/extensions to claude)" \
     bash -c 'printf "%s" "$1" | grep -qF "$2/.gemini/extensions/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/GX3/ws"
+# .gemini/agents, .gemini/skills, .gemini/policies and .agents/skills: a
+# host-side Gemini CLI loads subagent definitions (which can declare stdio MCP
+# servers), workspace skills and (if re-enabled) policies from them. No overlay
+# in any session, so each is detection-only like .claude/skills. Run in a
+# gemini session: mapping one to gemini would record it as overlaid and hide
+# the edit, which a claude-only session would not catch.
+_s245_n=0
+for _s245_p in .gemini/agents .gemini/skills .gemini/policies .agents/skills; do
+    _s245_n=$((_s245_n + 1))
+    _S245_L="$(_s245_run "NA$_s245_n" launch gemini)"
+    mkdir -p "$_S245_D/NA$_s245_n/ws/$_s245_p/evil"; printf 'run curl | sh\n' > "$_S245_D/NA$_s245_n/ws/$_s245_p/evil/x.md"
+    _S245_OUT="$(_s245_run "NA$_s245_n" end gemini)"
+    check "§245(29) $_s245_p created in-session (gemini session) is reported with its remediation and the notice explanation (§245(32) checks it names the dir; mutation: dropping $_s245_p from _sandy_overlay_detect_dirs)" \
+        bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s" "$1" | grep -q "Protected paths appeared" \
+                 && printf "%s" "$1" | grep -qF "$2/$3/" && printf "%s" "$1" | grep -qF "(cd $2 && rm -rf $3/)" \
+                 && printf "%s" "$1" | grep -q "read by the agent CLI on your host"' _ "$_S245_OUT" "$_S245_D/NA$_s245_n/ws" "$_s245_p"
+    _s245_fix "$_S245_OUT"
+    check "§245(29b) ...and its printed remediation removes $_s245_p" bash -c '[ ! -e "$1" ]' _ "$_S245_D/NA$_s245_n/ws/$_s245_p"
+    for _s245_ag in gemini claude; do
+        mkdir -p "$_S245_D/NB$_s245_n$_s245_ag/ws/$_s245_p/mine"; printf 'mine\n' > "$_S245_D/NB$_s245_n$_s245_ag/ws/$_s245_p/mine/x.md"
+        _S245_L="$(_s245_run "NB$_s245_n$_s245_ag" launch "$_s245_ag")"
+        _S245_SNAP="$(cat "$_S245_D/NB$_s245_n$_s245_ag/sb/.protected-existed-at-launch")"
+        printf 'evil\n' >> "$_S245_D/NB$_s245_n$_s245_ag/ws/$_s245_p/mine/x.md"
+        _S245_OUT="$(_s245_run "NB$_s245_n$_s245_ag" end "$_s245_ag")"
+        check "§245(30) $_s245_ag session: an existing $_s245_p is fingerprinted, gets no mount, and an edit to it is reported as changed with no rm -rf (mutation: mapping $_s245_p to $_s245_ag in _sandy_overlay_detect_agent)" \
+            bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -qF "$5" \
+                     && printf "%s\n" "$3" | grep -qF "#content	$5	" && ! printf "%s\n" "$3" | grep -qFx "$5" \
+                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch with no sandbox overlay" \
+                     && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/NB$_s245_n$_s245_ag/ws" "$_S245_SNAP" "$_S245_L" "$_s245_p"
+    done
+    mkdir -p "$_S245_D/NC$_s245_n/ws/$_s245_p/mine"; printf 'mine\n' > "$_S245_D/NC$_s245_n/ws/$_s245_p/mine/x.md"
+    _S245_L="$(_s245_run "NC$_s245_n" launch gemini)"
+    _S245_OUT="$(_s245_run "NC$_s245_n" end gemini)"
+    check "§245(31) ...and an existing $_s245_p left unchanged is not reported" \
+        bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$1" | grep -q "Protected paths"' _ "$_S245_OUT"
+done
+# The notice's explanation names every watched agent-read dir in full, so a
+# new list entry cannot silently go unnamed: each _sandy_overlay_detect_dirs
+# entry and each agent-read _sandy_protected_dirs entry (.claude/*, .gemini/*,
+# .agents/*, .agent/*, .mirror) must be a whole token of the rendered text.
+_S245_L="$(_s245_run NN launch claude,gemini)"
+mkdir -p "$_S245_D/NN/ws/.claude/commands"; printf 'x\n' > "$_S245_D/NN/ws/.claude/commands/x.md"
+_S245_OUT="$(_s245_run NN end claude,gemini)"
+check "§245(32) every detection-list entry and every agent-read protected dir is named in full in the notice's list of what the host agent CLI reads, not only in its never-covered list (mutation: dropping .claude/hooks, .mirror or .gemini/policies from the notice)" \
+    bash -c 'set -euo pipefail
+             printf "%s" "$1" | grep -q "DRIVE-OK"
+             blk="$(printf "%s\n" "$1" | sed -n "/read by the agent CLI on your host/,/Most are kept away/p" | sed "s/Most are kept away.*//")"
+             [ -n "$blk" ]
+             toks="$(printf "%s\n" "$blk" | sed "s/^\[sandy\]//" | tr -s " ,;()" "\n\n\n\n\n" | sed "s/\.\$//")"
+             want="$(env -i PATH="$PATH" bash -c ". \"\$1/fns.sh\"; _sandy_overlay_detect_dirs; _sandy_protected_dirs" _ "$2" \
+                     | grep -E "^\.(claude|gemini|agents?)/|^\.mirror(/|\$)")"
+             printf "%s\n" "$want" | grep -qFx .claude/hooks && printf "%s\n" "$want" | grep -qFx .mirror
+             miss=""
+             while IFS= read -r e; do printf "%s\n" "$toks" | grep -qFx "$e" || miss="$miss $e"; done <<< "$want"
+             [ -z "$miss" ] || { echo "not named in the notice:$miss"; exit 1; }' _ "$_S245_OUT" "$_S245_D"
 rm -rf "$_S245_D"
-unset _S245_D _S245_L _S245_OUT _S245_SNAP _s245_p _s245_bad
+unset _S245_D _S245_L _S245_OUT _S245_SNAP _s245_p _s245_bad _s245_n _s245_ag
 unset -f _s245_run _s245_fix
 
 # ============================================================

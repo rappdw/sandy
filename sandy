@@ -2060,7 +2060,14 @@ EOF
 # otherwise nothing is mounted and a creation lands in the workspace.
 # .claude/skills (#557) has no overlay at all: it is always the plain rw
 # workspace path, so an existing one is fingerprinted at launch and a change
-# reported, and a session can still author a skill the operator then reviews. They are deliberately NOT in
+# reported, and a session can still author a skill the operator then reviews.
+# .gemini/agents, .gemini/skills, .gemini/policies and .agents/skills are
+# likewise detection-only with no overlay in any session: a host-side Gemini
+# CLI loads subagent definitions from .gemini/agents/*.md (one can declare
+# stdio MCP servers, commands Gemini CLI runs on the host once the user
+# acknowledges the subagent), workspace skills from .gemini/skills and
+# .agents/skills (the latter also read by other agent CLIs), and, if Google
+# re-enables them, workspace policies from .gemini/policies. They are deliberately NOT in
 # _sandy_protected_dirs: that list gets a :ro mount when the dir exists, which
 # would make an existing .claude/commands read-only and break its writable
 # overlay. Mounting is unchanged; the launch snapshot and the session-end
@@ -2073,17 +2080,26 @@ _sandy_overlay_detect_dirs() {
 .claude/skills
 .gemini/extensions
 .gemini/commands
+.gemini/agents
+.gemini/skills
+.gemini/policies
+.agents/skills
 EOF
 }
 # The agent whose overlay covers a _sandy_overlay_detect_dirs entry: the
 # .claude/* copies are mounted only when claude runs, the .gemini/* ones only
 # when gemini does. In any other session an existing entry is the plain rw
 # workspace path, so the snapshot fingerprints it instead of trusting an
-# overlay that was never mounted. .claude/skills has no overlay in any
-# session, so it names no agent (and _sandy_agent_has "" is false).
+# overlay that was never mounted. .claude/skills, .gemini/agents,
+# .gemini/skills, .gemini/policies and .agents/skills have no overlay in any
+# session, so they name no agent (and _sandy_agent_has "" is false).
 _sandy_overlay_detect_agent() {
     case "$1" in
-        .claude/skills) ;;
+        # .agents/skills is named explicitly because several agent CLIs read
+        # it: a future `.agents/*) echo <agent>` arm must not capture it
+        # silently. Antigravity (3.0) will also need .agents/rules,
+        # .agents/workflows and the legacy .agent/ decided then.
+        .claude/skills|.gemini/agents|.gemini/skills|.gemini/policies|.agents/skills) ;;
         .claude/*) echo claude ;;
         .gemini/*) echo gemini ;;
     esac
@@ -3365,11 +3381,19 @@ _sandy_session_end_protected_report() {
             printf "${YELLOW}[sandy]${NC}\n" >&2
             printf "${YELLOW}[sandy]${NC} Sandy watches these paths because they auto-execute code or steer an agent under\n" >&2
             printf "${YELLOW}[sandy]${NC} common operations: git hooks fire on \`git pull\`/checkout, CI workflows on \`git push\`,\n" >&2
-            printf "${YELLOW}[sandy]${NC} IDE/shell/tool configs on project open or next use, and the .claude/ and .gemini/\n" >&2
-            printf "${YELLOW}[sandy]${NC} commands, agents, plugins, skills, extensions, settings and .gemini/.env are\n" >&2
-            printf "${YELLOW}[sandy]${NC} read by the agent CLI on your host at its next start. Most are kept away from your\n" >&2
-            printf "${YELLOW}[sandy]${NC} host workspace (read-only, or a sandbox-only copy) only when they exist at launch;\n" >&2
-            printf "${YELLOW}[sandy]${NC} .claude/skills/ never is.\n" >&2
+            # Every agent-read path sandy watches is named here in full: the
+            # agent-read protected files, and every _sandy_overlay_detect_dirs
+            # and agent-read _sandy_protected_dirs entry (§245(32) fails when
+            # one of those dirs is missing from this text).
+            printf "${YELLOW}[sandy]${NC} IDE/shell/tool configs on project open or next use, and these are\n" >&2
+            printf "${YELLOW}[sandy]${NC} read by the agent CLI on your host at its next start: .mcp.json,\n" >&2
+            printf "${YELLOW}[sandy]${NC} .claude/settings*.json, .claude/commands, .claude/agents, .claude/plugins,\n" >&2
+            printf "${YELLOW}[sandy]${NC} .claude/skills, .claude/hooks, .gemini/settings.json, .gemini/.env, .gemini/commands,\n" >&2
+            printf "${YELLOW}[sandy]${NC} .gemini/extensions, .gemini/agents, .gemini/skills, .gemini/policies, .agents/skills\n" >&2
+            printf "${YELLOW}[sandy]${NC} and .mirror. Most are kept away from your host workspace (read-only, or a\n" >&2
+            printf "${YELLOW}[sandy]${NC} sandbox-only copy) only when they exist at launch and their agent runs;\n" >&2
+            printf "${YELLOW}[sandy]${NC} .claude/skills, .gemini/agents, .gemini/skills, .gemini/policies and .agents/skills\n" >&2
+            printf "${YELLOW}[sandy]${NC} never are.\n" >&2
             if [ -n "$_rm_args" ] || [ -n "$_rm_links" ]; then
                 printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
                 if [ -n "$_rm_args" ]; then
@@ -24114,7 +24138,7 @@ done < <(_sandy_protected_dirs)
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     [ -d "$WORK_DIR/$_pd" ] || continue
-    # An entry that names no agent (.claude/skills) is never overlaid.
+    # An entry that names no agent (.claude/skills, .gemini/agents, ...) is never overlaid.
     _pd_agent="$(_sandy_overlay_detect_agent "$_pd")"
     if [ -n "$_pd_agent" ] && _sandy_agent_has "$_pd_agent"; then
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
