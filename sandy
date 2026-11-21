@@ -463,6 +463,133 @@ _sandy_daemon_fatal() {
     return 0
 }
 
+# BEGIN bounded exec
+# #548: run CMD with a wall-clock bound. Every host-side `docker exec` probe
+# goes through this. A probe waits on something inside the container that the
+# agent can stall: it runs as the same uid as the container's tmux server, so a
+# `kill -STOP` on that server makes every `tmux has-session` block forever, and
+# a FIFO or lease on a file a probe reads does the same. Unbounded, one such
+# probe hung `--start`, the supervisor and its watch loop past every budget.
+#
+# _sandy_exec_bounded SECS CMD [ARG...]
+#   Runs CMD in the background with stdin from /dev/null, stdout to a temp
+#   file and stderr discarded (a probe's stderr is docker noise; the helper's
+#   own warning still reaches the caller's stderr, so callers need no
+#   2>/dev/null). A watcher sleeps SECS, then sends CMD TERM,
+#   then KILL one second later; when CMD ends first, the watcher and its sleep
+#   are stopped with KILL. Returns CMD's own status and replays its stdout, or
+#   returns 124 (coreutils timeout's code) and replays nothing when the bound
+#   was hit: output from a killed probe is partial, so it is never trusted. A
+#   temp-dir failure returns 125 (warned once, naming TMPDIR, unless
+#   _SANDY_EB_QUIET=1, which --print-state sets), which callers
+#   also read as "unknown", never a verdict. bash 3.2: no GNU timeout on macOS, no
+#   `wait -n`, no setsid.
+#   The kill reaches CMD itself, not its children: CMD is the docker CLI, one
+#   process. Killing it does NOT stop the process docker started inside the
+#   container, so the container-side command carries its own `timeout` too
+#   (_sandy_tmux_probe), or stuck execs pile up against the pids limit.
+#   A signal that ends the caller during the wait leaves the watcher to finish
+#   its kill on its own; only the temp dir can then be left behind.
+#   The watcher's clock is `command -p sleep` (the system sleep, never one
+#   found on PATH): the bound is wall time, and a PATH `sleep` that returns at
+#   once (as test stubs do, to skip poll delays) would fire it immediately.
+# _sandy_exec_bounded_capture SECS CMD [ARG...]
+#   The same, but the output goes to _SANDY_EB_OUT instead of stdout, so a
+#   caller that needs both the output and the status runs it without a $( )
+#   subshell (which would also lose the warned-once flag).
+_sandy_exec_bounded() { _sandy_eb_run print "$@"; }
+_sandy_exec_bounded_capture() { _sandy_eb_run var "$@"; }
+_sandy_eb_run() {
+    local _eb_mode="$1" _eb_secs="$2" _eb_dir="" _eb_pid _eb_wpid _eb_rc=0 _eb_i _eb_s _eb_sp
+    shift 2
+    [ "$_eb_mode" = print ] || _SANDY_EB_OUT=""
+    _eb_dir="$(mktemp -d "${TMPDIR:-/tmp}/sandy-exec.XXXXXX" 2>/dev/null)" || _eb_dir=""
+    if [ -z "$_eb_dir" ]; then
+        if [ -z "${_SANDY_EB_TMP_WARNED:-}" ] && [ "${_SANDY_EB_QUIET:-0}" != 1 ]; then
+            _SANDY_EB_TMP_WARNED=1
+            printf '[sandy] cannot create a temp dir under %s; container probes answer "unknown" until it is fixed\n' "${TMPDIR:-/tmp}" >&2
+        fi
+        return 125
+    fi
+    "$@" >"$_eb_dir/out" 2>/dev/null </dev/null &
+    _eb_pid=$!
+    # The watcher records each of its sleeps' pids (s1, then s2 for the grace)
+    # so they can be stopped with it.
+    (
+        trap - ERR; set +e
+        command -p sleep "$_eb_secs" & echo "$!" > "$_eb_dir/s1"; wait "$!"
+        : > "$_eb_dir/timedout"
+        kill -TERM "$_eb_pid" 2>/dev/null
+        command -p sleep 1 & echo "$!" > "$_eb_dir/s2"; wait "$!"
+        kill -KILL "$_eb_pid" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    _eb_wpid=$!
+    wait "$_eb_pid" 2>/dev/null || _eb_rc=$?
+    # Stop the watcher with KILL, never TERM: a bash subshell signalled in the
+    # moment after its fork runs the PARENT's traps (measured: 275 of 300
+    # immediate TERMs ran the parent's EXIT trap in the child) -- in the
+    # supervisor that is cleanup(), which removes the session's container.
+    # First let it record its sleep (a bounded spin, no fork), so that sleep
+    # can be stopped too rather than left to run out.
+    _eb_i=0
+    while [ ! -s "$_eb_dir/s1" ] && [ "$_eb_i" -lt 20000 ]; do _eb_i=$((_eb_i + 1)); done
+    if [ -e "$_eb_dir/timedout" ]; then
+        _eb_i=0
+        while [ ! -s "$_eb_dir/s2" ] && [ "$_eb_i" -lt 20000 ]; do _eb_i=$((_eb_i + 1)); done
+    fi
+    kill -KILL "$_eb_wpid" 2>/dev/null || true
+    wait "$_eb_wpid" 2>/dev/null || true
+    for _eb_s in s1 s2; do
+        _eb_sp=""
+        # On the timeout path s1 already ran out and was reaped: its pid may
+        # belong to something else by now (macOS wraps pids quickly).
+        if [ "$_eb_s" = s1 ] && [ -e "$_eb_dir/timedout" ]; then continue; fi
+        if [ -s "$_eb_dir/$_eb_s" ]; then read -r _eb_sp < "$_eb_dir/$_eb_s" 2>/dev/null || _eb_sp=""; fi
+        if [ -n "$_eb_sp" ]; then kill -KILL "$_eb_sp" 2>/dev/null || true; fi
+    done
+    if [ -e "$_eb_dir/timedout" ]; then
+        _eb_rc=124
+    elif [ "$_eb_mode" = print ]; then
+        cat "$_eb_dir/out" 2>/dev/null || true
+    else
+        _SANDY_EB_OUT="$(cat "$_eb_dir/out" 2>/dev/null)" || _SANDY_EB_OUT=""
+    fi
+    rm -rf "$_eb_dir" 2>/dev/null || true
+    return "$_eb_rc"
+}
+# _sandy_tmux_probe SECS CONTAINER TMUX-ARG...
+#   `tmux TMUX-ARG...` in CONTAINER as the host uid (-u: docker exec defaults
+#   to the image's user, root, whose client looks for /tmp/tmux-0 and never
+#   sees the session), bounded on both sides: the host kills the docker client
+#   after SECS, and the container's coreutils `timeout` ends the tmux client
+#   itself a second or more before that (TERM at SECS-2, KILL one second
+#   later), so the exec normally returns on its own with 124 or 137.
+_sandy_tmux_probe() {
+    local _tp_secs="$1" _tp_c="$2" _tp_in
+    shift 2
+    _tp_in=$((_tp_secs - 2)); [ "$_tp_in" -ge 1 ] || _tp_in=1
+    _sandy_exec_bounded "$_tp_secs" docker exec -u "$(id -u)" "$_tp_c" timeout -k 1 "$_tp_in" tmux "$@"
+}
+# A status that leaves the answer UNKNOWN, never "no session": the bound was
+# hit (host side 124; container side 124 after TERM, 137 after KILL), sandy
+# could not make its temp dir (125), or docker could not run the container's
+# `timeout` (126/127: tmux itself answers a missing session with 1).
+_sandy_probe_unknown() {
+    case "$1" in 124|125|126|127|137) return 0 ;; esac
+    return 1
+}
+# _sandy_probe_unknown_why RC: the cause, for a warning. RC `empty` is a
+# probe script that exited 0 but printed nothing (it always prints on 0).
+_sandy_probe_unknown_why() {
+    case "$1" in
+        125) printf 'sandy cannot create a temp dir under %s' "${TMPDIR:-/tmp}" ;;
+        126|127) printf 'docker could not run timeout(1) in the container' ;;
+        empty) printf 'the probe exited 0 without an answer' ;;
+        *) printf 'its tmux server did not answer (stopped or wedged)' ;;
+    esac
+}
+# END bounded exec
+
 # Numeric semver compare. _ver_lt A B → 0 if A < B (strips -dev/-rc suffix).
 # Portable across macOS bash 3.2 and Linux without relying on `sort -V`.
 _ver_lt() {
@@ -4588,7 +4715,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--stop"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Stop a running daemon session (full teardown)."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--exec"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open a shell (or run one command) inside this workspace running container, as the HOST uid. Exists because the hand-rolled form is wrong: docker resolves -u <name> against the image, where the user is uid 1001, while sandy bind-mounts a passwd carrying the host uid -- so docker exec -u sandy yields uid 1001, prints I have no name!, and writes to the workspace mount as the wrong owner. Finds a labelled daemon container first, then a foreground one by exact name. Sub-options: --workspace PATH, --dry-run (print the docker exec command, run nothing), -- CMD... (default /bin/bash)."'; printf '}'
+    printf '{'; _json_kv name '"--exec"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open a shell (or run one command) inside this workspace running container, as the HOST uid. Exists because the hand-rolled form is wrong: docker resolves -u <name> against the image, where the user is uid 1001, while sandy bind-mounts a passwd carrying the host uid -- so docker exec -u sandy yields uid 1001, prints I have no name!, and writes to the workspace mount as the wrong owner. Finds a labelled daemon container first, then a foreground one by exact name. Sub-options: --workspace PATH, --dry-run (print the docker exec command, run nothing), -- CMD... (default /bin/bash)."'; printf '}'  # probe-unbounded: description text, not an exec
     printf ','
     printf '{'; _json_kv name '"--login"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Log an agent in so its credential persists in this workspace sandbox (#428). Supported: codex, via codex login --device-auth (the plain form waits on a localhost callback a host browser cannot reach). Runs inside the workspace running container when one mounts the sandbox codex home rw, else as a one-shot launch whose only pane runs the login with OPENAI_API_KEY withheld. Other agents get an error naming their own route. Needs a terminal. Sub-options: --workspace PATH, --dry-run (print the route, run nothing)."'; printf '}'
     printf ','
@@ -4781,7 +4908,9 @@ _sandy_emit_container_daemon_fields() {
         # "introspection handler failed / Report this at ..." on every
         # --print-state with an unreachable probe. bash 4+ exempts it; macOS does
         # not. Absorbing the failure inside the subshell silences it on both.
-        _ac="$(docker exec -u "$(id -u)" "$_cid" tmux display -p -t sandy '#{session_attached}' 2>/dev/null || true)"
+        # #548: bounded (5s); a timeout prints nothing, so it reads as null
+        # (unknown), the same as any other failed probe.
+        _ac="$(_sandy_tmux_probe 5 "$_cid" display -p -t sandy '#{session_attached}' || true)"
         if ! [[ "$_ac" =~ ^[0-9]+$ ]]; then
             _ac="null"
         fi
@@ -5284,16 +5413,29 @@ sandy-skills-${_suffix}"
 # 5-second stall per mid-startup container would defeat that. Gating the
 # retry to the destructive path only is deliberate: the expensive check is
 # paid exactly where a wrong answer is irreversible.
+#
+# #548: each probe is bounded (5s, _sandy_tmux_probe). A probe that hits its
+# bound answers "alive": the server exists but does not answer (an agent can
+# SIGSTOP it), and an unknown answer must never reap a container. In reap mode
+# that keep is said on stderr (arg 3 names the container), unless
+# _SANDY_GC_QUIET_KEEP=1 (the reaper's re-probe, after the plan already said
+# it); the --print-state count stays silent.
 _sandy_gc_probe_has_session() {
-    local _cid="$1" _mode="$2" _i
-    if [ "$_mode" = "reap" ]; then
-        for _i in 1 2 3 4 5; do
-            docker exec -u "$(id -u)" "$_cid" tmux has-session -t sandy >/dev/null 2>&1 && return 0
-            sleep 1
-        done
-        return 1
-    fi
-    docker exec -u "$(id -u)" "$_cid" tmux has-session -t sandy >/dev/null 2>&1
+    local _cid="$1" _mode="$2" _name="${3:-$1}" _i _rc
+    for _i in 1 2 3 4 5; do
+        _rc=0
+        _sandy_tmux_probe 5 "$_cid" has-session -t sandy >/dev/null || _rc=$?
+        [ "$_rc" = 0 ] && return 0
+        if _sandy_probe_unknown "$_rc"; then
+            if [ "$_mode" = "reap" ] && [ "${_SANDY_GC_QUIET_KEEP:-0}" != 1 ]; then
+                printf '%b[sandy]%b %s\n' "${YELLOW:-}" "${NC:-}" "kept $_name: $(_sandy_probe_unknown_why "$_rc"), so it cannot be judged dead" >&2
+            fi
+            return 0
+        fi
+        [ "$_mode" = "reap" ] || return 1
+        sleep 1
+    done
+    return 1
 }
 
 # 2d — dead-owner sandy_* container NAMES (one per line). Reuses the D6/D9
@@ -5395,7 +5537,7 @@ ${_cname}"
                 printf '%s\n' "$_cname"
                 continue
             fi
-            if _sandy_gc_probe_has_session "$_cid" "$_mode"; then
+            if _sandy_gc_probe_has_session "$_cid" "$_mode" "$_cname"; then
                 _kept_agents="${_kept_agents}
 ${_sbname}"
                 continue   # ALIVE — never touch, regardless of daemon_pid (D9)
@@ -5514,7 +5656,7 @@ _sandy_gc_reap_containers() {
     # "reap" mode: retries the mid-startup has-session probe (5x/sleep-1)
     # before judging a running daemon container a zombie — this destructive
     # path is exactly where a wrong answer is irreversible.
-    for _cname in $(_sandy_dead_owner_containers_list reap); do
+    for _cname in $(_SANDY_GC_QUIET_KEEP=1 _sandy_dead_owner_containers_list reap); do
         # docker stop (graceful) then rm -f — mirrors --stop's own teardown
         # sequence for a dead-session daemon zombie.
         docker stop "$_cname" >/dev/null 2>&1 || true
@@ -6774,6 +6916,10 @@ if [[ "${1:-}" == "--print-schema" ]]; then
 fi
 if [[ "${1:-}" == "--print-state" ]]; then
     set -E; trap _sandy_introspect_err_trap ERR
+    # The stream contract (SPEC_INTROSPECTION.md): zero bytes on stderr. The
+    # bounded-exec helper's warnings stay out of it (#548); an unknown probe
+    # still reads as null/kept in the JSON.
+    _SANDY_EB_QUIET=1
     # The first argument after --print-state that is not --sizes selects the
     # mode: "light" for the cheap single-spawn path (#18), anything else (incl.
     # absent) → full. Forward-compatible: a consumer can pass "light"
@@ -10359,7 +10505,8 @@ if [[ "${1:-}" == "--exec" ]]; then
     # Getting this wrong is not cosmetic -- as root, HOME=/root sits on the
     # --read-only rootfs, which is why an in-container `codex logout` failed
     # with "Read-only file system (os error 30)".
-    _ex_home="$(docker exec -u "$_ex_uid" "$_ex_container" sh -c 'getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6' 2>/dev/null | tr -d '\r\n')"
+    # #548: bounded (10s host, 5s in the container); a timeout falls back.
+    _ex_home="$(_sandy_exec_bounded 10 docker exec -u "$_ex_uid" "$_ex_container" sh -c 'T=; command -v timeout >/dev/null 2>&1 && T="timeout -k 1 5"; $T getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6' | tr -d '\r\n')" || _ex_home=""
     [ -n "$_ex_home" ] || _ex_home="/home/sandy"
 
     # -it only with a real stdin tty, so `sandy --exec -- cmd | grep x` and CI
@@ -10368,7 +10515,7 @@ if [[ "${1:-}" == "--exec" ]]; then
     [ ${#_ex_cmd[@]} -eq 0 ] && _ex_cmd=(/bin/bash)
 
     if [ "$_ex_dry_run" = true ]; then
-        printf 'docker exec'
+        printf 'docker exec'  # probe-unbounded: the --dry-run printout, not an exec
         printf ' %s' "${_ex_tty[@]}" "-u" "${_ex_uid}:${_ex_gid}" "-w" "$_ex_cwd" "-e" "HOME=$_ex_home"
         printf ' %s' "$_ex_container"
         printf ' %q' "${_ex_cmd[@]}"
@@ -10386,6 +10533,7 @@ if [[ "${1:-}" == "--exec" ]]; then
     # Pass through the command's own exit status; `|| rc=$?` because set -e
     # would otherwise swallow a non-zero command result before we can return it.
     _ex_rc=0
+    # probe-unbounded: the user's own interactive command, not a probe (#548).
     docker exec "${_ex_tty[@]}" -u "${_ex_uid}:${_ex_gid}" -w "$_ex_cwd" -e "HOME=$_ex_home" \
         "$_ex_container" "${_ex_cmd[@]}" || _ex_rc=$?
     exit "$_ex_rc"
@@ -10934,7 +11082,7 @@ that started it, so a closed tab/dropped SSH/IDE quit does not end it):
                      session. Sub-options: --workspace PATH
   --exec [-- CMD]    Shell (or run CMD) inside this workspace's running
                      container as the host uid -- the hand-rolled
-                     'docker exec -u sandy' silently runs as uid 1001.
+                     form (exec -u sandy) silently runs as uid 1001.
   --login codex      Log codex in so the credential persists in this
                      workspace's sandbox (codex's device login): inside the
                      running session if there is one, else a one-shot
@@ -14800,8 +14948,13 @@ TMUXCONF
 }
 
 generate_channel_relay() {
-    cat > "$SANDY_HOME/channel-relay.sh.new" <<'RELAY'
-#!/usr/bin/env bash
+    # The shebang, then the bounded-exec helpers (#548) copied out of this
+    # script with declare -f, so the relay can never drift from them, then
+    # the relay body.
+    {
+    printf '#!/usr/bin/env bash\n'
+    declare -f _sandy_exec_bounded _sandy_exec_bounded_capture _sandy_eb_run _sandy_tmux_probe _sandy_probe_unknown _sandy_probe_unknown_why
+    cat <<'RELAY'
 # sandy channel-relay — host-side Telegram → tmux injection bridge.
 # Long-polls the Telegram Bot API and injects messages into the container's
 # tmux session via `docker exec ... tmux send-keys`. Stateless, agent-agnostic.
@@ -14877,23 +15030,30 @@ _target() {
             if [ "$tag" = "$want" ]; then
                 printf 'sandy.%s\n' "$idx"; return 0
             fi
-        done < <(docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux list-panes -t sandy -F '#{pane_index} #{@sandy_pane_agent}' 2>/dev/null || true)
+        done < <(_sandy_tmux_probe 5 "$SANDY_CONTAINER_NAME" list-panes -t sandy -F '#{pane_index} #{@sandy_pane_agent}' || true)
     fi
     printf 'sandy.%s\n' "$TARGET_PANE"
 }
 
+# #548: every docker exec here is bounded (_sandy_tmux_probe, written above
+# this script body by generate_channel_relay): 5s for a probe, 10s for the
+# send. An agent can stop the container's tmux server, and an unbounded exec
+# then hung this relay for good. The session wait is wall-clock (30s), so slow
+# probes cannot stretch it; a send that hits its bound is reported, not
+# dropped silently.
 _inject() {
-    local text="$1"
-    # Wait for container tmux session to exist (up to 30s)
-    local tries=0
-    while [ $tries -lt 60 ]; do
-        if docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux has-session -t sandy 2>/dev/null; then
+    local text="$1" end=$((SECONDS + 30)) rc=0
+    while [ "$SECONDS" -lt "$end" ]; do
+        if _sandy_tmux_probe 5 "$SANDY_CONTAINER_NAME" has-session -t sandy; then
             break
         fi
         sleep 0.5
-        tries=$((tries+1))
     done
-    docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys -t "$(_target)" "$text" Enter 2>/dev/null || true
+    _sandy_tmux_probe 10 "$SANDY_CONTAINER_NAME" send-keys -t "$(_target)" "$text" Enter || rc=$?
+    if _sandy_probe_unknown "$rc"; then
+        echo "[sandy] channel relay: this message was not delivered: $(_sandy_probe_unknown_why "$rc")." >&2
+    fi
+    return 0
 }
 
 # Drain stale updates once at startup
@@ -14942,6 +15102,7 @@ for u in d.get("result", []):
     done <<< "$parsed"
 done
 RELAY
+    } > "$SANDY_HOME/channel-relay.sh.new"
     chmod +x "$SANDY_HOME/channel-relay.sh.new"
 }
 
@@ -15163,18 +15324,55 @@ fi
 # there would block a plain cat forever (the client, the supervisor and the
 # already-running check would all hang past their budgets). Anything else that
 # exists is `malformed`, which classifies as not ready.
-_SANDY_EW_PROBE_SH='if [ -f "$1" ] && [ ! -p "$1" ]; then v="$(head -c 4096 "$1" 2>/dev/null | head -n 1)"
+# #548: both waits inside the probe are bounded by the container's coreutils
+# `timeout` (2s for the read, which a lease can block; 3s for has-session,
+# which a stopped tmux server blocks), and the docker exec by the host (8s).
+# A bound hit in the container prints `probe-timeout`; the host reads that,
+# and its own bound or any other unknown status, as `probe-unknown`
+# (_sandy_ew_poll): classified as wait (not ready), and, being output, never
+# read as "no session yet", so the D6 check below cannot take an unresponsive
+# session for a zombie and reap it.
+_SANDY_EW_PROBE_SH='R=; H=; if command -v timeout >/dev/null 2>&1; then R="timeout -k 1 2"; H="timeout -k 1 3"; fi
+if [ -f "$1" ] && [ ! -p "$1" ]; then v="$($R head -c 4096 "$1" 2>/dev/null)"
+case $? in 124|137) printf "probe-timeout\n"; exit 0 ;; esac
+v="$(printf "%s\n" "$v" | head -n 1)"
 elif [ -e "$1" ] || [ -L "$1" ]; then v=malformed
 else v=none; fi
 case "$v" in failed*) printf "%s\n" "$v"; exit 0 ;; esac
-tmux has-session -t sandy 2>/dev/null || exit 1
+$H tmux has-session -t sandy 2>/dev/null
+case $? in 0) ;; 124|137) printf "probe-timeout\n"; exit 0 ;; *) exit 1 ;; esac
 printf "%s\n" "$v"'
+# _sandy_ew_poll C: one probe, run in THIS shell (no $( ), so the warned-once
+# flag survives); sets _SANDY_EW_OUT to its answer and _SANDY_EW_WHY to the
+# status that made it unknown (for _sandy_probe_unknown_why), or "". Unknown
+# reads `probe-unknown`: a bound hit at either end, no temp dir, docker unable
+# to run the script, or status 0 with no output (the script always prints on
+# 0, so that is a failed write, not "no session"). _sandy_ew_probe prints the
+# answer, for callers that only need that.
+_sandy_ew_poll() {
+    local _ep_rc=0
+    _SANDY_EW_WHY=""
+    _sandy_exec_bounded_capture 8 docker exec -u "$(id -u)" "$1" sh -c "$_SANDY_EW_PROBE_SH" _ /home/sandy/.sandy-entry-window || _ep_rc=$?
+    _SANDY_EW_OUT="$_SANDY_EB_OUT"
+    if _sandy_probe_unknown "$_ep_rc"; then
+        _SANDY_EW_WHY="$_ep_rc"
+    elif [ "$_ep_rc" = 0 ] && [ -z "$_SANDY_EW_OUT" ]; then
+        _SANDY_EW_WHY=empty
+    elif [ "${_SANDY_EW_OUT%%$'\n'*}" = probe-timeout ]; then
+        _SANDY_EW_WHY=124
+    fi
+    if [ -n "$_SANDY_EW_WHY" ]; then _SANDY_EW_OUT=probe-unknown; fi
+    if [ "$_ep_rc" != 0 ] && [ -z "$_SANDY_EW_WHY" ]; then _SANDY_EW_OUT=""; fi
+    return 0
+}
 _sandy_ew_probe() {
-    docker exec -u "$(id -u)" "$1" sh -c "$_SANDY_EW_PROBE_SH" _ /home/sandy/.sandy-entry-window 2>/dev/null || true
+    _sandy_ew_poll "$1"
+    [ -z "$_SANDY_EW_OUT" ] || printf '%s\n' "$_SANDY_EW_OUT"
+    return 0
 }
 # _sandy_ew_classify <probe output> -> ready | wait | fatal
 #   ready = session and (passed or none); fatal = failed; wait = anything
-#   else (no session yet, pending, an unrecognised value).
+#   else (no session yet, pending, probe-unknown, an unrecognised value).
 _sandy_ew_classify() {
     local _v="${1%%$'\n'*}"
     case "${_v%%$'\t'*}" in
@@ -15205,12 +15403,14 @@ _sandy_ew_report() {
 # printing the message to the daemon log (which the --start client tails) and
 # writing the .fatal marker; its caller exits 1, and the EXIT trap's cleanup
 # removes the container. Returns 0 on ready, on a stopped container, or at
-# the deadline: the 30s watch loop after it is the backstop.
+# the deadline: the 30s watch loop after it is the backstop. The deadline is
+# wall-clock (SECONDS) and each probe is bounded (#548), so a stalled probe
+# costs at most its bound and can never hold the supervisor past the window.
 _sandy_ew_supervise() {
     local _c="$1" _out _end=$((SECONDS + 120))
     while [ "$SECONDS" -lt "$_end" ]; do
         [ "$(docker inspect -f '{{.State.Running}}' "$_c" 2>/dev/null || echo false)" = "true" ] || return 0
-        _out="$(_sandy_ew_probe "$_c")"
+        _sandy_ew_poll "$_c"; _out="$_SANDY_EW_OUT"
         case "$(_sandy_ew_classify "$_out")" in
             ready) return 0 ;;
             fatal)
@@ -15232,14 +15432,22 @@ _sandy_ew_supervise() {
 # prints each failure and returns 1. The file is written inside the agent's
 # own home, so it is a report, not a security boundary: it decides an exit
 # code, never what runs.
+# #548: the reads are bounded in the container (3s each) and the exec on the
+# host (10s); a probe that hits a bound counts as `pending`, so it is retried
+# and, if it never answers, ends in the "never reported" refusal (exit 9),
+# never in a ready report. The polling stops after 40s of wall clock, so the
+# check takes at most ~50s.
 _sandy_cs_start_check() {
-    local c="$1" out line slug st sid name pinned drift reason bad=0 i
+    local c="$1" out line slug st sid name pinned drift reason bad=0 i end=$((SECONDS + 40))
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        out="$(docker exec -u "$(id -u)" "$c" sh -c '
+        # At most 10 polls and 40s of wall clock (plus one probe's bound).
+        [ "$i" = 1 ] || [ "$SECONDS" -lt "$end" ] || break
+        out="$(_sandy_exec_bounded 10 docker exec -u "$(id -u)" "$c" sh -c '
             [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = 1 ] || { echo inactive; exit 0; }
+            T=; command -v timeout >/dev/null 2>&1 && T="timeout -k 1 3"
             f=/home/sandy/.claude/.sandy-sessions.tsv
-            if head -n 1 "$f" 2>/dev/null | grep -qx "launch	${SANDY_LAUNCH_ID:-none}	done"; then cat "$f"; else echo pending; fi
-        ' 2>/dev/null)" || out="pending"
+            if $T head -n 1 "$f" 2>/dev/null | grep -qx "launch	${SANDY_LAUNCH_ID:-none}	done"; then $T cat "$f"; else echo pending; fi
+        ')" || out="pending"
         case "$out" in inactive) return 0 ;; pending|"") sleep 3 ;; *) break ;; esac
     done
     case "$out" in
@@ -15300,13 +15508,21 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # reaped here. wait with a session (pending) -> keep polling, within
         # the client loop's own 600s budget, then 8. wait with NO session for
         # 5 polls -> the zombie path below, as before.
+        # #548: the 600s budget is wall-clock, so a slow probe (each is bounded
+        # to 8s) cannot stretch it; a probe that hits its bound reads as
+        # `probe-unknown` -- output, so it never counts toward the no-session
+        # reap. A tmux that has not started yet answers has-session at once,
+        # so a timeout never means "mid-startup": three in a row end in exit
+        # 8 without waiting out the budget.
         _sandy_session_live=0
         _sandy_d6_orphan=0
         _sandy_d6_nosess=0
-        _sandy_d6_waited=0
+        _sandy_d6_stalls=0
+        _sandy_d6_why=""
+        _sandy_d6_end=$((SECONDS + 600))
         _sandy_d6_out=""
-        while [ "$_sandy_d6_waited" -lt 600 ]; do
-            _sandy_d6_out="$(_sandy_ew_probe "$_sandy_daemon_existing")"
+        while [ "$SECONDS" -lt "$_sandy_d6_end" ]; do
+            _sandy_ew_poll "$_sandy_daemon_existing"; _sandy_d6_out="$_SANDY_EW_OUT"; _sandy_d6_why="$_SANDY_EW_WHY"
             case "$(_sandy_ew_classify "$_sandy_d6_out")" in
                 ready) _sandy_session_live=1; break ;;
                 fatal)
@@ -15325,6 +15541,12 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
                     _sandy_d6_orphan=1
                     break ;;
             esac
+            if [ "$_sandy_d6_out" = probe-unknown ]; then
+                _sandy_d6_stalls=$((_sandy_d6_stalls + 1))
+                [ "$_sandy_d6_stalls" -ge 3 ] && break
+            else
+                _sandy_d6_stalls=0
+            fi
             if [ -z "$_sandy_d6_out" ]; then
                 _sandy_d6_nosess=$((_sandy_d6_nosess + 1))
                 [ "$_sandy_d6_nosess" -ge 5 ] && break
@@ -15332,7 +15554,6 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
                 _sandy_d6_nosess=0
             fi
             sleep 1
-            _sandy_d6_waited=$((_sandy_d6_waited + 1))
         done
         if [ "$_sandy_session_live" = 1 ]; then
             _sandy_unsupervised_daemon_protect "$_sandy_daemon_existing" start
@@ -15343,6 +15564,10 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         if [ "$_sandy_d6_orphan" = 1 ]; then
             warn "Found an unsupervised daemon container for $WORK_DIR whose feature entry failed its startup window (container ${_sandy_daemon_existing:0:12}, restarted after a reboot or docker restart) — reaping it and starting fresh."
             _sandy_ew_report "$_sandy_d6_out"
+        elif [ "$_sandy_d6_stalls" -ge 3 ]; then
+            error "Daemon session for $WORK_DIR exists but three probes in a row could not answer: $(_sandy_probe_unknown_why "$_sandy_d6_why")."
+            error "  It was left as it is; end it with 'sandy --stop'."
+            exit 8
         elif [ -n "$_sandy_d6_out" ]; then
             error "Daemon session for $WORK_DIR exists but its feature-entry window never finished within 600s."
             exit 8
@@ -15493,13 +15718,21 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
 
     _sandy_ready=false
     _sandy_timeout_s=600
-    _sandy_waited=0
+    # #548: the budget is wall-clock. It used to count loop iterations, so one
+    # probe that blocked (the agent can stop the container's tmux server)
+    # held the client past it for good; every probe is now bounded and the
+    # deadline is measured, so --start answers within ~600s plus one bound.
+    _sandy_ready_end=$((SECONDS + _sandy_timeout_s))
+    # Three probe timeouts in a row end the wait (exit 8): a tmux that has not
+    # started yet answers at once, so a timeout never means "still starting".
+    _sandy_ew_stalls=0
+    _sandy_ew_why=""
     _sandy_restarts=0
     _sandy_daemon_container=""
     _sandy_sup_fatal=false
     _sandy_ew_fatal=false
     _sandy_ew_out=""
-    while [ "$_sandy_waited" -lt "$_sandy_timeout_s" ]; do
+    while [ "$SECONDS" -lt "$_sandy_ready_end" ]; do
         # Supervisor reported an unrecoverable startup refusal (it already cleaned
         # up) — give up now instead of waiting out the timeout.
         if [ -f "$_sandy_fatal_marker" ]; then
@@ -15520,11 +15753,17 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # down; `failed` is fatal (exit 6), the same as the supervisor's
         # .fatal marker checked first above.
         if [ -n "$_sandy_daemon_container" ]; then
-            _sandy_ew_out="$(_sandy_ew_probe "$_sandy_daemon_container")"
+            _sandy_ew_poll "$_sandy_daemon_container"; _sandy_ew_out="$_SANDY_EW_OUT"; _sandy_ew_why="$_SANDY_EW_WHY"
             case "$(_sandy_ew_classify "$_sandy_ew_out")" in
                 ready) _sandy_ready=true; break ;;
                 fatal) _sandy_ew_fatal=true; _sandy_sup_fatal=true; break ;;
             esac
+            if [ "$_sandy_ew_out" = probe-unknown ]; then
+                _sandy_ew_stalls=$((_sandy_ew_stalls + 1))
+                [ "$_sandy_ew_stalls" -ge 3 ] && break
+            else
+                _sandy_ew_stalls=0
+            fi
         fi
         # Fail fast on a crash-looping container instead of burning the full
         # timeout: under --restart unless-stopped a container whose entrypoint
@@ -15536,7 +15775,6 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
             fi
         fi
         sleep 1
-        _sandy_waited=$((_sandy_waited + 1))
     done
 
     if [ -n "$_sandy_tail_pid" ]; then
@@ -15578,6 +15816,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         #      not come up; the container is left running
         # 1 remains the catch-all for anything not classified above.
         _sandy_start_rc=1
+        _sandy_leave_running=false
         if [ "$_sandy_ew_fatal" = "true" ]; then
             _sandy_ew_report "$_sandy_ew_out"
             _sandy_start_rc=6
@@ -15587,6 +15826,21 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         elif [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
             error "Daemon container is crash-looping (RestartCount=$_sandy_restarts) — giving up."
             _sandy_start_rc=7
+        elif [ "$_sandy_ew_stalls" -ge 3 ]; then
+            # #548: three probes that could not answer say "unknown", not
+            # "failed": the session may be healthy behind a slow or stopped
+            # probe path, so it is left running (as exit 9 and the D6 path
+            # leave theirs), never torn down on an unknown.
+            error "Daemon session did not become attachable: three probes in a row could not answer: $(_sandy_probe_unknown_why "$_sandy_ew_why")."
+            case "$_sandy_ew_why" in
+                125|126|127|empty)
+                    error "The container is left running${_sandy_daemon_container:+ (${_sandy_daemon_container:0:12})}; inspect it with 'sandy --attach', or end it with 'sandy --stop'." ;;
+                *)
+                    # A stopped tmux server would hang an attach too.
+                    error "The container is left running${_sandy_daemon_container:+ (${_sandy_daemon_container:0:12})}; end it with 'sandy --stop' ('sandy --attach' would hang on a stopped tmux server)." ;;
+            esac
+            _sandy_leave_running=true
+            _sandy_start_rc=8
         else
             error "Daemon session failed to become attachable within ${_sandy_timeout_s}s."
             _sandy_start_rc=8
@@ -15608,7 +15862,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # networks, lock); if the supervisor is already gone, remove the
         # container directly (networks/lock are reaped by the next launch's
         # orphan sweep + stale-lock takeover).
-        if [ -n "$_sandy_daemon_container" ]; then
+        if [ -n "$_sandy_daemon_container" ] && [ "$_sandy_leave_running" != true ]; then
             _sandy_fail_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_container" 2>/dev/null)" || _sandy_fail_pid=""
             error "Tearing down the failed session..."
             if [ -n "$_sandy_fail_pid" ] && _sandy_supervisor_alive "$_sandy_fail_pid"; then
@@ -15657,6 +15911,7 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     # failure would trip set -e before the DEC-C exit-code decision below.
     _sandy_unsupervised_daemon_protect "$_sandy_attach_container" attach
     _sandy_attach_rc=0
+    # probe-unbounded: the interactive attach lasts as long as the user stays (#548).
     docker exec -it -u "$(id -u)" "$_sandy_attach_container" tmux attach -d -t sandy || _sandy_attach_rc=$?
     _sandy_tty_restore
     [ "$SANDY_VERBOSE" -ge 2 ] && info "  (tmux attach exited rc=$_sandy_attach_rc)"
@@ -15669,7 +15924,16 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     #     (the agent exited; the #47 supervisor watch-
     #     loop is about to tear the container down —
     #     that is a normal end, not an "attach failed")
-    if docker exec -u "$(id -u)" "$_sandy_attach_container" tmux has-session -t sandy >/dev/null 2>&1; then
+    #   - the probe hits its bound (#548, 5s)           → 3: the server is
+    #     there but not answering (stopped or wedged); "ended" would make a
+    #     consumer drop a session that still exists
+    _sandy_attach_probe=0
+    _sandy_tmux_probe 5 "$_sandy_attach_container" has-session -t sandy >/dev/null || _sandy_attach_probe=$?
+    if [ "$_sandy_attach_probe" = 0 ]; then
+        exit 3
+    fi
+    if _sandy_probe_unknown "$_sandy_attach_probe"; then
+        warn "The daemon session could not be probed: $(_sandy_probe_unknown_why "$_sandy_attach_probe"); it is still running (end it with 'sandy --stop')."
         exit 3
     fi
     _sandy_attach_still_running="$(docker inspect -f '{{.State.Running}}' "$_sandy_attach_container" 2>/dev/null || echo false)"
@@ -15680,7 +15944,9 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     # after a short settle to rule out a transient `docker exec` hiccup that would
     # otherwise misreport a live session as ended (→ spurious sticky-reconnect loss).
     sleep 1
-    if docker exec -u "$(id -u)" "$_sandy_attach_container" tmux has-session -t sandy >/dev/null 2>&1; then
+    _sandy_attach_probe=0
+    _sandy_tmux_probe 5 "$_sandy_attach_container" has-session -t sandy >/dev/null || _sandy_attach_probe=$?
+    if [ "$_sandy_attach_probe" = 0 ] || _sandy_probe_unknown "$_sandy_attach_probe"; then
         exit 3
     fi
     # Session is genuinely gone while the daemon container is on its way down.
@@ -15883,8 +16149,14 @@ _sandy_update_enum_sessions() {
 # see the session (the 1.1.0 lesson, repeated here because it's exactly the
 # kind of thing a copy-paste-without-thinking would drop).
 _sandy_update_idle_age_seconds() {
-    local _cid="$1" _activity _now
-    _activity="$(trap - ERR; docker exec -u "$(id -u)" "$_cid" tmux display -p -t sandy '#{window_activity}' 2>/dev/null)" || _activity=""
+    local _cid="$1" _activity _now _rc=0
+    # #548: bounded (5s); a probe that cannot answer reads as ACTIVE, and
+    # prints its cause (the caller puts it in the skip reason).
+    _activity="$(trap - ERR; _sandy_tmux_probe 5 "$_cid" display -p -t sandy '#{window_activity}')" || _rc=$?
+    if _sandy_probe_unknown "$_rc"; then
+        _sandy_probe_unknown_why "$_rc"
+        return 1
+    fi
     if ! [[ "$_activity" =~ ^[0-9]+$ ]]; then
         return 1
     fi
@@ -16131,7 +16403,11 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         if [ -n "$SANDY_UPDATE_IDLE_FOR" ]; then
             if ! _upd_age="$(_sandy_update_idle_age_seconds "${_upd_cids[$_upd_i]}")"; then
                 _upd_action[$_upd_i]="skip"
-                _upd_reason[$_upd_i]="active (idle probe failed)"
+                if [ -n "$_upd_age" ]; then
+                    _upd_reason[$_upd_i]="active (idle probe: $_upd_age)"
+                else
+                    _upd_reason[$_upd_i]="active (idle probe failed)"
+                fi
                 continue
             fi
             _upd_idle_age[$_upd_i]="$_upd_age"
@@ -19914,14 +20190,27 @@ if [ "$SANDY_START" != "true" ] && [ "$SANDY_ATTACH" != "true" ] && [ "$SANDY_ST
         # container that is up but whose agent session has exited (a zombie) must
         # not wedge the user out — reap it and fall through to the interactive
         # flow. Same session-liveness probe (with mid-startup retry) as --start.
+        # #548: each probe is bounded (5s). One that hits its bound counts as
+        # live: the server is there but not answering, and an unknown answer
+        # must never reap a session.
         _sandy_bare_live=0
         for _sandy_probe in 1 2 3 4 5; do
-            if docker exec -u "$(id -u)" "$_sandy_bare_existing" tmux has-session -t sandy >/dev/null 2>&1; then
+            _sandy_bare_rc=0
+            _sandy_tmux_probe 5 "$_sandy_bare_existing" has-session -t sandy >/dev/null || _sandy_bare_rc=$?
+            if [ "$_sandy_bare_rc" = 0 ]; then
                 _sandy_bare_live=1
+                break
+            fi
+            if _sandy_probe_unknown "$_sandy_bare_rc"; then
+                _sandy_bare_live=2
                 break
             fi
             sleep 1
         done
+        if [ "$_sandy_bare_live" = 2 ]; then
+            error "A daemon session exists for this workspace but could not be probed: $(_sandy_probe_unknown_why "$_sandy_bare_rc"). End it with 'sandy --stop'."
+            exit 1
+        fi
         if [ "$_sandy_bare_live" = 1 ]; then
             error "A daemon session is already running for this workspace. Attach with 'sandy --attach', or end it with 'sandy --stop'."
             exit 1
@@ -26350,18 +26639,40 @@ if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
     # unless-stopped` does NOT resurrect it. Reboot survival (D9) is unaffected:
     # a rebooted container has no supervisor watching it and is handled by
     # --stop/--attach via container-as-truth.
+    #
+    # #548: the probe is bounded (5s, _sandy_tmux_probe). A probe that hits its
+    # bound is NOT "session gone": the tmux server exists but does not answer
+    # (the agent can SIGSTOP it; a loaded host can be slow), so it resets the
+    # gone counter and never tears the session down, however many in a row --
+    # tearing down an unresponsive session would destroy one a SIGCONT or the
+    # user could still recover, and `sandy --stop` still ends it. After four
+    # in a row (about two minutes) the log says so, once per stall. A stopped
+    # container still ends the loop on the same poll.
     _sandy_session_gone=0
+    _sandy_session_stalled=0
     while :; do
         sleep 30 &
         wait "$!" || true
-        if docker exec -u "$(id -u)" "$CONTAINER_NAME" tmux has-session -t sandy >/dev/null 2>&1; then
-            _sandy_session_gone=0            # session healthy — reset the counter
+        _sandy_watch_rc=0
+        _sandy_tmux_probe 5 "$CONTAINER_NAME" has-session -t sandy >/dev/null || _sandy_watch_rc=$?
+        if [ "$_sandy_watch_rc" = 0 ]; then
+            _sandy_session_gone=0            # session healthy — reset the counters
+            _sandy_session_stalled=0
             continue
         fi
         if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" != "true" ]; then
             info "Daemon container is no longer running — supervisor tearing down."
             break
         fi
+        if _sandy_probe_unknown "$_sandy_watch_rc"; then
+            _sandy_session_gone=0
+            _sandy_session_stalled=$((_sandy_session_stalled + 1))
+            if [ "$_sandy_session_stalled" = 4 ]; then
+                warn "The session has not answered a probe for about two minutes: $(_sandy_probe_unknown_why "$_sandy_watch_rc"); keeping the session. End it with 'sandy --stop'."
+            fi
+            continue
+        fi
+        _sandy_session_stalled=0
         _sandy_session_gone=$((_sandy_session_gone + 1))
         if [ "$_sandy_session_gone" -ge 2 ]; then
             info "Agent session ended — stopping the daemon session."

@@ -94,7 +94,7 @@ sandbox below the compatibility floor, but also a config, feature,
 named-session or network-isolation error, or (2.9.0; `7` before) a feature
 entry that started and then exited inside its startup window, `7` = the
 container is crash-looping
-(including a feature entry that cannot start at all), `8` = timed out waiting
+(including a feature entry that cannot start at all), `8` = timed out (600s, wall clock) waiting
 for the session, `9` = a named Claude session (`.sandy/sessions/`) did not come
 up (the container is left running; see
 [Named Claude sessions](agents.md#named-claude-sessions-sandysessions)).
@@ -102,6 +102,18 @@ up (the container is left running; see
 `3` = you detached cleanly and the session is still running, `4` = no such
 session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = stopped, `4` = no such session,
 `5` = teardown failed. `--stop` waits up to 15s for the session's supervisor to finish its teardown (proxy, networks, lock). If the container is gone but the supervisor is still finishing, `--stop` warns and exits `0`, and a `--start` issued before it finishes finds the workspace locked; wait for the supervisor and retry. Starting several workspaces at once is safe: a launch never removes another launch's proxy while that launch is still starting (#498).
+
+**An unresponsive session** (2.10.1, #548). Sandy checks a session by asking
+its tmux server, and the agent can stop that server (it runs as the same
+user). Every such check now gives up after a few seconds, and the answer is
+"unknown", never "ready" and never "gone". So `--start` exits `8` after three
+unanswered checks in a row (seconds, not the full 600s budget), saying why,
+and leaves the session running for you to `--attach` or `--stop`;
+`--attach` exits `3` after a warning; a bare `sandy` refuses rather than
+reaping the container; `--gc` keeps the container and says why; and
+`--update-sessions` skips it as active, giving the cause. The supervisor never tears down a
+session because it does not answer: after about two minutes it logs one
+warning, and `sandy --stop` ends the session.
 
 This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
 session alive across a VSCode quit/relaunch.

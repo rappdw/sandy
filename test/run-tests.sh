@@ -2667,10 +2667,15 @@ check "no user-arg splicing into a /ss shell-exec line" \
 # silently fail — the relay never delivers (#48).
 info "46. Channel relay uid-scoping (#48)"
 _CR_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-check "channel-relay has-session exec is uid-scoped" \
-    grep -qF 'docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux has-session' "$_CR_SCRIPT"
-check "channel-relay send-keys exec is uid-scoped" \
-    grep -qF 'docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys' "$_CR_SCRIPT"
+# #548: the relay's execs go through _sandy_tmux_probe (bounded), which is
+# where the -u now lives; §160 drives the relay against a stub that fails any
+# exec without -u <uid>.
+check "channel-relay has-session exec is uid-scoped (through _sandy_tmux_probe)" \
+    grep -qF '_sandy_tmux_probe 5 "$SANDY_CONTAINER_NAME" has-session' "$_CR_SCRIPT"
+check "channel-relay send-keys exec is uid-scoped (through _sandy_tmux_probe)" \
+    grep -qF '_sandy_tmux_probe 10 "$SANDY_CONTAINER_NAME" send-keys' "$_CR_SCRIPT"
+check "_sandy_tmux_probe execs as the host uid" \
+    bash -c 'sed -n "/^_sandy_tmux_probe() {/,/^}/p" "$1" | grep -qF "docker exec -u \"\$(id -u)\" \"\$_tp_c\" timeout"' -- "$_CR_SCRIPT"
 check "no bare (root) channel-relay tmux exec remains" \
     bash -c '! grep -qF '\''docker exec "$SANDY_CONTAINER_NAME" tmux'\'' "$1"' -- "$_CR_SCRIPT"
 
@@ -4626,7 +4631,7 @@ check "bare sandy verifies inner-session liveness before the DEC-B block" \
 # polled, with five no-session polls before a container counts as a zombie;
 # §235(W10a)/(W10b) run that loop for real.
 check "restart probes the session with a mid-startup retry (not a one-shot): the readiness probe, polled, 5 no-session polls before the zombie path" \
-    bash -c 'grep -A20 "_sandy_session_live=0" "$1" | grep -qF "_sandy_ew_probe \"\$_sandy_daemon_existing\"" && grep -A40 "_sandy_session_live=0" "$1" | grep -qF "[ \"\$_sandy_d6_nosess\" -ge 5 ] && break"' -- "$_S73"
+    bash -c 'grep -A20 "_sandy_session_live=0" "$1" | grep -qF "_sandy_ew_poll \"\$_sandy_daemon_existing\"" && grep -A40 "_sandy_session_live=0" "$1" | grep -qF "[ \"\$_sandy_d6_nosess\" -ge 5 ] && break"' -- "$_S73"
 check "a dead-session daemon zombie is reaped via \$0 --stop (both --start + bare)" \
     bash -c '[ "$(grep -c "\"\$0\" --stop --workspace \"\$WORK_DIR\" >/dev/null 2>&1 || true" "$1")" -ge 2 ]' -- "$_S73"
 
@@ -5075,7 +5080,7 @@ check "--gc --dry-run's plan: a proxy with NO paired agent at all is listed for 
 # mid-startup gets about 5 s to create its session.
 check "the zombie probe retries: --gc --dry-run asked czomb has-session 5 times, sleeping 1 s after each (mutation: the retry loop cut to 3 iterations -> 3 and 3) (sleeps: $(tr '\n' ' ' < "$_S79_SLEEPS"))" \
     bash -c '[ "$(wc -l < "$1" | tr -d " ")" = 5 ] && [ "$(grep -cx 1 "$1")" = 5 ] \
-        && [ "$(grep -c "^CALL: exec -u [0-9]* czomb tmux has-session -t sandy\$" "$2")" = 5 ]' -- "$_S79_SLEEPS" "$_S79_ACTIONS"
+        && [ "$(grep -c "^CALL: exec -u [0-9]* czomb timeout -k 1 3 tmux has-session -t sandy\$" "$2")" = 5 ]' -- "$_S79_SLEEPS" "$_S79_ACTIONS"
 
 # Non-TTY without --yes: refuses, exits 1, nothing logged. Guard the expected-
 # nonzero invocation with `|| rc=$?` so it doesn't trip the suite's set -e / ERR
@@ -12939,7 +12944,7 @@ section "§131: the Telegram host relay fails CLOSED on an empty allowlist (R7b)
 # back.
 _S131_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 _S131_README="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/README.md"
-awk '/^    cat > "\$SANDY_HOME\/channel-relay.sh.new" <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
+awk '/^    cat <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
     "$SANDY_SCRIPT" > "$_S131_DIR/relay.sh"
 check "§131(pre) the relay script was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
     bash -c 'bash -n "$1/relay.sh" && grep -q "_is_allowed" "$1/relay.sh" && grep -q "TELEGRAM_ALLOWED_SENDERS" "$1/relay.sh"' -- "$_S131_DIR"
@@ -16558,7 +16563,7 @@ section "§160: SANDY_CHANNEL_TARGET_PANE=N reaches the Nth AGENT, not tmux pane
 # restoring `-t "sandy.${TARGET_PANE}"` in _inject fails (2)-(4).)
 _S160_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S160_DIR/bin"
-awk '/^    cat > "\$SANDY_HOME\/channel-relay.sh.new" <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
+awk '/^    cat <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
     "$SANDY_SCRIPT" > "$_S160_DIR/relay.sh"
 # The stub docker: `list-panes` prints $S160_PANES (a file) if set, else fails
 # like an unreachable container; `has-session` succeeds; `send-keys` records
@@ -16610,6 +16615,8 @@ _s160_route() {
         SANDY_CHANNEL_AGENTS="$1"; SANDY_CHANNEL_TARGET_PANE="$2"
         export S160_PANES="$3" S160_OUT="$_S160_DIR/out"
         rm -f "$S160_OUT"
+        # The bounded-exec helpers the relay gets by declare -f (#548).
+        eval "$(sed -n '/^# BEGIN bounded exec$/,/^# END bounded exec$/p' "$SANDY_SCRIPT")"
         eval "$(grep -E '^(TARGET_PANE|AGENTS)=' "$_S160_DIR/relay.sh")"
         eval "$(sed -n '/^_target() {/,/^}$/p' "$_S160_DIR/relay.sh")"
         eval "$(sed -n '/^_inject() {/,/^}$/p' "$_S160_DIR/relay.sh")"
@@ -24681,8 +24688,9 @@ check "§204(8b) ...an explicit value still wins over it, and no claimant falls 
     "$(_s204_csi _SANDY_CS_ACTIVE=1 _SANDY_CS_CROSS=liaison SANDY_CROSS_SESSION_INBOUND=hold)" "$(_s204_csi _SANDY_CS_ACTIVE=1)"
 
 # --- (9) --start readiness: exit 9 when a declared session is not up -----------
-# With _sandy_term_text, which it prints the container-written fields through (#547).
-_S204_SC="$(sed -n -e '/^_sandy_term_text()/p' -e '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
+# With _sandy_term_text, which it prints the container-written fields through
+# (#547), and the bounded-exec helpers it runs its docker exec through (#548).
+_S204_SC="$(sed -n '/^# BEGIN bounded exec$/,/^# END bounded exec$/p' "$SANDY_SCRIPT"; sed -n -e '/^_sandy_term_text()/p' -e '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
 mkdir -p "$_S204_D/bin9"
 # The stub RUNS the script --start sends into the container (the launch-id
 # match lives there), against a fixture file in place of the in-container path.
@@ -31006,6 +31014,8 @@ awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{ex
 sed -n '/^# BEGIN entry window$/,/^# END entry window$/p' "$_S235_TMPL" >> "$_S235_D/entries.sh"
 awk '/^cd "\$WORKSPACE"$/{f=1} f' "$_S235_TMPL" > "$_S235_D/tail.sh"
 sed -n '/^# BEGIN entry window host$/,/^# END entry window host$/p' "$SANDY_SCRIPT" > "$_S235_D/host.sh"
+# The bounded-exec helpers the probe runs through (#548).
+sed -n '/^# BEGIN bounded exec$/,/^# END bounded exec$/p' "$SANDY_SCRIPT" >> "$_S235_D/host.sh"
 awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S235_D/host.sh"
 # The REAL info/error (echo -e): a verdict message must never pass through them.
 grep -E '^(info|error)\(\) \{' "$SANDY_SCRIPT" >> "$_S235_D/host.sh"
@@ -31170,11 +31180,15 @@ exit 0
 S226D9
 printf '#!/bin/sh\necho nohup >> "$S226_LOG"\n: > "$S226_UP"\nexit 0\n' > "$_S235_D/bin9/nohup"
 chmod +x "$_S235_D/bin9/docker" "$_S235_D/bin9/nohup"
-# bin9f: the same, plus a sleep that returns at once, so a 600-poll budget
-# runs out in seconds.
+# bin9f: the same, plus a sleep that returns at once, so the polls do not
+# wait. The D6 budget is wall-clock since #548 (a stub sleep no longer spends
+# it), so W10d runs a copy of sandy whose 600s D6 budget is cut to 3s.
 mkdir -p "$_S235_D/bin9f"
 cp "$_S235_D/bin9/docker" "$_S235_D/bin9/nohup" "$_S235_D/bin9f/"
 printf '#!/bin/sh\nexit 0\n' > "$_S235_D/bin9f/sleep"; chmod +x "$_S235_D/bin9f/sleep"
+sed 's/^        _sandy_d6_end=\$((SECONDS + 600))$/        _sandy_d6_end=$((SECONDS + 3))/' "$SANDY_SCRIPT" > "$_S235_D/sandy-d6short"
+check "§235(pre-d6) the short-budget copy W10d runs really has its D6 budget cut (mutation: the budget line renamed, so W10d would wait out 600s)" \
+    bash -c 'grep -qx "        _sandy_d6_end=\$((SECONDS + 3))" "$1"' _ "$_S235_D/sandy-d6short"
 # _s235_client <name> <verdict> <already-up 0|1> [<verdict after 2s>]
 # Optional env: S226_C_BIN (stub dir, default bin9), S226_C_DEADLINE (tenths
 # of a second, default 200), S226_C_SUP_PID (the sandy.daemon_pid label),
@@ -31188,7 +31202,7 @@ _s235_client() {
     t0=$(date +%s)
     ( cd "$h/ws" && exec env -i PATH="$_S235_D/${S226_C_BIN:-bin9}:$PATH" HOME="$h/home" SANDY_HOME="$h/home/.sandy" TERM=dumb \
         S226_LOG="$h/log" S226_UP="$h/up" S226_VFILE="$h/verdict" S226_SUP_PID="${S226_C_SUP_PID:-}" S226_ON_RM="${S226_C_ON_RM:-}" \
-        bash "$SANDY_SCRIPT" --start --workspace "$h/ws" ) \
+        bash "${S226_C_SCRIPT:-$SANDY_SCRIPT}" --start --workspace "$h/ws" ) \
         </dev/null >"$h/out" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "${S226_C_DEADLINE:-200}" ]; do sleep 0.1; i=$((i + 1)); done
@@ -31203,7 +31217,7 @@ _s235_client() {
 }
 # The three that wait (on a verdict 2s away, or a 600-poll budget) start here,
 # beside the cases below, and the W9/W10 checks join them in order.
-_s235_w10d() { S226_C_BIN=bin9f S226_C_DEADLINE=900 _s235_client w10d pending 1; }
+_s235_w10d() { S226_C_BIN=bin9f S226_C_DEADLINE=900 S226_C_SCRIPT="$_S235_D/sandy-d6short" _s235_client w10d pending 1; }
 _s235_bg w9b _s235_client w9b pending 0 passed
 _s235_bg w10a _s235_client w10a pending 1 passed
 _s235_bg w10d _s235_w10d
@@ -33046,6 +33060,370 @@ unset -f _s254_run _s254_helpers _s254_lit_lines _s254_install _s254_upgrade _s2
 unset _s254_f
 rm -rf "$_S254_D"
 unset _S254_SANDY _S254_D _S254_REALSLEEP _S254_CAPDIFF _S254_OWNVER
+echo ""
+section "§255: every host-side docker exec probe is bounded; a probe that never returns cannot stall --start, the supervisor or its watch loop, and reads as unknown, never ready or gone (#548)"
+# ============================================================
+# The agent runs as the same uid as the container's tmux server, so it can
+# SIGSTOP that server; every `tmux has-session` then blocks forever, and so did
+# every host-side `docker exec` probe of it. The fix: _sandy_exec_bounded (a
+# bash-3.2 watchdog), _sandy_tmux_probe (that, plus coreutils `timeout` inside
+# the container), wall-clock readiness budgets, and per-site handling of a
+# timeout as "unknown". These checks run the real helpers and the real
+# --start client against a `docker exec` stub that never returns.
+_S255_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S255_D/tmp" "$_S255_D/fastsleep" "$_S255_D/bin"
+_S255_SLEEP="$(command -p -v sleep)"
+printf '#!/bin/sh\nexit 0\n' > "$_S255_D/fastsleep/sleep"; chmod +x "$_S255_D/fastsleep/sleep"
+sed -n '/^# BEGIN bounded exec$/,/^# END bounded exec$/p' "$SANDY_SCRIPT" > "$_S255_D/bounded.sh"
+# The entry-window host block with its 120s window cut to 3s (so the stalled
+# case ends in seconds), the bounded helpers, and the real message helpers.
+cat "$_S255_D/bounded.sh" > "$_S255_D/host.sh"
+sed -n '/^# BEGIN entry window host$/,/^# END entry window host$/p' "$SANDY_SCRIPT" \
+    | sed 's/_end=\$((SECONDS + 120))/_end=$((SECONDS + 3))/' >> "$_S255_D/host.sh"
+awk '/^_sandy_daemon_fatal\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S255_D/host.sh"
+awk '/^_sandy_gc_probe_has_session\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT" >> "$_S255_D/host.sh"
+# sandy's own info/warn/error (printf since #547; the doctor heredoc's warn() is a different function).
+grep -E "^(info|warn|error)\(\) +\{ printf '%b\[sandy\]" "$SANDY_SCRIPT" >> "$_S255_D/host.sh"
+awk 'index($0,"docker run \"${RUN_FLAGS[@]}\" \"$IMAGE_NAME\" \"$@\" || _run_rc=$?")==1{f=1;next} f&&index($0,"_sandy_tty_restore"){next} f' "$SANDY_SCRIPT" > "$_S255_D/suptail.sh"
+# The --start client with its 600s readiness budget cut to 4s.
+sed 's/^    _sandy_timeout_s=600$/    _sandy_timeout_s=4/' "$SANDY_SCRIPT" > "$_S255_D/sandy-short"
+check "§255(pre) the helpers, the entry-window block (window cut to 3s), the gc probe, the supervisor tail and the short-budget client were all extracted (mutation: a renamed marker empties one and the checks below go vacuous)" \
+    bash -c 'grep -q "^_sandy_exec_bounded() {" "$1" && grep -q "^_sandy_tmux_probe() {" "$1" && grep -q "^_sandy_probe_unknown() {" "$1" \
+        && grep -q "^_sandy_ew_supervise() {" "$1" && grep -qF "_end=\$((SECONDS + 3))" "$1" && grep -q "^_sandy_gc_probe_has_session() {" "$1" && [ "$(grep -cE "^(info|warn|error)\(\) +\{" "$1")" = 3 ] && bash -n "$1" \
+        && grep -q "_sandy_session_stalled" "$2" && grep -qx "    _sandy_timeout_s=4" "$3"' _ "$_S255_D/host.sh" "$_S255_D/suptail.sh" "$_S255_D/sandy-short"
+
+# The stub docker. exec: S255_EXEC=hang never returns (the stalled tmux
+# server), a number exits with it, `passed` answers the entry-window probe as
+# ready and fails has-session with S255_HS. Every call is logged.
+cat > "$_S255_D/bin/docker" <<S255DOCKER
+#!/bin/bash
+printf 'docker %s\n' "\$*" >> "\$S255_LOG"
+case "\$1" in
+    ps) [ -e "\${S255_UP:-/nonexistent}" ] && echo c255abcdef12 ;;
+    inspect) case "\$*" in *RestartCount*) echo 0 ;; *State.Running*) echo "\${S255_RUNNING:-true}" ;; esac ;;
+    exec)
+        case "\${S255_EXEC:-hang}" in
+            hang) exec "$_S255_SLEEP" 47.548 ;;
+            passed) case "\$*" in *sandy-entry-window*) echo passed; exit 0 ;; esac; exit "\${S255_HS:-0}" ;;
+            *) exit "\$S255_EXEC" ;;
+        esac ;;
+    logs) echo "container log" ;;
+esac
+exit 0
+S255DOCKER
+printf '#!/bin/sh\n: > "$S255_UP"\nexit 0\n' > "$_S255_D/bin/nohup"
+chmod +x "$_S255_D/bin/docker" "$_S255_D/bin/nohup"
+# _s255_count PATTERN: processes whose command line matches (the pattern is
+# written with a backslash, so this grep never matches itself).
+_s255_count() { ps -A -o args= 2>/dev/null | grep -c "$1" || true; }
+# _s255_run NAME LIMIT CMD...: run CMD in the background; NAME.rc gets its
+# status, or "hung" if it outlived LIMIT seconds (then it is killed), and
+# NAME.el the elapsed seconds.
+_s255_run() {
+    local n="$1" lim="$2" pid i=0 rc=0 t0; shift 2
+    t0=$(date +%s)
+    ( "$@" ) >"$_S255_D/$n.out" 2>"$_S255_D/$n.err" </dev/null &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt $((lim * 10)) ]; do sleep 0.1; i=$((i + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then
+        # The shell first, then its children: killed first, a child's empty
+        # answer (docker inspect -> "false") would make the shell itself
+        # tear down, which is not what the case measures.
+        local kids; kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+        kill -9 "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+        [ -z "$kids" ] || kill $kids 2>/dev/null || true
+        echo hung > "$_S255_D/$n.rc"
+    else
+        wait "$pid" || rc=$?; echo "$rc" > "$_S255_D/$n.rc"
+    fi
+    echo $(( $(date +%s) - t0 )) > "$_S255_D/$n.el"
+    return 0
+}
+_s255_bg() { local n="$1"; shift; ( _s255_run "$n" "$@" ) & printf '%s\n' "$!" > "$_S255_D/$n.bgpid"; }
+_s255_join() { wait "$(cat "$_S255_D/$1.bgpid")" 2>/dev/null || true; }
+
+# The three cases that wait on a real 8s probe bound run side by side.
+# (e1) one entry-window probe against the stalled server;
+_s255_e1() {
+    trap - ERR; set +e
+    export PATH="$_S255_D/bin:$PATH" S255_LOG="$_S255_D/e1.log" TMPDIR="$_S255_D/tmp"
+    . "$_S255_D/host.sh"
+    out="$(_sandy_ew_probe c255)"
+    printf '%s|%s\n' "$out" "$(_sandy_ew_classify "$out")"
+}
+# (e2) the supervisor poll, window cut to 3s, against the stalled server;
+_s255_e2() {
+    trap - ERR; set +e
+    export PATH="$_S255_D/bin:$PATH" S255_LOG="$_S255_D/e2.log" TMPDIR="$_S255_D/tmp"
+    SANDY_DAEMON_LOG="$_S255_D/e2.daemon.log"
+    . "$_S255_D/host.sh"
+    _sandy_ew_supervise c255
+}
+# (f) the real --start client, budget cut to 4s, against the stalled server.
+# _s255_client NAME SCRIPT EXEC [UP]: the --start client, exec stub EXEC
+# (hang, or an exit status), the container already up when UP=1.
+_s255_client() {
+    mkdir -p "$_S255_D/$1/ws" "$_S255_D/$1/home"
+    [ "${4:-0}" = 1 ] && : > "$_S255_D/$1/up"
+    cd "$_S255_D/$1/ws" && exec env -i PATH="$_S255_D/bin:$PATH" HOME="$_S255_D/$1/home" SANDY_HOME="$_S255_D/$1/home/.sandy" TERM=dumb \
+        TMPDIR="$_S255_D/tmp" S255_LOG="$_S255_D/$1.log" S255_UP="$_S255_D/$1/up" S255_EXEC="$3" \
+        bash "$2" --start --workspace "$_S255_D/$1/ws"
+}
+_s255_f() { _s255_client f "$_S255_D/sandy-short" hang; }
+# (f3) the full 600s budget, probes timing out at once (124): three in a row
+# end it; (f4) the same for a second --start over a running container.
+_s255_f3() { _s255_client f3 "$SANDY_SCRIPT" 124; }
+_s255_f4() { _s255_client f4 "$SANDY_SCRIPT" 124 1; }
+_s255_bg e1 30 _s255_e1
+_s255_bg e2 40 _s255_e2
+_s255_bg f 60 _s255_f
+_s255_bg f3 30 _s255_f3
+_s255_bg f4 30 _s255_f4
+# (a2) a command that ignores TERM: the KILL one second later still ends it.
+_s255_a2() {
+    trap - ERR; set +e
+    export TMPDIR="$_S255_D/tmp"
+    . "$_S255_D/bounded.sh"
+    _sandy_exec_bounded 1 sh -c "trap '' TERM; exec $_S255_SLEEP 47.548"
+}
+_s255_bg a2 20 _s255_a2
+
+# (a)-(d): the helper itself, under the suite's own set -eE + ERR trap shape.
+# Its own TMPDIR and its own sleep marker (47.549): the cases above run
+# beside it.
+mkdir -p "$_S255_D/tmpa"
+_S255_A="$(
+    set -eEuo pipefail; trap 'echo ERRTRAP' ERR
+    export TMPDIR="$_S255_D/tmpa"
+    . "$_S255_D/bounded.sh"
+    t0=$(date +%s); rc=0; out="$(_sandy_exec_bounded 1 sh -c "echo partial; exec $_S255_SLEEP 47.549")" || rc=$?
+    printf 'hang rc=%s el=%s out=[%s]\n' "$rc" "$(( $(date +%s) - t0 ))" "$out"
+    printf 'hang left=%s\n' "$(_s255_count 'sleep 47\.549')"
+    rc=0; out="$(_sandy_exec_bounded 7.548 sh -c 'echo one; echo "two  three"; exit 3')" || rc=$?
+    printf 'fast rc=%s out=[%s]\n' "$rc" "$out"
+    sleep 0.3; printf 'fast watcher-left=%s\n' "$(_s255_count 'sleep 7\.548')"
+    rc=0; out="$(PATH="$_S255_D/fastsleep:$PATH" _sandy_exec_bounded 5 sh -c "$_S255_SLEEP 1; echo done")" || rc=$?
+    printf 'pathsleep rc=%s out=[%s]\n' "$rc" "$out"
+    printf 'tmp=%s\n' "$(ls -A "$TMPDIR" | wc -l | tr -d ' ')"
+)"
+check "§255(a) _sandy_exec_bounded on a command that never returns: rc 124 within its bound, nothing replayed (partial output is never trusted), the command killed, no ERR-trap line (mutations: the watcher never kills; output replayed on timeout)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "hang rc=124 el=[1-4] out=\[\]" && printf "%s\n" "$1" | grep -qx "hang left=0" && ! printf "%s\n" "$1" | grep -q ERRTRAP || { printf "%s\n" "$1"; exit 1; }' _ "$_S255_A"
+check "§255(b) _sandy_exec_bounded on a fast command: its status (3) and its stdout, line for line, come back, the watcher is gone, and no temp file is left (mutations: rc lost; watcher not killed; temp dir kept)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "fast rc=3 out=\[one" && printf "%s\n" "$1" | grep -qx "two  three\]" && printf "%s\n" "$1" | grep -qx "fast watcher-left=0" && printf "%s\n" "$1" | grep -qx "tmp=0" || { printf "%s\n" "$1"; exit 1; }' _ "$_S255_A"
+check "§255(c) the bound is wall time: a PATH sleep that returns at once (as test stubs do) does not fire it, so a 1s command under a 5s bound returns its own result (mutation: the watcher sleeps with a PATH sleep)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "pathsleep rc=0 out=\[done\]" || { printf "%s\n" "$1"; exit 1; }' _ "$_S255_A"
+# (l) no temp dir: a distinct 125, warned once (naming TMPDIR), which reads
+# as unknown, and the command is never run.
+_S255_L="$(
+    trap - ERR; set +e
+    . "$_S255_D/bounded.sh"
+    export TMPDIR="$_S255_D/no-such-dir"
+    _sandy_exec_bounded 5 sh -c "echo ran >> '$_S255_D/l.ran'" 2>"$_S255_D/l.err"; r1=$?
+    _sandy_exec_bounded 5 true 2>>"$_S255_D/l.err"; r2=$?
+    _sandy_probe_unknown "$r1"; u=$?
+    printf 'rc=%s,%s unknown=%s warned=%s ran=%s why=%s\n' "$r1" "$r2" "$u" "$(grep -c "cannot create a temp dir under $TMPDIR" "$_S255_D/l.err")" "$([ -e "$_S255_D/l.ran" ] && echo yes || echo no)" "$(_sandy_probe_unknown_why "$r1")"
+)"
+check "§255(l) mktemp failing: rc 125 (not the timeout's 124), one warning naming TMPDIR for two probes, the command not run, read as unknown with that cause (mutations: 124 returned; warned on every probe)" \
+    bash -c '[ "$1" = "rc=125,125 unknown=0 warned=1 ran=no why=sandy cannot create a temp dir under $2/no-such-dir" ] || { printf "got: %s\n" "$1"; exit 1; }' _ "$_S255_L" "$_S255_D"
+# (k) the caller's traps never run in the watcher. The supervisor's EXIT and
+# TERM traps are cleanup(), which removes the container; a bash subshell sent
+# TERM in the moment after its fork runs them (measured: 275 of 300). 200
+# fast probes under such traps must leave exactly one EXIT line (the
+# caller's own, at its end) and no sleep behind.
+mkdir -p "$_S255_D/tmpk"; : > "$_S255_D/k.log"
+# Bounded by _s255_run (15s): broken, each probe waits out its 9.5s bound.
+_s255_k() {
+    trap - ERR; set +e
+    export TMPDIR="$_S255_D/tmpk"
+    . "$_S255_D/bounded.sh"
+    trap 'echo EXIT >> "$_S255_D/k.log"' EXIT
+    trap 'echo TERM >> "$_S255_D/k.log"; exit 143' TERM
+    i=0; bad=0
+    while [ "$i" -lt 200 ]; do _sandy_exec_bounded 9.548 true || bad=$((bad + 1)); i=$((i + 1)); done
+    echo "bad=$bad"
+}
+_s255_run k 15 _s255_k
+sleep 0.3
+_S255_K="$(printf 'rc=%s %s traps=%s left=%s tmp=%s\n' "$(cat "$_S255_D/k.rc")" "$(cat "$_S255_D/k.out")" "$(tr '\n' ' ' < "$_S255_D/k.log")" "$(_s255_count 'sleep 9\.548')" "$(ls -A "$_S255_D/tmpk" | wc -l | tr -d ' ')")"
+pkill -f 'sleep 9\.548' 2>/dev/null || true
+check "§255(k) 200 fast probes under the caller's EXIT and TERM traps: every one returns 0, the traps never run in a watcher (one EXIT line: the caller's own), no watcher sleep is left (mutations: the watcher stopped with TERM before it has recorded its sleep, the old shape; the wait for that record dropped)" \
+    bash -c '[ "$1" = "rc=0 bad=0 traps=EXIT  left=0 tmp=0" ] || { printf "got: %s\n" "$1"; exit 1; }' _ "$_S255_K"
+
+_S255_D_ARGS="$(
+    trap - ERR; set +e
+    export PATH="$_S255_D/bin:$PATH" S255_LOG="$_S255_D/d.log" S255_EXEC=0 TMPDIR="$_S255_D/tmp"
+    . "$_S255_D/bounded.sh"
+    _sandy_tmux_probe 5 c255 has-session -t sandy
+    cat "$S255_LOG"
+)"
+check "§255(d) _sandy_tmux_probe runs tmux under the container's own timeout, ending before the host bound (TERM at 3s, KILL at 4s, host at 5s), as the host uid: killing the docker client alone leaves the in-container exec running into pids.max (mutation: the container-side timeout dropped)" \
+    bash -c '[ "$1" = "docker exec -u $(id -u) c255 timeout -k 1 3 tmux has-session -t sandy" ] || { printf "got: %s\n" "$1"; exit 1; }' _ "$_S255_D_ARGS"
+
+# (g) the gc probe: a timeout keeps the container (one probe, no retries); a
+# plain failure is still a zombie after the 5 retries.
+_S255_G="$(
+    trap - ERR; set +e
+    export PATH="$_S255_D/fastsleep:$_S255_D/bin:$PATH" TMPDIR="$_S255_D/tmp"
+    . "$_S255_D/host.sh"
+    S255_LOG="$_S255_D/g1.log" S255_EXEC=124 _sandy_gc_probe_has_session c255 reap sandy-x255 2>"$_S255_D/g1.err"; printf 'timeout reap rc=%s calls=%s\n' "$?" "$(grep -c "^docker exec" "$_S255_D/g1.log")"
+    printf 'warned=%s\n' "$(grep -c "kept sandy-x255: its tmux server did not answer" "$_S255_D/g1.err")"
+    S255_LOG="$_S255_D/g2.log" S255_EXEC=137 _sandy_gc_probe_has_session c255 "" sandy-x255 2>"$_S255_D/g2.err"; printf 'kill count rc=%s quiet=%s\n' "$?" "$(wc -c < "$_S255_D/g2.err" | tr -d ' ')"
+    S255_LOG="$_S255_D/g4.log" S255_EXEC=127 _sandy_gc_probe_has_session c255 reap sandy-x255 2>/dev/null; printf 'no-timeout reap rc=%s\n' "$?"
+    S255_LOG="$_S255_D/g3.log" S255_EXEC=1 _sandy_gc_probe_has_session c255 reap; printf 'dead reap rc=%s calls=%s\n' "$?" "$(grep -c "^docker exec" "$_S255_D/g3.log")"
+)"
+check "§255(g) --gc: a has-session probe that hits its bound (124, or 137 from the container-side KILL) or cannot run timeout(1) (127) keeps the container, so an unanswered probe never reaps, and the reap path says so naming it (the --print-state count stays quiet); a container with no session is still a zombie after 5 probes (mutations: drop the unknown branch in _sandy_gc_probe_has_session; drop the warning)" \
+    bash -c '[ "$1" = "$(printf "%s\n" "timeout reap rc=0 calls=1" "warned=1" "kill count rc=0 quiet=0" "no-timeout reap rc=0" "dead reap rc=1 calls=5")" ] || { printf "got:\n%s\n" "$1"; exit 1; }' _ "$_S255_G"
+
+# (h) the watch loop: has-session timing out on every poll never tears the
+# session down, and says so once; a session that is gone still ends it.
+_s255_watch() {
+    trap - ERR; set +e
+    # Its own TMPDIR: h1 is killed mid-probe, which can leave a temp dir.
+    export PATH="$_S255_D/fastsleep:$_S255_D/bin:$PATH" S255_LOG="$_S255_D/$1.log" S255_EXEC=passed S255_HS="$2" TMPDIR="$_S255_D/tmph"
+    mkdir -p "$TMPDIR"
+    : > "$S255_LOG"
+    RED=""; NC=""; GREEN=""; YELLOW=""
+    . "$_S255_D/host.sh"
+    cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; }
+    trap 'rc=$?; cleanup; exit $rc' EXIT
+    set -euo pipefail
+    SANDY_DAEMON_SUPERVISOR=1; _run_rc=0; CONTAINER_NAME=c255
+    . "$_S255_D/suptail.sh"
+}
+_s255_run h1 3 _s255_watch h1 124
+_s255_run h2 20 _s255_watch h2 1
+check "§255(h1) supervisor watch loop, every has-session probe timing out: still supervising after many polls (no teardown, no docker rm), one warning naming the stall (mutations: a timeout counted as session gone; the warning repeated every poll)" \
+    bash -c '[ "$(cat "$1/h1.rc")" = hung ] && [ "$(grep -c "timeout -k 1 3 tmux has-session -t sandy$" "$1/h1.log")" -ge 6 ] && ! grep -q "^docker rm" "$1/h1.log" && [ "$(grep -c "has not answered a probe for about two minutes: its tmux server did not answer" "$1/h1.out")" = 1 ] || { cat "$1/h1.rc"; tail -5 "$1/h1.log"; cat "$1/h1.out" "$1/h1.err"; exit 1; }' _ "$_S255_D"
+check "§255(h2) control: has-session failing (session gone) still ends the watch loop after two polls and removes the container" \
+    bash -c '[ "$(cat "$1/h2.rc")" = 0 ] && [ "$(grep -c "timeout -k 1 3 tmux has-session -t sandy$" "$1/h2.log")" = 2 ] && grep -q "^docker rm -f c255$" "$1/h2.log" && grep -q "Agent session ended" "$1/h2.out" || { cat "$1/h2.rc"; cat "$1/h2.log" "$1/h2.out" "$1/h2.err"; exit 1; }' _ "$_S255_D"
+
+_s255_join a2
+check "§255(a2) a command that ignores TERM is killed one second after the bound and still reads as a timeout, 124 (mutation: the KILL after the grace dropped)" \
+    bash -c '[ "$(cat "$1/a2.rc")" = 124 ] && [ "$(cat "$1/a2.el")" -le 4 ] || { cat "$1/a2.rc" "$1/a2.el"; exit 1; }' _ "$_S255_D"
+_s255_join e1
+check "§255(e1) the entry-window probe against a server that never answers returns within its 8s bound as probe-unknown, which classifies as wait: not ready, and not \"no session\" either, so the D6 restart check cannot reap it as a zombie (mutations: unbounded probe; a timeout printed as nothing)" \
+    bash -c '[ "$(cat "$1/e1.rc")" = 0 ] && [ "$(cat "$1/e1.el")" -le 11 ] && [ "$(cat "$1/e1.out")" = "probe-unknown|wait" ] || { cat "$1/e1.rc" "$1/e1.el" "$1/e1.out" "$1/e1.err"; exit 1; }' _ "$_S255_D"
+_s255_join e2
+check "§255(e2) _sandy_ew_supervise against a server that never answers returns at its (3s) window plus at most one probe bound, with no .fatal marker, instead of hanging the supervisor (mutation: unbounded probe)" \
+    bash -c '[ "$(cat "$1/e2.rc")" = 0 ] && [ "$(cat "$1/e2.el")" -le 14 ] && [ ! -e "$1/e2.daemon.log.fatal" ] && grep -q "^docker exec" "$1/e2.log" || { cat "$1/e2.rc" "$1/e2.el" "$1/e2.err"; exit 1; }' _ "$_S255_D"
+_s255_join f
+check "§255(f) the real --start client against a server that never answers: exit 8 (not ready, not a hang) within its (4s) wall-clock budget plus one probe bound, and the container torn down (mutations: the budget counted in iterations, which a stalled probe stretches; probe-timeout read as ready)" \
+    bash -c '[ "$(cat "$1/f.rc")" = 8 ] && [ "$(cat "$1/f.el")" -le 16 ] && cat "$1/f.out" "$1/f.err" | grep -q "failed to become attachable within 4s" && grep -q "^docker rm -f c255abcdef12" "$1/f.log" || { cat "$1/f.rc" "$1/f.el"; tail -20 "$1/f.out"; tail -20 "$1/f.err"; tail -5 "$1/f.log"; exit 1; }' _ "$_S255_D"
+_s255_join f3
+check "§255(f3) the real --start client, full 600s budget, every probe timing out: exit 8 after three in a row (seconds, not ten minutes), naming the cause, and the container LEFT RUNNING with how to attach and stop it: no docker stop/rm/kill, no supervisor signal, on an unknown (mutations: the three-in-a-row stop removed from the readiness loop; the stall path falling into the exit-8 teardown)" \
+    bash -c '[ "$(cat "$1/f3.rc")" = 8 ] && [ "$(cat "$1/f3.el")" -le 12 ] && cat "$1/f3.out" "$1/f3.err" | grep -q "three probes in a row could not answer: its tmux server did not answer" && cat "$1/f3.out" "$1/f3.err" | grep -q "left running.*end it with .sandy --stop. (.sandy --attach. would hang" && [ "$(grep -c "sandy-entry-window" "$1/f3.log")" = 3 ] && ! grep -qE "^docker (rm|stop|kill)|daemon_pid" "$1/f3.log" && ! grep -q "Tearing down" "$1/f3.err" || { cat "$1/f3.rc" "$1/f3.el"; tail -20 "$1/f3.err"; exit 1; }' _ "$_S255_D"
+_s255_join f4
+check "§255(f4) a second --start over a running container whose probes all time out: exit 8 after three in a row, with nothing reaped (no docker stop/rm, no --stop) and nothing started (mutations: the three-in-a-row stop removed from the D6 loop; a timeout read as no session, which reaps)" \
+    bash -c '[ "$(cat "$1/f4.rc")" = 8 ] && [ "$(cat "$1/f4.el")" -le 12 ] && cat "$1/f4.out" "$1/f4.err" | grep -q "three probes in a row could not answer: its tmux server did not answer" && ! grep -qE "^docker (rm|stop|kill)" "$1/f4.log" && [ -e "$1/f4/up" ] || { cat "$1/f4.rc" "$1/f4.el"; tail -20 "$1/f4.err"; tail -5 "$1/f4.log"; exit 1; }' _ "$_S255_D"
+_S255_E3="$(
+    trap - ERR; set +e
+    export PATH="$_S255_D/bin:$PATH" S255_LOG="$_S255_D/e3.log" TMPDIR="$_S255_D/tmp"
+    . "$_S255_D/host.sh"
+    S255_EXEC=0 _sandy_ew_poll c255; printf 'empty: %s|%s|%s\n' "$_SANDY_EW_OUT" "$_SANDY_EW_WHY" "$(_sandy_ew_classify "$_SANDY_EW_OUT")"
+    S255_EXEC=1 _sandy_ew_poll c255; printf 'nosession: [%s]|%s\n' "$_SANDY_EW_OUT" "$_SANDY_EW_WHY"
+    export TMPDIR="$_S255_D/no-such-dir"; _sandy_ew_poll c255 2>"$_S255_D/e3.err"; printf 'notmp: %s|%s|warned=%s\n' "$_SANDY_EW_OUT" "$(_sandy_probe_unknown_why "$_SANDY_EW_WHY")" "$(grep -c "cannot create a temp dir" "$_S255_D/e3.err")"
+)"
+check "§255(e3) the entry-window probe: status 0 with no output is unknown, not \"no session\" (so D6 cannot reap on a failed write); status 1 is still no session; no temp dir is unknown with that cause and its warning reaches stderr (mutations: empty-on-0 read as no session; the warning swallowed by a 2>/dev/null)" \
+    bash -c '[ "$1" = "$(printf "%s\n" "empty: probe-unknown|empty|wait" "nosession: []|" "notmp: probe-unknown|sandy cannot create a temp dir under $2/no-such-dir|warned=1")" ] || { printf "got:\n%s\n" "$1"; exit 1; }' _ "$_S255_E3" "$_S255_D"
+# (m) the --print-state stream contract (zero bytes on stderr) holds when
+# every probe fails for want of a temp dir: daemon containers are listed, so
+# both modes probe them, and the helper's warning must stay silent.
+cat > "$_S255_D/bin/docker-ps-daemons" <<'S255PS'
+#!/bin/bash
+case "$1" in
+    ps) printf '%s\n' "c1aaaaaaaaaa|sandy-a-11111111|sandy-claude-code|2026-11-20 00:00:00 +0000 UTC|true|a-11111111|" "c2bbbbbbbbbb|sandy-b-22222222|sandy-claude-code|2026-11-20 00:00:00 +0000 UTC|true|b-22222222|" ;;
+    exec) exit 0 ;;
+esac
+exit 0
+S255PS
+chmod +x "$_S255_D/bin/docker-ps-daemons"
+mkdir -p "$_S255_D/m/bin" "$_S255_D/m/home"; cp "$_S255_D/bin/docker-ps-daemons" "$_S255_D/m/bin/docker"
+for _S255_MODE in light full; do
+    _S255_MRC=0
+    env -i PATH="$_S255_D/m/bin:$PATH" HOME="$_S255_D/m/home" SANDY_HOME="$_S255_D/m/home/.sandy" TMPDIR=/nonexistent/x \
+        bash "$SANDY_SCRIPT" --print-state "$_S255_MODE" >"$_S255_D/m/$_S255_MODE.out" 2>"$_S255_D/m/$_S255_MODE.err" </dev/null || _S255_MRC=$?
+    echo "$_S255_MRC" > "$_S255_D/m/$_S255_MODE.rc"
+done
+check "§255(m) --print-state light and full with TMPDIR=/nonexistent/x and two daemon containers: exit 0, one JSON document, zero bytes on stderr; the probes really ran and failed (mutation: drop the introspection suppression of the helper's warning)" \
+    bash -c 'for m in light full; do [ "$(cat "$1/$m.rc")" = 0 ] && [ ! -s "$1/$m.err" ] && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$1/$m.out" || { echo "$m rc=$(cat "$1/$m.rc")"; cat "$1/$m.err"; head -c 300 "$1/$m.out"; exit 1; }; done; grep -q "\"attached_clients\":null" "$1/light.out" || { echo "no unknown attached_clients in light"; head -c 600 "$1/light.out"; exit 1; }' _ "$_S255_D/m"
+check "§255(f2) no probe process outlived the cases above, and every bounded probe removed its temp dir" \
+    bash -c '[ "$(ps -A -o args= | grep -c "sleep 47\.548")" = 0 ] && [ -z "$(ls -A "$1/tmp")" ] || { ps -A -o pid=,args= | grep "sleep 47\.548"; ls -A "$1/tmp"; exit 1; }' _ "$_S255_D"
+
+# (i) the relay carries the helpers: generate it and check the copy.
+_S255_I="$(
+    trap - ERR; set +e
+    SANDY_HOME="$_S255_D/relayhome"; mkdir -p "$SANDY_HOME"
+    . "$_S255_D/bounded.sh"
+    # To the `}` after its chmod: the relay body has `}` lines of its own.
+    eval "$(awk '/^generate_channel_relay\(\) \{/{f=1} f{print} f&&index($0,"chmod +x \"$SANDY_HOME/channel-relay.sh.new\""){g=1} g&&/^}$/{exit}' "$SANDY_SCRIPT")"
+    generate_channel_relay && echo generated
+)"
+check "§255(i) the generated channel relay starts with its shebang, parses, and defines the bounded-exec helpers before the functions that use them (mutation: drop the declare -f, so every relay exec fails with command not found)" \
+    bash -c 'f="$2/relayhome/channel-relay.sh.new"; [ "$1" = generated ] && [ "$(head -n 1 "$f")" = "#!/usr/bin/env bash" ] && bash -n "$f" \
+        && a="$(grep -n "^_sandy_exec_bounded *()" "$f" | cut -d: -f1)" && b="$(grep -n "^_sandy_tmux_probe *()" "$f" | cut -d: -f1)" && c="$(grep -n "^_sandy_eb_run *()" "$f" | cut -d: -f1)" && i="$(grep -n "^_inject() {" "$f" | cut -d: -f1)" \
+        && [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ "$a" -lt "$i" ] && [ "$b" -lt "$i" ] && [ "$c" -lt "$i" ] || { echo "$1"; head -3 "$f"; exit 1; }' _ "$_S255_I" "$_S255_D"
+
+# (j) the ratchet: every line of sandy that names a docker exec (any
+# spelling: extra spaces, "$DOCKER", `docker container exec`, after command,
+# env, timeout, while, a backtick or a brace, or split by a backslash
+# continuation, which is joined first) goes through the bounded helper on the
+# same line, or carries or sits under a `# probe-unbounded:` comment naming
+# why (the two interactive execs, and the --exec description and --dry-run printout, which only print the words). A line is exempt only when the helper call itself wraps the exec.
+# Every bounded tmux exec runs tmux under the container's own timeout.
+_S255_SCAN="$_S255_D/scan.awk"
+cat > "$_S255_SCAN" <<'S255AWK'
+{
+    if (cont != "") { line = cont " " $0 } else { line = $0; start = NR }
+    if (line ~ /\\$/) { cont = substr(line, 1, length(line) - 1); next }
+    cont = ""
+}
+line ~ /^[[:space:]]*#/ { prev = line; next }
+tolower(line) ~ /docker[^#]*[[:space:]]exec([[:space:])"']|$)/ {
+    if (line ~ /_sandy_exec_bounded(_capture)? [^ ]+ docker[^#]*[[:space:]]exec[[:space:]]/) { }
+    else if (index(line, "# probe-unbounded:") > 0 || index(prev, "# probe-unbounded:") > 0) { allowed++ }
+    else { print "unbounded docker exec at line " start ": " line; bad++ }
+}
+index(line, "_sandy_exec_bounded") > 0 && tolower(line) ~ /docker[^#]*[[:space:]]exec([[:space:])"']|$)/ && line ~ /[[:space:]]tmux[[:space:]]/ {
+    if (line !~ /timeout -k [0-9]+ [^ ]+ tmux /) { print "tmux exec without the container-side timeout at line " start ": " line; bad++ }
+}
+line ~ /_sandy_exec_bounded(_capture)? [0-9]+ docker exec/ { bounded_lines++ }
+line ~ /_sandy_tmux_probe [0-9]+ / { probes++ }
+{ prev = line }
+END { printf "%d %d %d %d\n", bounded_lines, probes, allowed, bad; exit (bad > 0) }
+S255AWK
+check "§255(j) static ratchet: no docker exec in sandy skips _sandy_exec_bounded unless marked probe-unbounded (exactly four: the two interactive execs, the --exec description and the --dry-run printout), and the tmux exec carries the container-side timeout (mutation: one probe reverted to a bare docker exec; the timeout dropped from _sandy_tmux_probe)" \
+    bash -c 'out="$(awk -f "$1" "$2")" || { printf "%s\n" "$out"; exit 1; }; set -- $out; [ "$1" -ge 3 ] && [ "$2" -ge 10 ] && [ "$3" = 4 ] && [ "$4" = 0 ] || { echo "direct=$1 tmux=$2 allowed=$3 bad=$4"; exit 1; }' _ "$_S255_SCAN" "$SANDY_SCRIPT"
+# The ratchet against a fixture: ten ways to spell a bypass, each must be
+# reported; a bounded line, a marked line and one under a marker comment pass.
+cat > "$_S255_D/ratchet-fixture.sh" <<'S255FIX'
+docker  exec -u 1 c tmux has-session -t sandy
+"$DOCKER" exec -u 1 c tmux has-session -t sandy
+command docker exec -u 1 c tmux has-session -t sandy
+while docker exec -u 1 c tmux has-session -t sandy; do sleep 1; done
+x="$(timeout 5 docker exec -u 1 c tmux display -p x)"
+docker container exec -u 1 c tmux has-session -t sandy
+x=`docker exec -u 1 c tmux display -p x`
+docker \
+    exec -u 1 c tmux has-session -t sandy
+{ docker exec -u 1 c tmux has-session -t sandy; }
+env A=1 docker exec -u 1 c tmux has-session -t sandy
+docker --context other exec -u 1 c tmux has-session -t sandy
+_sandy_exec_bounded 5 true; docker exec -u 1 c tmux has-session -t sandy
+x="$(docker exec)"
+# a comment that says docker exec is not code
+_sandy_exec_bounded 5 docker exec -u 1 c timeout -k 1 3 tmux has-session -t sandy
+docker exec -it -u 1 c tmux attach  # probe-unbounded: interactive
+# probe-unbounded: interactive
+docker exec -it -u 1 c bash
+S255FIX
+check "§255(j3) the ratchet flags all thirteen bypass spellings in a fixture (double space, \$DOCKER, command, while, inside a command substitution after timeout, docker container exec, backticks, a backslash continuation, a brace group, env A=1, a global option before exec, a bounded call on the same line that does not wrap the exec, which the tmux-timeout rule also reports, exec followed by a paren) and passes the bounded and the two marked lines (mutations: the old command-position pattern; continuation lines not joined)" \
+    bash -c 'out="$(awk -f "$1" "$2")"; [ "$(printf "%s\n" "$out" | grep -c "^unbounded docker exec")" = 13 ] && [ "$(printf "%s\n" "$out" | tail -n 1)" = "1 0 2 14" ] || { printf "%s\n" "$out"; exit 1; }' _ "$_S255_SCAN" "$_S255_D/ratchet-fixture.sh"
+check "§255(j2) the ratchet sees what it is meant to: a bare docker exec probe planted in a copy of sandy is reported (premise: the scan is not vacuous)" \
+    bash -c 'cp "$2" "$3/planted"; printf "%s\n" "    if docker exec -u \"\$(id -u)\" \"\$c\" tmux has-session -t sandy; then :; fi" >> "$3/planted"; awk -f "$1" "$2" >/dev/null && ! awk -f "$1" "$3/planted" >/dev/null' _ "$_S255_SCAN" "$SANDY_SCRIPT" "$_S255_D"
+pkill -f 'sleep 47\.548' 2>/dev/null || true
+unset -f _s255_count _s255_run _s255_bg _s255_join _s255_e1 _s255_e2 _s255_f _s255_f3 _s255_f4 _s255_client _s255_a2 _s255_k _s255_watch
+rm -rf "$_S255_D"
+unset _S255_D _S255_SLEEP _S255_A _S255_K _S255_L _S255_E3 _S255_D_ARGS _S255_G _S255_I _S255_SCAN
 
 # BEGIN SUMMARY
 # ============================================================
