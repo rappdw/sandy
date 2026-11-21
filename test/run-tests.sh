@@ -75,6 +75,13 @@ set -E
 
 _TEST_SECTION=""
 _TEST_SECTION_START=$SECONDS
+# Progress: "(x of y)" on each section's header and TIMING line. y counts
+# the section declarations in this file (section "..." and the numbered
+# info "N. ..." form), so it is the number a full run prints. The file's
+# order is not numeric (shared harness blocks keep related sections
+# together), so x is the reliable "how far along am I" measure.
+_TEST_SECTION_N=0
+_TEST_SECTION_TOTAL="$(grep -cE '^[[:space:]]*(section "|info "[0-9])' "${BASH_SOURCE[0]}" 2>/dev/null || echo '?')"
 _test_section_close() {
     if [ -n "$_TEST_SECTION" ]; then
         printf 'TIMING %ss %s\n' "$((SECONDS - _TEST_SECTION_START))" "$_TEST_SECTION"
@@ -82,9 +89,10 @@ _test_section_close() {
 }
 section() {
     _test_section_close
-    _TEST_SECTION="$*"
+    _TEST_SECTION_N=$((_TEST_SECTION_N + 1))
+    _TEST_SECTION="($_TEST_SECTION_N of $_TEST_SECTION_TOTAL) $*"
     _TEST_SECTION_START=$SECONDS
-    printf '\033[0;36m%s\033[0m\n' "$*"
+    printf '\033[0;36m%s\033[0m\n' "$_TEST_SECTION"
 }
 info() {
     case "$*" in [0-9]*) section "$*" ;; *) printf '\033[0;36m%s\033[0m\n' "$*" ;; esac
