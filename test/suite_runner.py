@@ -113,14 +113,23 @@ def commands_of(name):
 
 
 def host_script():
-    """The host group's script, split; None unless the group is one `bash SCRIPT` command with sections."""
+    """(the host group's script, split; None) or (None, why it cannot be split)."""
     commands = commands_of("host") if "host" in GROUPS else []
     if len(commands) != 1 or len(commands[0]) != 2 or Path(commands[0][0]).name != "bash":
-        return None
+        return None, "the host group is not one `bash SCRIPT` command"
     try:
-        return HostScript(ROOT / commands[0][1])
-    except (OSError, ValueError):
+        return HostScript(ROOT / commands[0][1]), None
+    except (OSError, ValueError) as error:
+        return None, str(error)
+
+
+def bash_problem(major):
+    """Why a bash of this major version cannot run host sections; None when it can."""
+    if major >= 5:
         return None
+    if major == 0:
+        return "could not tell which bash is on PATH (`bash -c` failed or took over 30s)"
+    return "the bash on PATH is version {}; host sections need bash 5 or newer".format(major)
 
 
 def jobs_argument(text):
@@ -174,19 +183,23 @@ def start_order(sections, seconds):
     return sorted(sections, key=lambda section: (-estimate(section), section.position))
 
 
-def load_times(path):
+def load_times(path, field="seconds", kind=float):
+    """One field of the last run's record, by section title: "seconds" (its time) or "checks" (how many ran)."""
     try:
-        return {str(title): float(value) for title, value in json.loads(path.read_text())["seconds"].items()}
+        return {str(title): kind(value) for title, value in json.loads(path.read_text())[field].items()}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
 
-def save_times(path, seconds, sections):
-    """Keep the times of the sections that still exist, in file order."""
-    kept = {section.title: round(seconds[section.title], 2) for section in sections if section.title in seconds}
+def save_times(path, seconds, sections, checks=None):
+    """Keep the times and check counts of the sections that still exist, in file order."""
+    record = {"seconds": {section.title: round(seconds[section.title], 2) for section in sections
+                          if section.title in seconds}}
+    if checks is not None:
+        record["checks"] = {section.title: checks[section.title] for section in sections if section.title in checks}
     temporary = path.with_name("{}.{}.tmp".format(path.name, os.getpid()))
     try:
-        temporary.write_text(json.dumps({"seconds": kept}, indent=1) + "\n")
+        temporary.write_text(json.dumps(record, indent=1) + "\n")
         os.replace(temporary, path)
     except OSError:  # the cache only orders the next run
         temporary.unlink(missing_ok=True)
@@ -466,7 +479,16 @@ class SectionRun:
         for name in names:
             self.emit("  \033[0;31m- {}\033[0m\n".format(name.decode("utf-8", "replace")))
 
-    def summary(self):
+    def emptied(self, checks):
+        """Sections that ran no check although the last run counted some: coverage lost without a failure."""
+        found = []
+        for section in self.chosen:
+            job = self.finished[section.position]
+            if job.counts and not job.reason and sum(job.counts[:3]) == 0 and checks.get(section.title, 0) > 0:
+                found.append((section, checks[section.title]))
+        return found
+
+    def summary(self, emptied=()):
         """Run the script's own epilogue once, on the totals: one source for the summary lines."""
         paths = self.paths("summary")
         totals = self.totals()
@@ -483,6 +505,9 @@ class SectionRun:
             text = text if isinstance(text, str) else text.decode(errors="replace")
         body = whole_lines(text)
         self.emit(body)
+        for section, before in emptied:
+            self.emit("\033[0;31m⚠ Host group: {} ran no check, and the last run counted {} in it; its checks no "
+                      "longer run.\033[0m\n".format(self.name(section), before))
         if len(self.chosen) < self.total:
             self.emit("\033[0;33mHost group: {} of the {} sections ran (--sections); the others did NOT run "
                       "here.\033[0m\n".format(len(self.chosen), self.total))
@@ -539,11 +564,13 @@ class SectionRun:
                               self.name(section), job.reason,
                               "".join("   | " + line + "\n" for line in job.text.split("\n")[:-2][-TAIL_LINES:]),
                               paths["out"], paths["script"]))
-        complete = self.summary()
+        checks = load_times(self.times_path, "checks", int)
+        complete = self.summary(self.emptied(checks))
         for job in self.finished.values():
             if job.counts and not job.reason:
                 seconds[job.section.title] = job.seconds
-        save_times(self.times_path, seconds, self.host.sections)
+                checks[job.section.title] = sum(job.counts[:3])
+        save_times(self.times_path, seconds, self.host.sections, checks)
         return 0 if complete and self.totals()[1] == 0 else 1
 
 
@@ -628,9 +655,9 @@ def main():
         parser.error("use --host-only or --only, not both")
     chosen = None
     if args.sections is not None or args.list_sections:
-        host = host_script()
+        host, why = host_script()
         if host is None:
-            parser.error("the host group is not a bash script with sections")
+            parser.error("cannot list or select host sections: " + why)
         try:
             chosen = host.select(args.sections) if args.sections is not None else host.sections
         except ValueError as error:
@@ -647,6 +674,13 @@ def main():
         parser.error("unknown or repeated group; use --list")
     if chosen and "host" not in selected:
         parser.error("--sections selects sections of the host group, which --only leaves out")
+    bash_major_seen = None
+    if chosen:
+        # --sections cannot fall back to the whole file: that would run every section.
+        bash_major_seen = bash_major(commands_of("host")[0][0])
+        problem = bash_problem(bash_major_seen)
+        if problem:
+            parser.error("--sections: " + problem)
     try:
         jobs = args.jobs if args.jobs is not None else jobs_argument(os.environ.get("SANDY_TEST_JOBS") or "auto")
     except argparse.ArgumentTypeError as error:
@@ -695,11 +729,24 @@ def main():
             sections = None
             if name == "host" and not missing:
                 workers = auto_jobs() if jobs == "auto" else jobs
-                host = host_script() if chosen or workers > 1 else None
-                if host is not None and bash_major(commands[0][0]) < 5:
-                    # The script says so itself; one process says it once.
-                    print("Host sections need bash 5 or newer on PATH; running the whole file in one process.", flush=True)
-                    host = None
+                host = None
+                if chosen or workers > 1:
+                    host, why = host_script()
+                    if host is None:
+                        print("\033[0;31m✗ The host script cannot be split into sections ({}); running the whole file "
+                              "in one process.\033[0m".format(why), flush=True)
+                    else:
+                        major = bash_major_seen if bash_major_seen is not None else bash_major(commands[0][0])
+                        why = bash_problem(major)
+                        if why:
+                            # Under an old bash the script refuses by itself; one process says so once.
+                            print("Not splitting the host group into sections: {}; running the whole file in one process.".format(why),
+                                  flush=True)
+                            host = None
+                elif jobs == "auto":
+                    # auto came to one worker (a tight process limit): the one
+                    # process keeps its own background checks to the same budget.
+                    env["SANDY_TEST_INNER_JOBS"] = "1"  # jobs // workers, as a section gets it
                 if host is not None:
                     headroom = process_headroom()
                     if headroom is not None and min(workers, len(chosen or host.sections)) > headroom:

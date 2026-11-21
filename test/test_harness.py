@@ -418,6 +418,8 @@ class HostSections(unittest.TestCase):
     """The host group, one section per process (suite_runner --jobs N, --sections)."""
 
     REAL = ROOT / 'test/run-tests.sh'
+    # Asked once, before any test replaces bash_major with a stand-in.
+    BASH_MAJOR = suite_runner.bash_major('bash')
 
     def fixture(self, directory, sections):
         """A small host script: the real file's helpers and its real epilogue around these sections."""
@@ -429,7 +431,7 @@ class HostSections(unittest.TestCase):
         return path
 
     def run_host(self, script, *arguments, env=None):
-        if suite_runner.bash_major('bash') < 5:
+        if self.BASH_MAJOR < 5:
             self.skipTest('the host group needs bash 5 or newer on PATH')
         logs = script.parent / 'logs'
         console = io.StringIO()
@@ -689,6 +691,8 @@ class HostSections(unittest.TestCase):
                 self.assertRegex(text, r'TIMING \d+s \(3 of 3\) §3: third\n\nHost group: 3 checks passed\.')
 
     def test_interrupt_kills_every_worker_and_prints_what_finished(self):
+        if self.BASH_MAJOR < 5:
+            self.skipTest('the host group needs bash 5 or newer on PATH')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             script = self.fixture(directory, 'section "§1: passes"\ncheck "fine" true\n'
@@ -732,10 +736,12 @@ class HostSections(unittest.TestCase):
                                              'section "§2: two"\ncheck "two" true\n')
             # The runner asks bash once; an old one gets the whole file in one
             # process, where the script itself refuses, not one refusal per section.
-            with mock.patch.object(suite_runner, 'bash_major', side_effect=[5, 3]):  # run_host asks, then the runner
+            with mock.patch.object(suite_runner, 'bash_major', return_value=3):
                 code, console, _ = self.run_host(script, '--jobs', '2')
             self.assertEqual(code, 0, console)
-            self.assertIn('Host sections need bash 5 or newer on PATH; running the whole file in one process.', console)
+            self.assertIn('Not splitting the host group into sections: the bash on PATH is version 3; host sections '
+                          'need bash 5 or newer; '
+                          'running the whole file in one process.', console)
             self.assertNotIn('Host sections:', console)
             self.assertEqual(self.headers(console), [1, 2])
             # The script's own refusal, tried by raising the version it asks for.
@@ -747,6 +753,74 @@ class HostSections(unittest.TestCase):
             self.assertEqual((run.returncode, run.stdout), (1, ''))
             self.assertRegex(run.stderr, r'needs bash 5 or newer, and the bash on PATH \(\S+\) is \d+\.\d+')
             self.assertEqual(len(run.stderr.splitlines()), 1)
+
+    def test_sections_never_fall_back_to_the_whole_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: one"\ncheck "one" true\n'
+                                             'section "§2: two"\ncheck "two" true\n')
+            logs = script.parent / 'logs'
+            # An old bash, or one whose version could not be read (a probe that
+            # timed out under load): --sections refuses before anything runs.
+            for major, reason in ((3, 'the bash on PATH is version 3; host sections need bash 5'),
+                                  (0, 'could not tell which bash')):
+                errors = io.StringIO()
+                with mock.patch.object(suite_runner, 'bash_major', return_value=major), \
+                     self.assertRaises(SystemExit) as refused, contextlib.redirect_stderr(errors):
+                    self.run_host(script, '--sections', '2')
+                self.assertEqual(refused.exception.code, 2)
+                self.assertIn('--sections: ' + reason, errors.getvalue())
+                self.assertFalse(logs.exists(), 'a refused selection must run nothing')
+            # A script that cannot be split: --sections refuses with the reason,
+            # and --jobs 2 says so loudly before running the file in one process.
+            unsplittable = Path(directory).resolve() / 'unsplittable.sh'
+            unsplittable.write_text(script.read_text().replace('\n_test_section_close\n', '\n'))
+            errors = io.StringIO()
+            with self.assertRaises(SystemExit) as refused, contextlib.redirect_stderr(errors):
+                self.run_host(unsplittable, '--sections', '2')
+            self.assertEqual(refused.exception.code, 2)
+            self.assertIn('cannot list or select host sections: ', errors.getvalue())
+            self.assertIn('no sections followed by a final _test_section_close line', errors.getvalue())
+            code, console, _ = self.run_host(unsplittable, '--jobs', '2')
+            self.assertRegex(console, r'✗ The host script cannot be split into sections \(\S+ has no sections followed '
+                                      r'by a final _test_section_close line\); running the whole file in one process\.')
+            self.assertNotIn('Host sections:', console)
+            self.assertEqual(self.headers(console), [1, 2])
+
+    def test_auto_at_one_worker_keeps_the_one_process_to_one_inner_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: one"\necho "inner=${SANDY_TEST_INNER_JOBS:-unset}"\n'
+                                             'check "one" true\nsection "§2: two"\ncheck "two" true\n')
+            with mock.patch.object(suite_runner, 'auto_jobs', return_value=1):
+                code, console, _ = self.run_host(script, '--jobs', 'auto')
+            self.assertEqual(code, 0, console)
+            self.assertNotIn('Host sections:', console)  # the whole file, one process
+            self.assertIn('inner=1', console)
+            # An explicit --jobs 1 is the run as it always was, untouched.
+            code, console, _ = self.run_host(script, '--jobs', '1')
+            self.assertIn('inner=unset', console)
+
+    def test_a_section_whose_checks_stopped_running_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gone = Path(directory).resolve() / 'checks-gone'
+            script = self.fixture(directory, 'section "§1: keeps its checks"\ncheck "one" true\n'
+                                             'section "§2: loses its checks"\n'
+                                             '[ -e "' + str(gone) + '" ] || check "two" true\n'
+                                             'section "§3: never had any"\n')
+            code, console, logs = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 0, console)
+            self.assertNotIn('ran no check', console)
+            self.assertEqual(suite_runner.load_times(script.parent / 'logs' / suite_runner.TIMES_FILE, 'checks', int),
+                             {'§1: keeps its checks': 1, '§2: loses its checks': 1, '§3: never had any': 0})
+            gone.touch()
+            code, console, logs = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 0, console)
+            log = self.plain((logs / 'host.log').read_text())
+            for text in (console, log):
+                self.assertIn('⚠ Host group: section (2 of 3) §2 ran no check, and the last run counted 1 in it; '
+                              'its checks no longer run.', text)
+                self.assertNotIn('§3 ran no check', text)
+                # Part of the summary: after the totals.
+                self.assertLess(text.index('Host group: 1 checks passed.'), text.index('⚠ Host group:'))
 
     def test_jobs_follow_the_cpus_and_a_process_limit(self):
         with tempfile.TemporaryDirectory() as directory:

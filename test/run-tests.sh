@@ -351,7 +351,7 @@ elif ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$_SCHEMA_CACH
     _SCHEMA_CACHE_BAD="exited 0 but its $(wc -c <"$_SCHEMA_CACHE" | tr -d ' ') bytes are not one JSON document"
 fi
 if [ -n "$_SCHEMA_CACHE_BAD" ]; then
-    printf '\033[0;31m✗ sandy --print-schema %s; every schema check reads its output, so the host group stops here\033[0m\n' \
+    printf '\033[0;31m✗ sandy --print-schema %s; every schema check reads its output, so this process stops here (the whole host group under --jobs 1, else this section)\033[0m\n' \
         "$_SCHEMA_CACHE_BAD" >&2
     exit 1
 fi
