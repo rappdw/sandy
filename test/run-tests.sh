@@ -30754,32 +30754,44 @@ fi
 # package is depth 9 under node_modules
 # (.pnpm/@s+p@1/node_modules/@s/p/lib/binding/<abi>/x.node).
 _S224_WS="$_S224_D/ws"
+# (10)-(13) test WHAT the walk finds, so they run it with the 3 s bound raised
+# to 60 s: under a loaded parallel run (ten section workers on a Mac) a walk of
+# one small tree has been cut off at 3 s, and (10)/(12) then failed with no
+# warning and no file(1) call while (13) passed for the wrong reason. (14)
+# below tests the bound itself and keeps the real 3 s.
+_S224_NATIVE_FIND="${_S224_NATIVE/timeout 3 find /timeout 60 find }"
+# _s224_natwhy DIR NAME: what a failing probe check saw, on stderr (the check
+# log). Exported, because each check runs its test in a child bash.
+_s224_natwhy() { printf 'took %ss; output:\n%s\nfile(1) asked about:\n%s\n' "$(cat "$1/$2.secs" 2>/dev/null)" "$(cat "$1/$2.out" 2>/dev/null)" "$(cat "$1/file.argv" 2>/dev/null)" >&2; }
+export -f _s224_natwhy
+check "§224(9e) the probe copy used by (10)-(13) differs from sandy's only in its bound (mutation: a reworded timeout leaves them under the 3 s cut-off)" \
+    bash -c '[ "$1" != "$2" ] && [ "${1/timeout 60 find /timeout 3 find }" = "$2" ]' _ "$_S224_NATIVE_FIND" "$_S224_NATIVE"
 _s224_addon() { mkdir -p "$(dirname "$1")"; printf '%s' "${2:-MZ-not-elf}" > "$1"; }
 mkdir -p "$_S224_WS/node_modules"
 _s224_addon "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/lib/binding/node-v115-linux-x64/x.node"
-_s224_run nat "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+_s224_run nat "$_S224_NATIVE_FIND" WORKSPACE="$_S224_WS"
 check "§224(10) a foreign native addon at pnpm + node-pre-gyp depth (9) still gets the warning, and file(1) is asked about exactly that one path" \
-    bash -c 'grep -q "native addons built for a different platform" "$1/nat.out" && [ "$(cat "$1/file.argv")" = "$2" ]' \
+    bash -c 'grep -q "native addons built for a different platform" "$1/nat.out" && [ "$(cat "$1/file.argv")" = "$2" ] || { _s224_natwhy "$1" nat; exit 1; }' \
     _ "$_S224_D" "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/lib/binding/node-v115-linux-x64/x.node"
 rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
 _s224_addon "$_S224_WS/node_modules/good/build/Release/x.node" "$(printf '\177ELF\002\001\001')"
-_s224_run natelf "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+_s224_run natelf "$_S224_NATIVE_FIND" WORKSPACE="$_S224_WS"
 check "§224(11) a Linux (ELF) addon gets no warning (the check still runs: file(1) was asked)" \
-    bash -c '! grep -q "native addons" "$1/natelf.out" && [ -s "$1/file.argv" ]' _ "$_S224_D"
+    bash -c '! grep -q "native addons" "$1/natelf.out" && [ -s "$1/file.argv" ] || { _s224_natwhy "$1" natelf; exit 1; }' _ "$_S224_D"
 # Many addons: the probe must stop at the first, so file(1) gets one path.
 rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
 for _s224_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     _s224_addon "$_S224_WS/node_modules/p$_s224_i/x.node"
 done
-_s224_run natmany "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+_s224_run natmany "$_S224_NATIVE_FIND" WORKSPACE="$_S224_WS"
 check "§224(12) with many addons the probe stops at the first: file(1) is asked about one existing path, not a list" \
-    bash -c '[ "$(wc -l < "$1/file.argv" | tr -d " ")" = 1 ] && [ -f "$(cat "$1/file.argv")" ] && grep -q "native addons" "$1/natmany.out"' _ "$_S224_D"
+    bash -c '[ "$(wc -l < "$1/file.argv" | tr -d " ")" = 1 ] && [ -f "$(cat "$1/file.argv")" ] && grep -q "native addons" "$1/natmany.out" || { _s224_natwhy "$1" natmany; exit 1; }' _ "$_S224_D"
 # Deeper than the bound: the documented trade (the walk stops at depth 9).
 rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
 _s224_addon "$_S224_WS/node_modules/a/b/c/d/e/f/g/h/i/x.node"
-_s224_run natdeep "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+_s224_run natdeep "$_S224_NATIVE_FIND" WORKSPACE="$_S224_WS"
 check "§224(13) the walk is depth-bounded: an addon at depth 10 is not looked at (the documented trade)" \
-    bash -c '[ ! -s "$1/file.argv" ] && ! grep -q "native addons" "$1/natdeep.out" && ! grep -q "^rc=" "$1/natdeep.out"' _ "$_S224_D"
+    bash -c '[ ! -s "$1/file.argv" ] && ! grep -q "native addons" "$1/natdeep.out" && ! grep -q "^rc=" "$1/natdeep.out" || { _s224_natwhy "$1" natdeep; exit 1; }' _ "$_S224_D"
 # A tree too big to walk: a find that never finishes is cut off after 3 s,
 # silently, and the launch goes on.
 # (_s224_natslow, started with the logins above.)
@@ -30820,8 +30832,8 @@ check "§224(18) rule 5 still sees the host-ACTIVE token: with no other rule it 
 _bg_reap
 unset -f _s224_host _s224_natslow _s224_bg_start _s224_bg_join
 rm -rf "$_S224_D"
-unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
-unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_line _s224_wait_helpers _s224_addon
+unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_NATIVE_FIND _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
+unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_line _s224_wait_helpers _s224_addon _s224_natwhy
 
 # ============================================================
 section "§233: --update-sessions --rebuild rebuilds each shared image once, not once per session (B8 G5)"
