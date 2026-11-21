@@ -6,8 +6,10 @@ import json
 import pty
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -410,6 +412,381 @@ exit 7
                 self.assertEqual((log / "stdout").read_text(), "cherry\n")
                 self.assertEqual((log / "stderr").read_text(), "diagnostic\n")
                 self.assertTrue((log / "status").read_text().strip().isdigit())
+
+
+class HostSections(unittest.TestCase):
+    """The host group, one section per process (suite_runner --jobs N, --sections)."""
+
+    REAL = ROOT / 'test/run-tests.sh'
+
+    def fixture(self, directory, sections):
+        """A small host script: the real file's helpers and its real epilogue around these sections."""
+        real = self.REAL.read_text().split('\n')
+        helpers = real[:real.index('}', real.index('_run_provenance() {')) + 1]
+        epilogue = real[max(index for index, line in enumerate(real) if line == '_test_section_close'):]
+        path = Path(directory).resolve() / 'host-fixture.sh'
+        path.write_text('\n'.join(helpers + sections.strip('\n').split('\n') + epilogue))
+        return path
+
+    def run_host(self, script, *arguments, env=None):
+        if suite_runner.bash_major('bash') < 5:
+            self.skipTest('the host group needs bash 5 or newer on PATH')
+        logs = script.parent / 'logs'
+        console = io.StringIO()
+        with mock.patch.object(suite_runner, 'GROUPS', {'host': ['bash', str(script)]}), \
+             mock.patch('sys.argv', ['runner', '--only', 'host', '--log-dir', str(logs)] + list(arguments)), \
+             mock.patch.dict(os.environ, env or {}), contextlib.redirect_stdout(console):
+            code = suite_runner.main()
+        return code, self.plain(console.getvalue()), logs / 'latest'
+
+    @staticmethod
+    def plain(text):
+        return re.sub(suite_runner.ESCAPES, '', text)
+
+    @staticmethod
+    def headers(text):
+        return [int(number) for number in re.findall(r'^\((\d+) of \d+\) ', text, re.M)]
+
+    def assert_gone(self, pid):
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            # A killed process is a zombie until its new parent collects it.
+            stat = Path('/proc/{}/stat'.format(pid))
+            if stat.exists() and stat.read_text().rsplit(')', 1)[-1].split()[0] == 'Z':
+                return
+            time.sleep(0.05)
+        self.fail('process {} is still running'.format(pid))
+
+    def test_splitter_agrees_with_the_scripts_own_section_count(self):
+        source = self.REAL.read_text()
+        pattern = re.search(r"_TEST_SECTION_TOTAL=\"\$\(grep -cE '([^']+)' ", source)
+        self.assertIsNotNone(pattern, 'run-tests.sh no longer counts its sections with grep -cE')
+        own = int(subprocess.check_output(['grep', '-cE', pattern[1], str(self.REAL)], text=True))
+        host = suite_runner.HostScript(self.REAL)
+        self.assertGreater(own, 200)
+        # A header the file counts and the splitter misses (an indented one) would
+        # run inside its neighbour and print a position the runner knows nothing of.
+        self.assertEqual(len(host.sections), own)
+        self.assertEqual([section.position for section in host.sections], list(range(1, own + 1)))
+        for section, following in zip(host.sections, host.sections[1:]):
+            self.assertEqual(section.end, following.start)
+        self.assertEqual(host.sections[-1].end, host.epilogue)
+        self.assertEqual(host.lines[host.epilogue], '_test_section_close')
+        self.assertNotIn('_test_section_close', host.lines[host.epilogue + 1:])
+        for section in host.sections:
+            self.assertRegex(section.label, r'^§?[0-9]+[a-z0-9]*$', section.title)
+
+    def test_generated_script_keeps_every_line_at_its_own_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: first"\ncheck "one" true\n'
+                                             'section "§2: second"\n# a comment of the second\ncheck "two" true\n'
+                                             'info "3. third \\$HOME \\"quoted\\""\ncheck "three" true\n')
+            host = suite_runner.HostScript(script)
+            self.assertEqual([(section.label, section.title) for section in host.sections],
+                             [('§1', '§1: first'), ('§2', '§2: second'), ('3', '3. third $HOME "quoted"')])
+            second = host.sections[1]
+            copy = host.script(second).split('\n')
+            self.assertEqual(len(copy), len(host.lines))
+            self.assertEqual(copy[second.start], 'section "§2: second"')
+            self.assertEqual(copy[second.start + 1], '# a comment of the second')
+            for index, line in enumerate(host.lines):
+                own = index < host.sections[0].start or index >= host.epilogue or second.start <= index < second.end
+                self.assertEqual(copy[index], line if own else '', index)
+            summary = host.script().split('\n')
+            self.assertEqual(summary[:host.sections[0].start], host.lines[:host.sections[0].start])
+            self.assertEqual(set(summary[host.sections[0].start:host.epilogue]), {''})
+            self.assertEqual(summary[host.epilogue:], host.lines[host.epilogue:])
+
+    def test_one_process_and_one_per_section_report_the_same(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory).resolve() / 'host-fixture.sh')
+            script = self.fixture(directory, 'section "§1: the script path"\n'
+                                             'check "\\$0 is the real script" test "$0" = "' + path + '"\n'
+                                             'check "skips are counted" bash -c "exit 77"\n'
+                                             'info "2. a numbered section"\ncheck "second" true\n'
+                                             'section "§3: no checks"\n'
+                                             'section "§4: last"\ncheck "fourth" true\n')
+            outputs = []
+            for jobs in ('1', '2'):
+                code, console, logs = self.run_host(script, '--jobs', jobs)
+                self.assertEqual(code, 0, console)
+                log = self.plain((logs / 'host.log').read_text())
+                self.assertEqual(self.headers(log), [1, 2, 3, 4])
+                self.assertIn('Host group: 3 checks passed.', log)
+                self.assertIn('Host group: 1 check set(s) skipped', log)
+                self.assertEqual(len(re.findall(r'host group complete .* commit ', log)), 1)
+                self.assertIn('host: PARTIAL', console)
+                row, = json.loads((logs / 'results.json').read_text())
+                self.assertEqual((row['state'], row['exit'], row['skips']), ('partial', 0, 1))
+                self.assertEqual('Host sections:' in console, jobs == '2')
+                # What a reader compares: headers, marks, TIMING lines and the summary.
+                outputs.append([re.sub(r'see \S+', 'see LOG', re.sub(r'TIMING \d+s', 'TIMING Ns', line))
+                                for line in log.split('\n')
+                                if re.match(r'\(\d+ of|\s+[✓✗–] |TIMING |Host group:', line)])
+                # A passing section leaves no script behind.
+                self.assertEqual(list((logs / 'host').glob('*.sh')), [])
+            self.assertEqual(outputs[0], outputs[1])
+            self.assertEqual(len(outputs[0]), 4 + 4 + 4 + 2, outputs[0])
+            # The last run's times are remembered beside the runs, by title.
+            times = json.loads((script.parent / 'logs' / suite_runner.TIMES_FILE).read_text())['seconds']
+            self.assertEqual(list(times), ['§1: the script path', '2. a numbered section', '§3: no checks', '§4: last'])
+
+    def test_failing_section_fails_the_run_and_names_the_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            left = Path(directory).resolve() / 'left-running'
+            script = self.fixture(directory, 'section "§1: passes"\ncheck "fine" true\n'
+                                             'sleep 300 >/dev/null 2>&1 &\necho $! > ' + str(left) + '\n'
+                                             'section "§2: fails"\ncheck "before" true\n'
+                                             'check "the deliberately failing check" bash -c "echo why it failed; exit 3"\n'
+                                             'check "after" true\n')
+            code, console, logs = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 1)
+            log = self.plain((logs / 'host.log').read_text())
+            for text in (console, log):
+                self.assertRegex(text, r'✗ the deliberately failing check \(exit=3; log=\S+/host/section-002/check\.\w+\)\n'
+                                       r'why it failed\n')
+                self.assertIn('✓ after', text)
+                self.assertIn('Host group: 1/4 checks failed:\n  - the deliberately failing check (exit=3;', text)
+            self.assertIn('host: FAILED', console)
+            row, = json.loads((logs / 'results.json').read_text())
+            self.assertEqual((row['state'], row['exit']), ('failed', 1))
+            self.assertEqual(Path(re.search(r'log=(\S+)\)', log)[1]).read_text(), 'why it failed\n')
+            # What a section leaves running does not outlive it: its HOME is gone.
+            self.assert_gone(int(left.read_text()))
+            # The failed section's script is kept, the passing one's is not.
+            self.assertEqual(sorted(path.name for path in (logs / 'host').iterdir()),
+                             ['section-002', 'section-002.out', 'section-002.sh'])
+
+    def test_aborting_section_and_missing_result_fail_the_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: aborts"\ncheck "before the abort" true\nfalse\n'
+                                             'check "never reached" true\n'
+                                             'section "§2: leaves early"\necho leaving early\nexit 0\n'
+                                             'section "§3: passes"\ncheck "fine" true\n')
+            abort_line = script.read_text().split('\n').index('false') + 1
+            code, console, logs = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 1)
+            log = self.plain((logs / 'host.log').read_text())
+            for text in (console, log):
+                # The error names the line of the real file, not of a shorter copy.
+                self.assertIn("[err-trap] line {}: 'false' exited 1".format(abort_line), text)
+                self.assertIn('✗ section (1 of 3) §1: exited 1 without reporting a result', text)
+                self.assertIn('✗ section (2 of 3) §2: exited 0 without reporting a result', text)
+                self.assertNotIn('never reached', text)
+                # Repeated above the summary, but not as a second check line.
+                self.assertEqual(text.count('✓ before the abort'), 2)
+                self.assertEqual(len(re.findall(r'^\s+✓ before the abort', text, re.M)), 1)
+                self.assertRegex(text, r'── section \(1 of 3\) §1 did not finish: exited 1 [^\n]*\n'
+                                       r'   The last lines of its output:\n(   \| [^\n]*\n)+'
+                                       r'   Full output: \S+/section-001\.out\n   Script as run: \S+/section-001\.sh\n')
+                self.assertRegex(text, r'── section \(2 of 3\) §2 did not finish:[^\n]*\n[^\n]*\n(   \| [^\n]*\n)*'
+                                       r'   \| leaving early\n')
+                self.assertRegex(text, r'Host group: 2/3 checks failed:\n'
+                                       r'  - section \(1 of 3\) §1: exited 1 [^\n]*\n  - section \(2 of 3\) §2: exited 0 ')
+                self.assertEqual(self.headers(text), [1, 2, 3])
+            self.assertTrue((logs / 'host' / 'section-001.sh').is_file())
+            self.assertTrue((logs / 'host' / 'section-002.out').is_file())
+            self.assertFalse((logs / 'host' / 'section-003.sh').exists())
+            row, = json.loads((logs / 'results.json').read_text())
+            self.assertEqual((row['state'], row['exit']), ('failed', 1))
+
+    def test_truncated_or_inconsistent_result_is_not_a_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            counts = Path(directory) / 'counts'
+            suite_runner.write_counts(counts, 3, 1, 2, [b'a failed check\nwith a second line'])
+            self.assertEqual(suite_runner.read_counts(counts), (3, 1, 2, [b'a failed check\nwith a second line']))
+            for data in (b'', b'3\x000\x000\x00', b'3\x000\x000\x000', b'3\x001\x000\x001\x00',
+                         b'3\x001\x000\x001\x00name', b'x\x000\x000\x000\x00', b'3\x000\x000\x00-1\x00'):
+                counts.write_bytes(data)
+                self.assertIsNone(suite_runner.read_counts(counts), data)
+            self.assertIsNone(suite_runner.read_counts(Path(directory) / 'absent'))
+            # A section that reports no failure and then exits non-zero did not pass.
+            script = self.fixture(directory, 'section "§1: reports, then exits 9"\ncheck "fine" true\n'
+                                             'trap "exit 9" EXIT\n')
+            code, console, _ = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 1)
+            self.assertIn('✗ section (1 of 1) §1: exited 9 after reporting no failed check', console)
+            self.assertIn('Host group: 1/2 checks failed:', console)
+
+    def test_timed_out_section_is_killed_and_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pids = Path(directory).resolve() / 'pids'
+            script = self.fixture(directory, 'section "§1: hangs"\ncheck "before the hang" true\n'
+                                             'sleep 300 &\necho "$$ $!" > ' + str(pids) + '\nwait\n'
+                                             'section "§2: passes"\ncheck "fine" true\n')
+            started = time.monotonic()
+            code, console, logs = self.run_host(script, '--jobs', '2', env={'SANDY_TEST_SECTION_TIMEOUT': '1'})
+            self.assertEqual(code, 1)
+            self.assertLess(time.monotonic() - started, 30)
+            self.assertIn('✗ section (1 of 2) §1: timed out after 1s; its process group was killed', console)
+            self.assertIn('Host group: 1/2 checks failed:\n  - section (1 of 2) §1: timed out after 1s', console)
+            self.assertIn('✓ fine', console)
+            for pid in pids.read_text().split():
+                self.assert_gone(int(pid))
+            self.assertIn('before the hang', (logs / 'host' / 'section-001.out').read_text())
+
+    def test_sections_selects_by_label_and_refuses_a_name_that_matches_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: one"\ncheck "one" true\n'
+                                             'section "§2: two"\necho "inner=${SANDY_TEST_INNER_JOBS:-unset}"\n'
+                                             'check "two" true\n'
+                                             'info "7z. three"\ncheck "three" true\n'
+                                             'section "§12: four"\ncheck "four" true\n')
+            code, console, logs = self.run_host(script, '--jobs', '2', '--sections', '7z, §2,')
+            self.assertEqual(code, 0, console)
+            # The position is the place in the whole file, and so is the total.
+            self.assertEqual(re.findall(r'^\(\d+ of \d+\) \S+', console, re.M), ['(2 of 4) §2:', '(3 of 4) 7z.'])
+            self.assertRegex(console, r'TIMING \d+s \(3 of 4\) 7z\. three\n')
+            self.assertIn('Host group: 2 checks passed.', console)
+            self.assertIn('Host group: 2 of the 4 sections ran (--sections); the others did NOT run here.', console)
+            self.assertIn('inner=1', console)
+            # One section alone may use the whole budget for its own background checks.
+            code, console, _ = self.run_host(script, '--jobs', '4', '--sections', '2')
+            self.assertIn('inner=4', console)
+            # --jobs 1 with --sections is still one process per section, one at a time.
+            code, console, _ = self.run_host(script, '--jobs', '1', '--sections', '12')
+            self.assertEqual((code, self.headers(console)), (0, [4]))
+            before = sorted(path.name for path in (script.parent / 'logs').iterdir())
+            for selection, named in (('2,99', '99'), ('248', '248'), (',', 'names no section')):
+                errors = io.StringIO()
+                with self.assertRaises(SystemExit) as refused, contextlib.redirect_stderr(errors):
+                    self.run_host(script, '--sections', selection)
+                self.assertEqual(refused.exception.code, 2)
+                self.assertIn(named, errors.getvalue())
+            # A refused selection ran nothing: no new run directory.
+            self.assertEqual(sorted(path.name for path in (script.parent / 'logs').iterdir()), before)
+            listing = io.StringIO()
+            with mock.patch.object(suite_runner, 'GROUPS', {'host': ['bash', str(script)]}), \
+                 mock.patch('sys.argv', ['runner', '--list-sections']), contextlib.redirect_stdout(listing):
+                self.assertEqual(suite_runner.main(), 0)
+            self.assertEqual([line.split(None, 2) for line in listing.getvalue().splitlines()],
+                             [['1', '§1', '§1: one'], ['2', '§2', '§2: two'], ['3', '7z', '7z. three'],
+                              ['4', '§12', '§12: four']])
+
+    def test_merge_prints_in_file_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            flag = str(Path(directory).resolve() / 'third-finished')
+            # The first section cannot finish before the third has: it waits for it.
+            script = self.fixture(directory, 'section "§1: waits for the third"\n'
+                                             'check "the third section finished first" bash -c \'for _ in $(seq 200); do '
+                                             '[ -e "$1" ] && exit 0; sleep 0.05; done; exit 1\' _ "' + flag + '"\n'
+                                             'section "§2: second"\ncheck "second" true\n'
+                                             'section "§3: third"\ncheck "third" true\ntouch "' + flag + '"\n')
+            code, console, logs = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 0, console)
+            # Each process resets the terminal keypad as it exits; only the last
+            # reset is kept, so no header has an escape sequence glued in front.
+            raw = (logs / 'host.log').read_text()
+            self.assertIn('\x1b>', raw)
+            self.assertNotIn('\x1b>', raw[:raw.rindex('\n')])
+            for text in (console, self.plain(raw)):
+                self.assertEqual(self.headers(text), [1, 2, 3])
+                self.assertEqual(re.findall(r'^\s+✓ (.*)', text, re.M),
+                                 ['the third section finished first', 'second', 'third'])
+                self.assertRegex(text, r'TIMING \d+s \(3 of 3\) §3: third\n\nHost group: 3 checks passed\.')
+
+    def test_interrupt_kills_every_worker_and_prints_what_finished(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            script = self.fixture(directory, 'section "§1: passes"\ncheck "fine" true\n'
+                                             'section "§2: hangs"\ncheck "before the hang" true\n'
+                                             'sleep 300 &\necho "$$ $!" > ' + str(root / 'pids') + '\nwait\n')
+            program = ('import sys, suite_runner\n'
+                       'suite_runner.GROUPS = {"host": ["bash", sys.argv[1]]}\n'
+                       'sys.argv = ["runner", "--only", "host", "--jobs", "2", "--log-dir", sys.argv[2]]\n'
+                       'sys.exit(suite_runner.main())\n')
+            runner = subprocess.Popen([suite_runner.sys.executable, '-c', program, str(script), str(root / 'logs')],
+                                      cwd=ROOT / 'test', stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                      start_new_session=True)
+            try:
+                # Both sections start at once; the first is done when its script is gone.
+                for _ in range(400):
+                    if (root / 'pids').exists() and list((root / 'logs').glob('run-*/host/section-002.sh')) \
+                            and not list((root / 'logs').glob('run-*/host/section-001.sh')):
+                        break
+                    time.sleep(0.05)
+                os.kill(runner.pid, signal.SIGINT)
+                output, errors = runner.communicate(timeout=30)
+            finally:
+                if runner.poll() is None:
+                    os.killpg(runner.pid, signal.SIGKILL)
+            output = self.plain(output)
+            self.assertNotEqual(runner.returncode, 0)
+            self.assertIn('KeyboardInterrupt', errors)
+            self.assertEqual(self.headers(output), [1, 2])
+            self.assertIn('✓ fine', output)
+            self.assertIn('✓ before the hang', output)
+            self.assertIn('✗ section (2 of 2) §2: interrupted', output)
+            self.assertIn('host group interrupted: 1 of 2 sections finished, 1 stopped while running, 0 not started',
+                          output)
+            self.assertNotIn('Host group: ', output)
+            for pid in (root / 'pids').read_text().split():
+                self.assert_gone(int(pid))
+
+    def test_bash_older_than_5_is_refused_once_and_clearly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self.fixture(directory, 'section "§1: one"\ncheck "one" true\n'
+                                             'section "§2: two"\ncheck "two" true\n')
+            # The runner asks bash once; an old one gets the whole file in one
+            # process, where the script itself refuses, not one refusal per section.
+            with mock.patch.object(suite_runner, 'bash_major', side_effect=[5, 3]):  # run_host asks, then the runner
+                code, console, _ = self.run_host(script, '--jobs', '2')
+            self.assertEqual(code, 0, console)
+            self.assertIn('Host sections need bash 5 or newer on PATH; running the whole file in one process.', console)
+            self.assertNotIn('Host sections:', console)
+            self.assertEqual(self.headers(console), [1, 2])
+            # The script's own refusal, tried by raising the version it asks for.
+            source = script.read_text()
+            self.assertEqual(source.count('"${BASH_VERSINFO[0]:-0}" -lt 5 ]'), 1)
+            script.write_text(source.replace('"${BASH_VERSINFO[0]:-0}" -lt 5 ]', '"${BASH_VERSINFO[0]:-0}" -lt 99 ]'))
+            run = subprocess.run(['bash', str(script)], env={'PATH': os.environ['PATH'], 'SANDY_TEST_CHILD': '1'},
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual((run.returncode, run.stdout), (1, ''))
+            self.assertRegex(run.stderr, r'needs bash 5 or newer, and the bash on PATH \(\S+\) is \d+\.\d+')
+            self.assertEqual(len(run.stderr.splitlines()), 1)
+
+    def test_jobs_follow_the_cpus_and_a_process_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory)
+            # No cgroup files (macOS): the CPUs decide, twelve at most.
+            self.assertEqual(suite_runner.auto_jobs(cpus=10, cgroup=cgroup), 10)
+            self.assertEqual(suite_runner.auto_jobs(cpus=32, cgroup=cgroup), 12)
+            self.assertEqual(suite_runner.auto_jobs(cpus=0, cgroup=cgroup), 1)
+            for limit, used, expected in (('max', '40', 10), ('512', '150', 2), ('512', '29', 3), ('512', '480', 1),
+                                          ('150', '100', 1), ('4096', '100', 10), ('100000', '100', 10)):
+                (cgroup / 'pids.max').write_text(limit + '\n')
+                (cgroup / 'pids.current').write_text(used + '\n')
+                self.assertEqual(suite_runner.auto_jobs(cpus=10, cgroup=cgroup), expected, (limit, used))
+            self.assertEqual(suite_runner.auto_jobs(cpus=1, cgroup=cgroup), 1)
+        self.assertGreaterEqual(suite_runner.auto_jobs(), 1)
+        self.assertEqual(suite_runner.jobs_argument('auto'), 'auto')
+        self.assertEqual(suite_runner.jobs_argument('3'), 3)
+        for bad in ('0', '-2', 'many', ''):
+            with self.assertRaises(suite_runner.argparse.ArgumentTypeError):
+                suite_runner.jobs_argument(bad)
+
+    def test_long_sections_start_first(self):
+        sections = [suite_runner.Section(position, start, end, 'section "§{}: s"'.format(position))
+                    for position, (start, end) in enumerate(((0, 10), (10, 400), (400, 450), (450, 460)), 1)]
+
+        def order(seconds):
+            return [section.position for section in suite_runner.start_order(sections, seconds)]
+        # No times: by line count. All timed: by time. Ties keep file order.
+        self.assertEqual(order({}), [2, 3, 1, 4])
+        self.assertEqual(order({'§1: s': 9.0, '§2: s': 1.0, '§3: s': 5.0, '§4: s': 5.0}), [1, 3, 4, 2])
+        # A section the last run did not time is placed by its lines, at the others' seconds per line.
+        self.assertEqual(order({'§1: s': 2.0, '§3: s': 30.0, '§4: s': 1.0}), [2, 3, 1, 4])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / suite_runner.TIMES_FILE
+            self.assertEqual(suite_runner.load_times(path), {})
+            path.write_text('not json')
+            self.assertEqual(suite_runner.load_times(path), {})
+            suite_runner.save_times(path, {'§3: s': 30.126, 'a section that was removed': 4.0}, sections)
+            self.assertEqual(suite_runner.load_times(path), {'§3: s': 30.13})
+            self.assertEqual([entry.name for entry in Path(directory).iterdir()], [suite_runner.TIMES_FILE])
 
 
 if __name__ == "__main__":

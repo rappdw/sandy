@@ -2,10 +2,25 @@
 # Host contracts, container checks, and harness regressions.
 # Usage: ./test/run-tests.sh [--only host,contracts,harness,container,proxy] [--list]
 # Host-only: ./test/run-tests.sh --host-only
+# Host sections: [--jobs N|auto] [--sections 248,9z1] [--list-sections]
 set -euo pipefail
 if [ "${SANDY_TEST_CHILD:-0}" != 1 ]; then
     exec python3 "$(dirname "$0")/suite_runner.py" "$@"
 fi
+# bash 5 or newer runs this file. The interpreter is the `bash` the runner finds
+# on PATH; macOS still ships 3.2 as /bin/bash, where BASH_ARGV0 below would be
+# an ordinary variable and every $(dirname "$0") would resolve somewhere else.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+    printf 'test/run-tests.sh: the host group needs bash 5 or newer, and the bash on PATH (%s) is %s. Put a newer bash first on PATH (macOS: brew install bash).\n' "${BASH:-bash}" "${BASH_VERSION:-unknown}" >&2
+    exit 1
+fi
+# One section per process (test/suite_runner.py --jobs N, --sections): the
+# runner executes a COPY of this file in which every other section is blank
+# lines, so a line number in an error is still a line number of this file. $0
+# would name that copy, and about 110 places below find the repository through
+# $(dirname "$0"), so the runner passes the real path and BASH_ARGV0 (bash 5)
+# makes it $0.
+[ -z "${SANDY_TEST_ARGV0:-}" ] || BASH_ARGV0="$SANDY_TEST_ARGV0"
 
 # Auto-approve passive privileged keys (e.g. a workspace .sandy/.secrets
 # with GEMINI_API_KEY) so the per-workspace approval prompt doesn't block
@@ -80,8 +95,11 @@ _TEST_SECTION_START=$SECONDS
 # info "N. ..." form), so it is the number a full run prints. The file's
 # order is not numeric (shared harness blocks keep related sections
 # together), so x is the reliable "how far along am I" measure.
-_TEST_SECTION_N=0
-_TEST_SECTION_TOTAL="$(grep -cE '^[[:space:]]*(section "|info "[0-9])' "${BASH_SOURCE[0]}" 2>/dev/null || echo '?')"
+# One section per process: the runner says where the section sits in the whole
+# file, so its header and TIMING line still read "(231 of 253)", not "(1 of 1)".
+_TEST_SECTION_N=$(( ${SANDY_TEST_SECTION_POSITION:-1} - 1 ))
+_TEST_SECTION_TOTAL="${SANDY_TEST_SECTION_TOTAL:-}"
+[ -n "$_TEST_SECTION_TOTAL" ] || _TEST_SECTION_TOTAL="$(grep -cE '^[[:space:]]*(section "|info "[0-9])' "${BASH_SOURCE[0]}" 2>/dev/null || echo '?')"
 _test_section_close() {
     if [ -n "$_TEST_SECTION" ]; then
         printf 'TIMING %ss %s\n' "$((SECONDS - _TEST_SECTION_START))" "$_TEST_SECTION"
@@ -33645,6 +33663,23 @@ unset _S255_D _S255_SLEEP _S255_A _S255_K _S255_L _S255_E3 _S255_D_ARGS _S255_G 
 # ============================================================
 _test_section_close
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
+# One section per process (test/suite_runner.py --jobs N, --sections). A section
+# process hands its counters to the runner and prints no summary; the runner
+# adds them up and runs this epilogue once more, with no section, so the one
+# summary below is printed from the totals. Both files hold NUL-ended fields:
+# passed, failed, skipped, the number of failed-check names, then the names.
+if [ -n "${SANDY_TEST_RESULT_FILE:-}" ]; then
+    printf '%s\0' "$PASS" "$FAIL" "$SKIPPED" "${#ERRORS[@]}" ${ERRORS[@]+"${ERRORS[@]}"} > "$SANDY_TEST_RESULT_FILE"
+    [ "$FAIL" -eq 0 ] || exit 1
+    exit 0
+fi
+if [ -n "${SANDY_TEST_TOTALS_FILE:-}" ]; then
+    {
+        IFS= read -r -d '' PASS; IFS= read -r -d '' FAIL; IFS= read -r -d '' SKIPPED; IFS= read -r -d '' _TOTALS_NAMES
+        ERRORS=()
+        while IFS= read -r -d '' _TOTALS_NAME; do ERRORS+=("$_TOTALS_NAME"); done
+    } < "$SANDY_TEST_TOTALS_FILE"
+fi
 echo ""
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then
