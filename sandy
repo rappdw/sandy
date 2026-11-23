@@ -1287,8 +1287,9 @@ _sandy_sandbox_state_classify() {
 # instead of mounting nothing.
 #
 # Each projector lives in its own function so its heredoc is never inside a
-# $( ) span: bash 3.2 does not skip comments when scanning a command
-# substitution (see APOSCS/CASESUB in test/lint-bash32.sh).
+# $( ) span. Written for bash 3.2, which did not skip comments when scanning a
+# command substitution; sandy requires bash 5 now, and the lint codes for that
+# bug were retired with it (test/lint-bash32.sh header).
 _sandy_fm_projector_js() {
 cat <<'SANDY_FM_JS'
 // Projector: JSON manifest -> flat TAB-separated lines bash can read exactly.

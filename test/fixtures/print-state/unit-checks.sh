@@ -9,7 +9,7 @@
 # Usage: unit-checks.sh SANDY_SCRIPT GROUP   (GROUP: escape|file|ascii|ws|approval|split|marker)
 # Prints one line per mismatch and exits 1 if there was any; exits 2 if the
 # functions could not be extracted (so a rename cannot pass vacuously).
-# Used by run-tests.sh §242; bash-3.2 and BSD safe.
+# Used by run-tests.sh §242; BSD safe (macOS userland, bash 5).
 set -u
 SANDY="$1"; GROUP="$2"
 _fns="$(sed -n \

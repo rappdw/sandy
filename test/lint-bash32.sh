@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
-# Static lint for bash-3.2 / BSD-userland hazards that CI structurally CANNOT see.
+# Static lint for macOS (bash 5 + BSD userland) hazards that CI structurally CANNOT see.
 #
 #   bash test/lint-bash32.sh              # lint the repo's shell scripts
 #   bash test/lint-bash32.sh FILE...      # lint specific files
 #   bash test/lint-bash32.sh --self-test  # prove the detectors actually detect
+#   bash test/lint-bash32.sh --list       # print the target set, lint nothing
 #
-# Why this exists. CI runs Ubuntu with bash 5 and GNU userland; the maintainer
-# runs macOS with bash 3.2 and BSD userland. Several constructs parse fine on
-# the former and break on the latter, so `bash -n` in CI passes and the failure
-# only ever appears on one machine, usually mid-task. Every pattern below has
-# ALREADY broken this repo at least once — none is speculative:
+# The file name is historical: this began as a bash-3.2 lint. Sandy requires
+# bash 5 on the host since 2026-11-21 (macOS: Homebrew bash), and the detectors
+# whose hazard existed only in bash 3.2 were retired then (see below).
+#
+# Why this exists. CI runs Ubuntu with GNU userland and glibc; the maintainer
+# runs macOS with BSD userland and Apple's libc. Several constructs behave fine
+# on the former and break on the latter, so `bash -n` in CI passes and the
+# failure only ever appears on one machine, usually mid-task. Three of the codes
+# below (PYBACK, APOSQ, GREPM) are not macOS-specific at all: they break under
+# any bash, but quietly or as a race, so CI does not reliably show them either.
+# Every pattern below has ALREADY broken this repo at least once:
 #
 #   VARMB   an UNBRACED `$name` immediately followed by a non-ASCII character,
-#           e.g. `"Probing $host…"`. bash 3.2 on macOS reads the bytes of the
-#           `…` as part of the NAME, looks up a variable that does not exist, and
-#           `set -u` aborts: `line 4217: _rsy_host<?>: unbound variable`. bash 5
-#           ends the name at the first non-ASCII byte, so CI never sees it. Hit
-#           by the first macOS run of `sandy --rsync` (#374). Fix: `${name}…`.
-#
-#   SRCSUB  nested `source <(...)` inside `$(...)`. bash 3.2 yields an empty
-#           source; the calls that follow exit 127 and the ERR trap aborts the
-#           whole run. Hit in run-tests.sh §83 — every section after it silently
-#           never executed.
+#           e.g. `"Probing $host…"`. bash ends a variable name at the first byte
+#           libc's isalnum() rejects, and on macOS in a UTF-8 locale isalnum()
+#           ACCEPTS 0xE2 (the first byte of `…`; Apple's ctype reads the byte as
+#           U+00E2, a letter). So the name runs on into the `…`, names a variable
+#           that does not exist, and `set -u` aborts:
+#           `_rsy_host<?>: unbound variable`. glibc rejects the byte, so CI
+#           never sees it. NOT a bash-3.2 bug: bash 5.3 scans names with the same
+#           isalnum() test, and bash 5.2 aborts the same way here when 0xE2 is
+#           classified alpha. Hit by the first macOS run of `sandy --rsync`
+#           (#374). Fix: `${name}…`.
 #
 #   PYBACK  backticks or $( ) inside a DOUBLE-quoted `python3 -c "..."` body.
 #           Bash expands them regardless of Python comment syntax, so the shell
@@ -29,29 +36,12 @@
 #           program. Hit in §68: a `sandy` in a Python comment made the test
 #           suite EXECUTE the real sandy binary and corrupt its own script.
 #
-#   APOSCS  an apostrophe in a comment inside a multi-line `$( )`. bash 3.2
-#           scans command substitutions WITHOUT skipping comments, so the
-#           apostrophe opens a quote that never closes and the file dies with
-#           "unexpected EOF while looking for matching quote". Hit in §86 —
-#           and it is a PARSE error, so it killed the entire file while the
-#           summary still printed "945 passed, 0 failed".
-#
 #   APOSQ   an apostrophe in a comment inside a multi-line SINGLE-quoted program
 #           argument (jq/awk/python passed as 'one big string'). The apostrophe
-#           closes the string and the shell reinterprets the rest as code. Same
-#           failure as APOSCS in a different container — APOSCS only looks inside
-#           $( ), so a "jq's" in a jq program broke `bash -n` while APOSCS was
-#           clean. Detected via an explicit opener, NOT quote parity: parity was
-#           tried and floods false positives on any ordinary "don't" in prose.
-#
-#   CASESUB a `case` pattern inside a multi-line `$( )`. The sibling of APOSCS:
-#           bash 3.2 scans the substitution for the matching `)` instead of
-#           parsing it, so the `)` terminating a case PATTERN closes the
-#           substitution early and the file fails to parse -- reported at an
-#           unrelated line far below. run-tests.sh §119 carried this for weeks,
-#           green in CI (bash 5) and aborting the whole suite on macOS after
-#           1591 passing checks. Fix: hoist the `case` out of the substitution,
-#           or use the POSIX leading-paren form `(pattern)`.
+#           closes the string and the shell reinterprets the rest as code. A
+#           "jq's" in a jq program broke `bash -n`. Detected via an explicit
+#           opener, NOT quote parity: parity was tried and floods false
+#           positives on any ordinary "don't" in prose.
 #
 #   GREPM   `grep -n ... | head` under pipefail (grep dies on EPIPE, exit 2,
 #           ERR trap aborts the run — a race, so it passes locally and fails in
@@ -83,6 +73,16 @@
 #           doctor.sh is host-side and IS scanned as its own file, even though
 #           its heredoc body inside sandy is skipped.
 #
+# RETIRED 2026-11-21, when bash 5 became the host requirement. Each was a
+# bash-3.2 parser bug, and each example runs correctly under bash 5.2 with
+# `set -euo pipefail` (bash 4.0 began parsing $( ) with the real parser):
+#
+#   SRCSUB  nested `source <(...)` inside `$(...)` sourced nothing (§83).
+#   APOSCS  an apostrophe or unbalanced paren in a comment inside a multi-line
+#           `$( )` opened a quote that never closed: parse abort (§86).
+#   CASESUB a `case` pattern's `)` inside a multi-line `$( )` closed the
+#           substitution early: parse abort (§119, §126).
+#
 # Deliberately NOT checked: `set -E` ERR traps firing in command-substitution
 # subshells (real — see sandy:1043 — but not reliably detectable statically, and
 # a false positive here is worse than a miss). Also not checked: `readlink -f`,
@@ -109,8 +109,8 @@ done
 _repo="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Default target set: every shell script the repo ships or tests with — except
-# this file, whose --self-test fixtures are deliberate instances of all three
-# bugs and would otherwise report themselves.
+# this file, whose --self-test fixtures are deliberate instances of every
+# hazard it detects and would otherwise report themselves.
 if [ "${#FILES[@]}" -eq 0 ]; then
     FILES=("$_repo/sandy")
     for f in "$_repo"/test/*.sh "$_repo"/*.sh; do
@@ -134,8 +134,8 @@ cat > "$_scanner" <<'SCANNER_PY'
 import os, re, sys
 
 # A block that never terminates within this many lines is abandoned rather than
-# reported. Runaway scanning is the main false-positive risk in all three
-# detectors, and a lint that cries wolf gets switched off.
+# reported. Runaway scanning is the main false-positive risk in the block
+# detectors (PYBACK, APOSQ), and a lint that cries wolf gets switched off.
 MAX_BLOCK = 80
 
 # --- GNUBIN tables ---------------------------------------------------------
@@ -236,16 +236,10 @@ def scan(path):
         return [(0, "IOERR", str(e))]
     out = []
 
-    # SRCSUB — process substitution fed to source/dot, in code (not comments).
-    for i, l in enumerate(lines, 1):
-        if re.match(r"^\s*#", l):
-            continue
-        if re.search(r"(^|[^\w-])(source|\.)\s+<\(", l):
-            out.append((i, "SRCSUB", l.strip()[:88]))
-
     # VARMB — unbraced $name followed directly by a non-ASCII character. Heredoc
     # BODIES are skipped for the GNUBIN reason: they are container-side scripts,
-    # run by the image's bash 5, or another language entirely.
+    # run on the image's glibc (which ends the name at a non-ASCII byte), or
+    # another language entirely.
     _vb = heredoc_body_lines(lines)
     for i, l in enumerate(lines, 1):
         if (i - 1) in _vb or re.match(r"^\s*#", l):
@@ -308,9 +302,8 @@ def scan(path):
     # APOSQ — apostrophe in a comment inside a multi-line SINGLE-QUOTED program
     # argument (jq / awk / python passed as 'one big quoted string'). Inside that
     # region an apostrophe CLOSES the string and the shell reinterprets the rest
-    # as code. Same failure as APOSCS, different container: APOSCS only looks
-    # inside $( ), and this bit exactly there — a "jq's" in a comment inside a jq
-    # program broke bash -n while APOSCS reported clean.
+    # as code, in any bash -- a "jq's" in a comment inside a jq program broke
+    # bash -n.
     #
     # Deliberately NARROW. A parity-of-quotes approach was tried first and was
     # unusable: any lone apostrophe in ordinary prose ("don't") flips parity and
@@ -329,134 +322,6 @@ def scan(path):
                 j += 1
             i = j
         i += 1
-
-    # APOSCS — apostrophe in a comment inside a multi-line $( ).
-    # Two openers. The original is `$(` at END of line. The second is a
-    # command substitution that carries a HEREDOC on the same line --
-    # `x="$(python3 - "$f" <<'"'"'PY'"'"'` -- which is guaranteed to span lines and was a
-    # blind spot: the EOL rule never matched it, so a python program fed that
-    # way was never scanned. That gap cost a full suite run. bash 3.2
-    # desynchronized on an apostrophe AND on an unbalanced paren in the
-    # program's comments, and reported the failure 2700 lines further down,
-    # inside unrelated (and correct) code, after 1034 checks had passed.
-    # Unbalanced parens are flagged for the same reason apostrophes are: the
-    # observed error was `syntax error near unexpected token (`.
-    def _case_in(l):
-        """Text after the `in` of a `case ... in` on this line, else None.
-
-        `case` need not start the line: the §126 instance was buried
-        mid-statement (`...; then command(){ case "$2" in node|python3) ...`),
-        which a start-of-line anchor could never match. Any command position
-        counts. The scan for `in` is deliberately loose -- the subject may be
-        quoted and contain spaces (`case " $E " in ...`, the §119 shape) -- so
-        it is "case at a command position, then `in` somewhere after it",
-        not an adjacency pattern. Requiring `case <word> in` was tried and
-        silently stopped matching §119.
-        """
-        m = re.search(r"(?:^|[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*case\b", l)
-        if not m:
-            return None
-        rest = l[m.end():]
-        if not re.search(r"\bin\b", rest):
-            return None
-        return re.split(r"\bin\b", rest, maxsplit=1)[1].strip()
-
-    depth, opened_at, bal_mode, bal = 0, 0, False, 0
-    for i, l in enumerate(lines, 1):
-        # The heredoc opener must be a real one: not a `<<<` herestring (an awk
-        # pattern containing "<<<" matched, and the block then ran on into
-        # unrelated comments), and the substitution must not already CLOSE on
-        # this line (`"$(sed -n "/<<'"'"'TAG'"'"'/,/^TAG$/p" f)"` is complete as written).
-        _hd = re.search(r"(?<!<)<<(?!<)-?\s*['\"]?[A-Za-z_]", l)
-        # Third opener: a `$(` that is simply left OPEN at end of line, with the
-        # command continuing on the next line via `\` or a pipe. The original
-        # rule required `$(` to be the LAST thing on the line, which missed
-        # exactly the shape that cost a macOS run of run-tests.sh §119 --
-        # `X="$("$S" --print-schema | tr ... \` -- so neither APOSCS nor CASESUB
-        # ever looked inside it. Balanced lines (`x=$(foo bar)`) do not open.
-        # Narrow deliberately: the line must END in a continuation (`\` or a
-        # pipe), which is what makes it a genuine multi-line substitution. A
-        # bare "unbalanced $( anywhere" rule was tried and kept spans open
-        # across heredoc bodies and unrelated code for MAX_BLOCK lines, which
-        # is the false-positive flood the APOSCS header warns about -- it
-        # produced two bogus findings in run-tests.sh on first run.
-        _open = ("$(" in l and l.count("(") > l.count(")")
-                 and re.search(r"(?:\\|\|)\s*$", l) is not None)
-        # Fourth opener: `$( {` opening a brace GROUP, which by construction
-        # continues on the following lines. run-tests.sh §126 used exactly this
-        # (`out="$( {`) and matched none of the three rules above -- `$(` is not
-        # last on the line, and the line ends in `{`, not a continuation -- so
-        # its body was never scanned at all, CASESUB and APOSCS alike. It
-        # carried a live CASESUB from 1.12.0 through four releases: green in CI,
-        # aborting the macOS run at §126 so that §127, §128 and §129 never ran
-        # there. Kept narrow (the group opener must END the line) for the reason
-        # the APOSCS header gives: a loose rule floods.
-        _grp = re.search(r"\$\(\s*\{\s*$", l) is not None
-        if depth == 0:
-            if re.search(r"\$\(\s*$", l) or (_hd and l.count("$(") > l.count(")")):
-                # Balance-closed as well. The heredoc-carrying opener typically
-                # ends `)" || return 1`, which the bare-`)` rule never matched,
-                # so the span ran on for MAX_BLOCK lines and reported code far
-                # BELOW the substitution (a real false positive on sandy's
-                # _sandy_strip_refresh_token). The bare-`)` rule is kept as a
-                # second trigger for spans whose parens do not balance cleanly.
-                depth, opened_at, bal_mode = 1, i, True
-                bal = l.count("(") - l.count(")")
-            elif _open or _grp:
-                # Opened by the continuation rule: this span is closed by PAREN
-                # BALANCE, because the line that ends it typically closes inline
-                # (`| cut -d'"' -f4)" || true`) and never matches the bare-`)`
-                # rule the other openers rely on. Without that, the span stayed
-                # open for MAX_BLOCK lines and reported prose comments far below
-                # as findings.
-                depth, opened_at, bal_mode = 1, i, True
-                bal = l.count("(") - l.count(")")
-            continue
-        if re.match(r'^\s*\)"?\s*$', l):
-            depth -= 1
-            continue
-        if depth > 0:
-            if i - opened_at > MAX_BLOCK:
-                depth = 0
-                continue
-            if re.match(r"^\s*#", l) and (
-                "'" in l or l.count("(") != l.count(")")
-            ):
-                out.append((i, "APOSCS", l.strip()[:88]))
-            # CASESUB — a `case` pattern inside a multi-line $( ). Same scanner
-            # flaw as APOSCS, different token: bash 3.2 does not parse the
-            # substitution, it scans for the matching `)`, so the unbalanced `)`
-            # that TERMINATES a case pattern is counted as closing the
-            # substitution. The file then fails to parse, bash reports the error
-            # at an unrelated line far below, and on a test suite the run aborts
-            # after printing a screenful of passes. Cost a full macOS run of
-            # run-tests.sh §119, which CI (bash 5) had been passing for weeks.
-            #
-            # The fix is either to hoist the `case` out of the substitution, or
-            # to write the POSIX leading-paren form `(pattern)`, which balances
-            # the scanner. A bare `case x in` with its patterns on later lines is
-            # flagged too: those lines carry the same unbalanced `)`.
-            # `case` does NOT have to start the line. The §126 instance was
-            # `if [ -n "${3:-}" ]; then command(){ case "$2" in node|python3) ...`
-            # -- a one-line case buried mid-statement, which the old
-            # start-of-line anchor could never match even with the span open.
-            # Anywhere a command may begin is enough: line start, or after
-            # ; & | ( ) { } or then/do/else.
-            elif not re.match(r"^\s*#", l) and _case_in(l) is not None:
-                # What follows `in` is the first PATTERN. The leading-paren form
-                # `(a|b)` balances the scanner and is the documented fix, so it
-                # is the one spelling that does not fire.
-                if not _case_in(l).startswith("("):
-                    out.append((i, "CASESUB", l.strip()[:88]))
-            # Balance is updated AFTER the checks, deliberately. The `)` that
-            # terminates a case pattern is exactly what drives the balance to
-            # zero -- update first and the detector closes the span on the very
-            # line it is meant to report, reproducing the bash 3.2 bug it exists
-            # to find rather than catching it.
-            if bal_mode:
-                bal += l.count("(") - l.count(")")
-                if bal <= 0:
-                    depth = 0
 
     # GNUBIN — see the header for scope and why heredoc bodies are out.
     if os.path.basename(path) not in GNUBIN_EXEMPT:
@@ -513,18 +378,7 @@ if [ "$SELF_TEST" = true ]; then
     # Positive controls. A linter nobody has proven can DETECT is decoration —
     # each fixture below is a real instance of the bug it names.
     _fx="$(mktemp -d)"
-    printf '%s\n' '#!/bin/bash' 'x="$(bash -c '"'"'source <(sed -n "1p" f); g'"'"')"' > "$_fx/srcsub.sh"
-    # APOSCS via the HEREDOC-carrying opener (the blind spot that cost a run).
-    {
-        echo '#!/bin/bash'
-        echo 'OUT="$(python3 - "$f" <<'"'"'PY'"'"''
-        echo '# a nested $(id -u) and a trailing quote here'"'"' break bash 3.2'
-        echo 'print(1)'
-        echo 'PY'
-        echo ')"'
-    } > "$_fx/aposcs2.sh"
     printf '%s\n' '#!/bin/bash' 'python3 -c "' '# the `sandy` binary' 'print(1)' '" arg' > "$_fx/pyback.sh"
-    printf '%s\n' '#!/bin/bash' 'out="$(' '  # shellcheck can'"'"'t see this' '  echo hi' ')"' > "$_fx/aposcs.sh"
     printf '%s\n' '#!/bin/bash' "jq --arg s x '" '  .a //= 1 |' "  # note: jq's //= is odd here" '  .b' "' file" > "$_fx/aposq.sh"
     printf '%s\n' '#!/bin/bash' 'L="$(grep -n PATTERN f | head -1 | cut -d: -f1)"' > "$_fx/grepm.sh"
     # Second GREPM shape: a cluster ending in an argument-taking flag whose
@@ -539,17 +393,6 @@ if [ "$SELF_TEST" = true ]; then
     # An unterminated heredoc opener must not blank the rest of the file: the
     # `timeout` below it still has to be reported.
     printf '%s\n' '#!/bin/bash' 'echo "a string mentioning <<EOF that never ends"' 'timeout 60 prog' > "$_fx/gnubin4.sh"
-    # CASESUB: the exact run-tests.sh §119 shape that aborted a macOS run.
-    printf '%s\n' '#!/bin/bash' 'M="$(prog --list 2>/dev/null | tr "," "\\n" \\' '    | sort -u \\' '    | while IFS= read -r k; do' '          case " $E " in *" $k "*) continue ;; esac' '          echo "$k"' '      done)"' > "$_fx/casesub.sh"
-    # CASESUB, the run-tests.sh §126 shape: a `$( {` group opener (which none of
-    # the other three opener rules match) carrying a one-line `case` buried
-    # mid-statement (which a start-of-line anchor cannot match). BOTH gaps had
-    # to close for this to be seen; it survived four releases while the tree
-    # linted clean.
-    printf '%s\n' '#!/bin/bash' '_f() {' '    out="$( {' '        trap - ERR' '        if [ -n "${3:-}" ]; then command(){ case "$2" in node|python3) return 1 ;; esac; builtin command "$@"; }; fi' '        echo done' '    } 2>&1 )"' '}' > "$_fx/casesub2.sh"
-    # And the leading-paren form of the SAME line must NOT fire -- a detector
-    # that flags the documented fix is worse than no detector.
-    printf '%s\n' '#!/bin/bash' '_f() {' '    out="$( {' '        trap - ERR' '        if [ -n "${3:-}" ]; then command(){ case "$2" in (node|python3) return 1 ;; esac; builtin command "$@"; }; fi' '        echo done' '    } 2>&1 )"' '}' > "$_fx/casesub2ok.sh"
     # GNUBIN: GNU-only BRE alternation. The exact run-tests.sh §127 shape --
     # silent empty output on BSD sed, never an error.
     printf '%s\n' '#!/bin/bash' 'v="$(prog | sed -n '"'"'s/.*"agents":\\(\\[[^]]*\\]\\|null\\).*/\\1/p'"'"')"' > "$_fx/gnubin5.sh"
@@ -559,7 +402,7 @@ if [ "$SELF_TEST" = true ]; then
     # heredoc body (container-side, bash 5).
     printf '%s\n' '#!/bin/bash' 'info "Probing ${_rsy_host}…"' 'cat <<EOF' 'Probing $_rsy_host…' 'EOF' > "$_fx/varmbok.sh"
     _fails=0
-    for probe in srcsub varmb pyback aposcs aposcs2 aposq casesub casesub2 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
+    for probe in varmb pyback aposq grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
@@ -570,11 +413,6 @@ if [ "$SELF_TEST" = true ]; then
         echo "  negative control OK: \${name} and heredoc bodies do not fire VARMB"
     else
         echo "SELF-TEST FAIL: VARMB flagged the braced fix or a heredoc body" >&2; _fails=$((_fails + 1))
-    fi
-    if python3 "$_scanner" "$_fx/casesub2ok.sh" >/dev/null 2>&1; then
-        echo "  negative control OK: the leading-paren case form does not fire"
-    else
-        echo "SELF-TEST FAIL: the (pattern) fix was flagged as a finding" >&2; _fails=$((_fails + 1))
     fi
     # The documented fix -- POSIX ERE -- must NOT fire, in either tool.
     {
@@ -589,7 +427,7 @@ if [ "$SELF_TEST" = true ]; then
         echo "SELF-TEST FAIL: the -E fix was flagged as a finding" >&2; _fails=$((_fails + 1))
     fi
     # Negative control: a clean file must produce nothing.
-    printf '%s\n' '#!/bin/bash' 'x="$(echo hi)"' '# a normal comment with an apostrophe, outside any $( )' > "$_fx/clean.sh"
+    printf '%s\n' '#!/bin/bash' 'x="$(echo hi)"' '# a normal comment with an apostrophe, outside any quoted program' > "$_fx/clean.sh"
     if python3 "$_scanner" "$_fx/clean.sh" >/dev/null 2>&1; then
         echo "  negative control OK: clean file produced no findings"
     else
@@ -624,16 +462,13 @@ if [ "$SELF_TEST" = true ]; then
 fi
 
 if python3 "$_scanner" "${FILES[@]}"; then
-    echo "bash-3.2 lint: clean (${#FILES[@]} files)"
+    echo "portability lint: clean (${#FILES[@]} files)"
     exit 0
 else
     echo "" >&2
-    echo "bash-3.2 lint FAILED — the above parse or expand differently on macOS" >&2
-    echo "  SRCSUB  use extract-then-eval: v=\"\$(sed -n '/^f()/,/^}/p' x)\"; bash -c \"\$v; f\"" >&2
-    echo "  VARMB   brace the variable: \"\${name}…\" -- bash 3.2 reads a following non-ASCII char as part of the name" >&2
+    echo "portability lint FAILED — the above break on macOS, or under any bash in a way CI does not reliably show" >&2
+    echo "  VARMB   brace the variable: \"\${name}…\" -- macOS libc reads a following non-ASCII byte as part of the name" >&2
     echo "  PYBACK  use a QUOTED heredoc: python3 - arg <<'PY' ... PY" >&2
-    echo "  APOSCS  reword the comment to avoid apostrophes" >&2
-    echo "  CASESUB hoist the case out of the \$( ), or use the leading-paren form (pattern)" >&2
     echo "  APOSQ   reword the comment; an apostrophe closes the single-quoted program" >&2
     echo "  GREPM   use 'grep -m1' instead of 'grep | head -1'; keep numeric flag args clear of -m" >&2
     echo "  GNUBIN  GNU-only on a BSD host: resolve timeout->gtimeout (or drop it), shasum -a 256," >&2

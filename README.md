@@ -120,6 +120,8 @@ Sandy works with any Docker-compatible runtime:
 - [Colima](https://github.com/abiosoft/colima)
 - [Lima](https://github.com/lima-vm/lima)
 
+Sandy also needs **bash 5 or newer** on the host. It is a bash script, run by the first `bash` on your `PATH`. Most Linux distributions ship bash 5. macOS ships bash 3.2 as `/bin/bash`, which sandy does not support, so install a current one with `brew install bash`, then open a new terminal and check that `bash --version` reports 5.x. Sandy does not check the version itself (see [Troubleshooting](docs/guide/troubleshooting.md#sandy-fails-oddly-on-macos-bash-32)).
+
 Not sure whether your machine is ready? Run the doctor script — it checks the host for everything sandy needs (Docker daemon reachable, git, curl, `gh` CLI for default token auth, Claude credentials, `$HOME/.local/bin` on PATH) and prints copy-pasteable install commands for anything missing. It never installs or modifies anything itself.
 
 ```bash

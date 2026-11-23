@@ -6379,17 +6379,17 @@ check "§88b no test anchors a JSON assertion across a neighbouring field (got: 
 unset _S88B _S88B_DIR _S88B_PAT
 
 # ============================================================
-section "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
+section "§89: macOS / BSD portability lint (the class CI structurally cannot see)"
 # ============================================================
-# CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
-# Several constructs parse or expand DIFFERENTLY there, so `bash -n` in CI
-# passes and the break only ever shows up on one machine. Every one has already
-# bitten this repo, each silent in a way that made it expensive:
+# CI is Ubuntu + GNU userland + glibc; the maintainer is macOS + bash 5 + BSD.
+# Several constructs behave DIFFERENTLY there, or break under any bash only
+# quietly, so `bash -n` in CI passes and the break shows up on one machine.
+# Every one has already bitten this repo, each silent in a way that made it
+# expensive:
 #
-#   §83  nested source <(...) inside $( )  -> exit 127, ERR trap, run aborted
 #   §68  backtick inside python3 -c "..."  -> the suite EXECUTED the real sandy
-#   §86  apostrophe in a comment in $( )   -> parse abort, yet the summary still
-#                                             printed "945 passed, 0 failed"
+#   #374 "$name…" unbraced before a non-ASCII char -> macOS libc reads the byte
+#                                             into the name, set -u aborts
 #   GNUBIN  a GNU-only binary on a BSD host. `timeout` cost THREE debugging
 #           rounds in one session (§108/§109 here, plus acceptance-handoff-dirs
 #           E8): exit 127, swallowed by `|| true`, and the assertion then
@@ -6413,11 +6413,16 @@ check "detectors self-test: clean file yields no findings" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "negative control OK"
 check "detectors self-test: GNUBIN probes are present" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: gnubin"
+# VARMB survived the 2026-11-21 retirement of the bash-3.2-only codes because
+# its hazard is Apple libc ctype, not the bash version (lint header). Pinned so
+# a later cleanup cannot drop it as "a bash 3.2 thing".
+check "detectors self-test: VARMB probe is present (macOS libc hazard under any bash)" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: varmb"
 check "detectors self-test: GNUBIN ignores portable constructs" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "GNUBIN does not fire"
 
 # The actual guard.
-check "repo shell scripts are free of bash-3.2 hazards" \
+check "repo shell scripts are free of macOS / BSD portability hazards" \
     bash -c 'bash "$1" >/dev/null 2>&1' -- "$_S89"
 
 # Scope: silently dropping sandy or run-tests.sh from the target set would make

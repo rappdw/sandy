@@ -86,7 +86,7 @@ bash test/run-tests.sh --only container  # real launcher/entrypoint; Docker host
 bash test/run-tests.sh --only proxy  # Go race tests
 bash test/run-tests.sh              # all five groups; Docker host only
 bash test/run-integration-tests.sh  # headless end-to-end (API keys); SANDY_INTEG_ONLY / SANDY_INTEG_SKIP
-bash test/lint-bash32.sh            # bash-3.2 / BSD portability lint (also run by §89)
+bash test/lint-bash32.sh            # macOS / BSD portability lint (also run by §89; the name is historical)
 ```
 
 Acceptance harnesses (`test/acceptance-*.sh`) run against an isolated `$SANDY_HOME` (`test/lib-isolated-home.sh`). Fixtures in a real home look exactly like real sandboxes. `docs/TESTING_PLAN.md` covers manual TUI checks and the integration runner's isolation and success rules.
@@ -107,21 +107,19 @@ How to write tests here:
 - Assert an agent `docker run` flag on the stub-recorded argv: call `_fx_a6` at the top of the section, add an `_a6_launch` case, read it with `_a6_agent_args` + `_a6_pair` (hardening: `_fx_hardening`, then `_hardening_unmet`; proxy: §207), and end the section with `_a6_done`, which fails for a background launch the section never joined. Grep `sandy` (a pattern there also matches comments and the proxy's run) only for the daemon run no stub launches (§225(2)).
 - `.test_output/latest/host.log` has per-section `TIMING` lines: compare before and after editing a slow one.
 
-## Portability: CI is Linux/bash 5, the maintainer is macOS/bash 3.2/BSD
+## Portability: CI is Linux/GNU, the maintainer is macOS/BSD
 
-Host-side shell must work on both. Container-side code (heredoc bodies, `user-setup.sh`) runs on Linux. `test/lint-bash32.sh` catches these. Each has broken a real macOS run while CI stayed green:
+Host-side shell must run on Linux and on macOS with bash 5 and BSD userland. Sandy requires bash 5 on the host (macOS: Homebrew bash; `/bin/bash` 3.2 is unsupported), so bash 4/5 features are fine; `sandy` and `install.sh` still must not refuse or warn under an older bash. Container-side code (heredoc bodies, `user-setup.sh`) runs on Linux. `test/lint-bash32.sh` catches these. Each has broken a real run while `bash -n` passed (most only on macOS, with CI green):
 
 | Code | Don't | Do |
 |---|---|---|
-| `SRCSUB` | `source <(...)` nested in `$( )` | extract, then `eval` |
-| `VARMB` | `$name` directly followed by a non-ASCII char (`"$host…"`) | `${name}…` |
+| `VARMB` | `$name` directly followed by a non-ASCII char (`"$host…"`; macOS libc reads the byte into the name, any bash) | `${name}…` |
 | `PYBACK` | backtick or `$(` inside `python3 -c "..."` | quoted heredoc: `python3 - <<'PY'` |
-| `APOSQ` / `APOSCS` | an apostrophe in a comment inside a multi-line `'...'` argument or `$( )` | reword the comment |
-| `CASESUB` | a `case` pattern inside a multi-line `$( )` | hoist it, or use the `(pattern)` form |
+| `APOSQ` | an apostrophe in a comment inside a multi-line `'...'` argument | reword the comment |
 | `GREPM` | `grep … \| head` under `pipefail` | `grep -m1` |
 | `GNUBIN` | `timeout`, `sha256sum`, `realpath`, `date -d`, `grep -P`, `stat -c`, `sed -i` without a suffix, `xargs -r`, `find -printf`, `sleep infinity`, `\|` in a `sed` BRE | a BSD fallback, `shasum -a 256`, `sed -E`, `sed -i ''`, a poll loop |
 
-Other macOS traps: `mktemp -d` returns a symlinked path, so canonicalize it (`D="$(cd "$(mktemp -d)" && pwd -P)"`); `wc -l` pads its output with leading spaces; an empty array under `set -u` is an error; there is no `setsid`. Container-side code outside a heredoc needs `# lint-bash32: allow GNUBIN`.
+Other macOS traps: `mktemp -d` returns a symlinked path, so canonicalize it (`D="$(cd "$(mktemp -d)" && pwd -P)"`); `wc -l` pads its output with leading spaces; there is no `setsid`. Container-side code outside a heredoc needs `# lint-bash32: allow GNUBIN`.
 
 ## Working inside sandy (you probably are)
 

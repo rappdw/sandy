@@ -963,14 +963,14 @@ Integration knobs: `SANDY_INTEG_ONLY=7,13` / `SANDY_INTEG_SKIP=19,20,21` (exact-
 
 **Write tests that assert the property, not the presence of a mechanism.** A check that greps for `flock -n 9` passes on code where the guard is dead; the dynamic singleton test that actually starts three relays does not. Mutation-test new guards.
 
-#### bash-3.2 / BSD portability lint (`test/lint-bash32.sh`)
+#### macOS / BSD portability lint (`test/lint-bash32.sh`)
 
-CI is Ubuntu + bash 5 + GNU userland; the maintainer's machine is macOS + bash 3.2 + BSD. These constructs parse or expand **differently** there, so `bash -n` in CI passes and the break surfaces on one machine only — each in a way that does not announce itself:
+CI is Ubuntu + bash 5 + GNU userland + glibc; the maintainer's machine is macOS + BSD userland + Apple's libc (and, until 2026-11, bash 3.2). These constructs parse or expand **differently** there, or break under any bash in a way CI does not reliably show, so `bash -n` in CI passes and the break surfaces on one machine only — each in a way that does not announce itself. The table is the lint's history; the 2026-11-21 note below says which codes it still runs.
 
 | Code | Construct | How it failed here |
 |---|---|---|
 | `SRCSUB` | nested `source <(...)` inside `$( )` | bash 3.2 sources nothing → exit 127 → ERR trap aborted the run (§83) |
-| `VARMB` | an **unbraced** `$name` immediately followed by a non-ASCII character (`"Probing $host…"`) | bash 3.2 reads the bytes of the `…` as part of the **name**, looks up a variable that does not exist, and `set -u` aborts: `_rsy_host�: unbound variable`. bash 5 ends the name at the first non-ASCII byte, so CI never sees it. The first macOS run of `sandy --rsync` died on it (#374). Heredoc bodies are skipped (container-side, bash 5) |
+| `VARMB` | an **unbraced** `$name` immediately followed by a non-ASCII character (`"Probing $host…"`) | bash on macOS reads the bytes of the `…` as part of the **name**, looks up a variable that does not exist, and `set -u` aborts: `_rsy_host�: unbound variable`. On Linux the name ends at the first non-ASCII byte, so CI never sees it. The first macOS run of `sandy --rsync` died on it (#374), under bash 3.2; it is **not** a bash-3.2 bug (see the 2026-11-21 note). Heredoc bodies are skipped (container-side, Linux) |
 | `PYBACK` | backtick or `$(` inside a **double-quoted** `python3 -c "..."` body | bash expands it regardless of Python comment syntax — a `` `sandy` `` in a comment made the suite **execute the real sandy binary** (§68) |
 | `APOSQ` | apostrophe in a comment inside a multi-line **single-quoted** program argument (`jq '...'`, `awk '...'`) | the apostrophe closes the string and the shell reinterprets the rest as code |
 | `GREPM` | `grep -n … \| head` under `pipefail`, or a flag cluster whose numeric argument was split off before `-m` | grep dies on `EPIPE` (exit 2) and the ERR trap **aborts the suite mid-run** — a race, so it passes locally and fails in CI |
@@ -990,7 +990,15 @@ bash test/lint-bash32.sh [--self-test|--list]
 
 `run-tests.sh §89` asserts both that the tree is clean **and** that the detectors still fire on known-bad fixtures.
 
-Also note (from real macOS runs): new test sections must be BSD/bash-3.2-safe or they pass CI and fail the maintainer — watch `\$`-literal-in-awk, `wc -l` leading whitespace, and empty-array expansion under `set -u`. **`mktemp -d` returns a symlink on macOS** (`/var/folders/…` → `/private/var/folders/…`), so a fixture that uses it as `$HOME` and then relies on sandy's `$HOME`-relative workspace mapping silently takes the fallback path: sandy canonicalizes the workspace with `pwd -P` but takes `$HOME` as given, the prefix stops matching, and `-w` becomes a host path. Cost §120(4)/§120(14), macOS-only, invisible in CI where `/tmp` is not a symlink. Canonicalize at creation: `D="$(cd "$(mktemp -d)" && pwd -P)"`. When extracting a section to validate locally, replicate `set -euo pipefail` **and** the ERR trap, or the harness cannot see an unguarded non-zero exit.
+**2026-11-21: bash 5 is the host requirement; three codes retired.** The maintainer decided that sandy requires bash 5 on the host (macOS: Homebrew bash; the `PATH` bash on the maintainer's Mac had been Homebrew 5.3 since about 2026-11-18) and that only the requirement is documented: `sandy` and `install.sh` neither refuse nor warn under an older bash, while the host test suite refuses (#589). Each detector's hazard example was then run under bash 5.2 with `set -euo pipefail`, and a code was retired only if bash 5 ran its example correctly:
+
+- **Retired**: `SRCSUB` (`source <(...)` inside `$( )` sourced the function), `APOSCS` (apostrophes and unbalanced parens in comments inside a multi-line `$( )`, including the heredoc-carrying opener, parsed and ran), `CASESUB` (both the §119 and the §126 shapes parsed and ran). All three were bash-3.2 parser bugs; bash 4.0 began parsing `$( )` with the real parser to find its end.
+- **Kept**: `PYBACK` (bash 5 ran the backticks inside the Python comment), `APOSQ` (bash 5: `unexpected EOF while looking for matching '`), `GREPM` (`grep -n | head -1` failed 20 of 20 runs on a 400k-line input; `-nB -m10` exits 2), `GNUBIN` (BSD userland, independent of bash).
+- **Kept, against the first reading**: `VARMB`. bash 5.3 still ends a variable name with `isalnum()` from libc (`legal_variable_char` in `general.h`). Apple's ctype in a UTF-8 locale treats byte 0xE2 as U+00E2, a letter; glibc does not. bash 5.2 with an `LD_PRELOAD` that classifies 0xE2 as alpha aborts on `"Probing $_rsy_host…"` with `_rsy_host�: unbound variable`, exactly as #374 did. So the hazard is macOS libc, not the bash version.
+
+The file keeps its name (it is referenced from many places), and its header says the name is historical and lists the retired codes so the comments that cite them still resolve.
+
+Also note (from real macOS runs): new test sections must be BSD-safe or they pass CI and fail the maintainer — watch `\$`-literal-in-awk and `wc -l` leading whitespace. (Empty-array expansion under `set -u` was a bash < 4.4 trap and no longer applies.) **`mktemp -d` returns a symlink on macOS** (`/var/folders/…` → `/private/var/folders/…`), so a fixture that uses it as `$HOME` and then relies on sandy's `$HOME`-relative workspace mapping silently takes the fallback path: sandy canonicalizes the workspace with `pwd -P` but takes `$HOME` as given, the prefix stops matching, and `-w` becomes a host path. Cost §120(4)/§120(14), macOS-only, invisible in CI where `/tmp` is not a symlink. Canonicalize at creation: `D="$(cd "$(mktemp -d)" && pwd -P)"`. When extracting a section to validate locally, replicate `set -euo pipefail` **and** the ERR trap, or the harness cannot see an unguarded non-zero exit.
 
 ### Git branch work inside sandy
 

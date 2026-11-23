@@ -1604,6 +1604,8 @@ The category list below covers the founding sections and is not exhaustive — l
 
 ### `install.sh` Flow
 
+Host requirement: bash 5 or newer as the first `bash` on `PATH` (Appendix D.0). `install.sh` does not check it.
+
 1. **Preflight warnings** (non-blocking): Docker installed? Node.js installed? GitHub CLI authenticated?
 2. **Create install directory**: Default `~/.local/bin`
 3. **Download or copy**: If `LOCAL_INSTALL` env var set, copy local file; otherwise download from GitHub
@@ -2697,6 +2699,17 @@ Because the file is a `:ro` bind mount, a committed workspace `.sandy/config` ca
 ## Appendix D: Platform-Specific Behavior
 
 Sandy runs on both Linux and macOS. The following sections document every point where behavior diverges.
+
+### D.0 Host shell: bash 5 or newer
+
+| Aspect | Linux | macOS |
+|---|---|---|
+| Interpreter | first `bash` on `PATH` (`sandy` and `install.sh` start with `#!/usr/bin/env bash`) | same |
+| Required version | bash 5 or newer | bash 5 or newer; `/bin/bash` is 3.2.57 and unsupported, so install Homebrew's (`brew install bash`) and put it ahead of `/bin` on `PATH` |
+| Typical default | bash 5 | bash 3.2 (`/bin/bash`) unless Homebrew bash is installed |
+| Userland | GNU coreutils, sed, grep, awk | BSD; host-side code uses only forms both accept (no `timeout`, `stat -c`, `sed -i` without a suffix, `date -d`, `realpath`, `setsid`, …) |
+
+Requirement only, not enforcement (decided 2026-11-21): `sandy` and `install.sh` do not check the bash version, and neither refuses nor warns under an older bash; behavior under bash < 5 is undefined. The host test suite (`test/run-tests.sh`) does refuse under bash < 5, naming the bash it found. Container-side code runs on the image's Debian bash and is unaffected.
 
 ### D.1 Network Isolation
 
