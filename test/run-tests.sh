@@ -7118,6 +7118,39 @@ PY
 check "§92(f) --validate-config missing-file errors[] is non-empty" \
     python3 "$_S92_ERRORS_PY" "$_s92f_out"
 
+# --- (f2) #583: a file with no KEY=VALUE line (empty, comments only, blank
+# lines only) is valid: exit 0, stderr 0 bytes, one JSON document with no
+# errors, warnings or keys. Before, the key reader's grep found no line and
+# exited 1 under the handler's ERR trap, which printed "introspection handler
+# failed" on stderr (the JSON and the exit code were right).
+_S92_EMPTY_PY="$(mktemp)"
+cat > "$_S92_EMPTY_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for k in ("errors", "warnings", "unknown_keys", "privileged_keys_requiring_approval"):
+    assert d.get(k) == [], "%s: %r" % (k, d.get(k))
+assert d.get("approval_status") == "none_required", d.get("approval_status")
+PY
+mkdir -p "$_S92_TMP/ws92e/.sandy"
+for _s92f2 in empty comments blank; do
+    case "$_s92f2" in
+        empty) : > "$_S92_TMP/ws92e/.sandy/config" ;;
+        comments) printf '# SANDY_MODEL=x is commented out\n# nothing else\n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+        blank) printf '\n\n   \n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+    esac
+    _s92f2_out="$_S92_TMP/f2-$_s92f2.out"; _s92f2_err="$_S92_TMP/f2-$_s92f2.err"; _s92f2_rc=0
+    env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+        bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92e/.sandy/config" >"$_s92f2_out" 2>"$_s92f2_err" </dev/null || _s92f2_rc=$?
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) exits 0 (#583)" test "$_s92f2_rc" -eq 0
+    _s92_diag "$_s92f2_err" "§92(f2) --validate-config ($_s92f2)"
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) writes 0 bytes to stderr (got: $(_s92_pv "$_s92f2_err"); mutation: the key reader without || true)" \
+        bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f2_err"
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) prints one JSON document with no errors, warnings or keys" \
+        bash -c 'python3 "$1" "$2" && python3 "$3" "$2"' -- "$_S92_PURITY_PY" "$_s92f2_out" "$_S92_EMPTY_PY"
+done
+rm -f "$_S92_EMPTY_PY"
+unset _s92f2 _s92f2_out _s92f2_err _s92f2_rc _S92_EMPTY_PY
+
 # --- (g) --validate-config with NO argument -> exit 1, stdout 0 bytes, stderr has ERROR ---
 _s92g_out="$_S92_TMP/g.out"; _s92g_err="$_S92_TMP/g.err"; _s92g_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
@@ -28973,7 +29006,7 @@ _S250_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S250_A" ]; then echo "launch rc $
     _a6_pair "$_S250_A" -e SANDY_AGENT=claude || echo "no -e SANDY_AGENT=claude"
     if grep -qxF "SANDY_AGENT=claude," "$_S250_A"; then echo "the trailing comma reached the container"; fi
     grep -qxF sandy-claude-code "$_S250_A" || echo "not the single-agent claude image"
-    grep -qF "$_S250_W/.claude/skills/ (existed at launch with no sandbox overlay" "$_S250_O" || echo "the .claude/skills edit is not reported"; } 2>&1)" || true
+    grep -qF "$_S250_W/.claude/skills/ (existed at launch and is not overlaid in any session; its contents changed)" "$_S250_O" || echo "the .claude/skills edit is not reported"; } 2>&1)" || true
 if [ -n "$_S250_R" ]; then _a6_diag "§250(d)" "$_S250_C"; fi
 check "§250(d) SANDY_AGENT=claude, runs as SANDY_AGENT=claude with the claude image, and an edit to an existing .claude/skills is still reported (mutation: drop the rejoin after validation; ${_S250_R:-ok})" \
     test -z "$_S250_R"
@@ -32839,10 +32872,11 @@ _S245_L="$(_s245_run SK2 launch claude)"
 _S245_SNAP="$(cat "$_S245_D/SK2/sb/.protected-existed-at-launch")"
 printf 'evil\n' >> "$_S245_D/SK2/ws/.claude/skills/mine/SKILL.md"
 _S245_OUT="$(_s245_run SK2 end claude)"
-check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
+check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed, worded as not overlaid in any session (#585), with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -q "skills" \
              && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" && ! printf "%s\n" "$3" | grep -qFx ".claude/skills" \
-             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch and is not overlaid in any session; its contents changed)" \
+             && ! printf "%s" "$1" | grep -qF "no sandbox overlay for this agent" \
              && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/SK2/ws" "$_S245_SNAP" "$_S245_L"
 mkdir -p "$_S245_D/SK3/ws/.claude/skills/mine"; printf 'mine\n' > "$_S245_D/SK3/ws/.claude/skills/mine/SKILL.md"
 _S245_L="$(_s245_run SK3 launch claude)"
@@ -32856,7 +32890,7 @@ printf 'evil\n' >> "$_S245_D/SK4/ws/.claude/skills/mine/SKILL.md"
 _S245_OUT="$(_s245_run SK4 end claude,)"
 check "§245(24b) SANDY_AGENT=claude, (a trailing comma the validator accepts): an existing .claude/skills is still fingerprinted and its edit reported (mutation: _sandy_agent_has matching an empty name, with the detection site trusting it)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" \
-             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/SK4/ws" "$_S245_SNAP"
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch and is not overlaid in any session"' _ "$_S245_OUT" "$_S245_D/SK4/ws" "$_S245_SNAP"
 _S245_L="$(_s245_run GX1 launch gemini)"
 mkdir -p "$_S245_D/GX1/ws/.gemini/extensions/evil"; printf '{"name":"evil","mcpServers":{"x":{"command":"sh"}}}\n' > "$_S245_D/GX1/ws/.gemini/extensions/evil/gemini-extension.json"
 _S245_OUT="$(_s245_run GX1 end gemini)"
@@ -32902,7 +32936,8 @@ for _s245_p in .gemini/agents .gemini/skills .gemini/policies .agents/skills; do
         check "§245(30) $_s245_ag session: an existing $_s245_p is fingerprinted, gets no mount, and an edit to it is reported as changed with no rm -rf (mutation: mapping $_s245_p to $_s245_ag in _sandy_overlay_detect_agent)" \
             bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -qF "$5" \
                      && printf "%s\n" "$3" | grep -qF "#content	$5	" && ! printf "%s\n" "$3" | grep -qFx "$5" \
-                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch with no sandbox overlay" \
+                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch and is not overlaid in any session; its contents changed)" \
+                     && ! printf "%s" "$1" | grep -qF "no sandbox overlay for this agent" \
                      && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/NB$_s245_n$_s245_ag/ws" "$_S245_SNAP" "$_S245_L" "$_s245_p"
     done
     mkdir -p "$_S245_D/NC$_s245_n/ws/$_s245_p/mine"; printf 'mine\n' > "$_S245_D/NC$_s245_n/ws/$_s245_p/mine/x.md"
@@ -33941,9 +33976,28 @@ check "§256(f) the snapshot lookup answers as grep -qFx and the awk lookup do, 
                  a=0; grep -qFx "$k" "$f" || a=1; b=0; _sandy_snap_scan "$f" = "$k" || b=1
                  [ "$a" = "$b" ] || { echo "= $k: $a $b"; exit 1; }
              done' _ "$_S256_SNAP" "$_S256_SCAN"
+# (g) #592: a key starting with `-` is a pattern, never an option. `-n` and
+# `-e` are lines of the snapshot (and `-n` a #id key); before, grep read
+# `-n` as its -n flag and took the snapshot path for the pattern, so it read
+# stdin (here /dev/null: an answer of "absent" instead of a block) and the
+# lookup said 1. `-x` is absent. Both halves of the function are asked: a
+# `-` key always goes to the command, and so does every key of the long
+# snapshot past line 200.
+_S256_DSNAP="$_S256_D/dash.snap"
+printf '%s\n' '#gitdirs-recorded' '-n' '-e' "$(printf '#id\t-n\tvn')" > "$_S256_DSNAP"
+cat "$_S256_SNAP" "$_S256_DSNAP" > "$_S256_D/dash-long.snap"
+check "§256(g) a snapshot key starting with - (-n, -e) is looked up as a pattern: found when it is a line, not found when absent, its #id value read, in a short snapshot and past line 200 of a long one, with stdin at end of file (mutation: grep -qFx without -e and -- answers absent for -n and -e; #592)" \
+    bash -c 'eval "$2"; [ -n "$(declare -F _sandy_snap_scan)" ] || exit 1
+             for f in "$1" "$3"; do
+                 n=0
+                 for k in -n -e; do _sandy_snap_scan "$f" = "$k" || { echo "= $k not found in $f"; exit 1; }; n=$((n + 1)); done
+                 if _sandy_snap_scan "$f" = -x; then echo "= -x found in $f"; exit 1; fi
+                 _sandy_snap_scan "$f" "#id" -n v; [ "$v" = xvn ] || { echo "#id -n: [$v] in $f"; exit 1; }
+                 [ "$n" = 2 ] || exit 1
+             done' _ "$_S256_DSNAP" "$_S256_SCAN" "$_S256_D/dash-long.snap" </dev/null
 _a6_done
 unset -f _s256_shims _s256_count
-unset _S256_SNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
+unset _S256_SNAP _S256_DSNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
 echo ""
 
 # ============================================================

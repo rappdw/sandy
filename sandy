@@ -2471,13 +2471,14 @@ _sandy_same_object() {
 }
 # Look snapshot file $1 up the way the session end always has, with no
 # process. With $2 "=": true when a line of it is exactly $3, as
-# `grep -qFx "$3" "$1"`. Otherwise variable $4 gets what
+# `grep -qFx -e "$3" -- "$1"`. Otherwise variable $4 gets what
 # `awk -F '\t' -v p="$3" '$1 == "<$2>" && $2 == p { print "x" $3; exit }' "$1"`
 # printed: "x" and the third field of the first line whose fields 1 and 2 are
 # $2 and $3, or nothing. A $3 that command could read differently is looked
 # up by that very command instead, so the answer is always that command's: one
 # holding anything but plain path characters (an awk -v escape, a byte of
-# another encoding), one starting with `-` (an option to grep), and, for awk,
+# another encoding), one starting with `-` (kept on the command, which takes
+# it as a pattern: grep -e, and awk -v p=-x is a value), and, for awk,
 # one that could look numeric (awk compares two numeric-looking strings as
 # numbers: `1e3 == 1000`). A key that holds a character no number has (`/`,
 # most letters, `_`) cannot, nor can a hex key with a letter in it.
@@ -2530,7 +2531,10 @@ _sandy_snap_scan() {
         fi
     fi
     if [ "$2" = "=" ]; then
-        if grep -qFx "$3" "$1" 2>/dev/null; then return 0; fi
+        # -e and --: a key starting with `-` is a pattern, never an option
+        # (#592: `-n` made grep take the snapshot path as the pattern and read
+        # stdin).
+        if grep -qFx -e "$3" -- "$1" 2>/dev/null; then return 0; fi
         return 1
     fi
     printf -v "$4" '%s' "$(awk -F '\t' -v p="$3" -v k="$2" '$1 == k && $2 == p { print "x" $3; exit }' "$1" 2>/dev/null || true)"
@@ -3834,8 +3838,15 @@ _sandy_session_end_protected_report() {
                         esac
                     fi
                 elif [ "$_e" != "$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
-                        "$WORK_DIR" "$_p" >&2
+                    # #585: an entry no agent overlays (.claude/skills and the
+                    # 2.10.1 four) is not "missing an overlay for this agent".
+                    if [ -n "$(_sandy_overlay_detect_agent "$_p")" ]; then
+                        printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
+                            "$WORK_DIR" "$_p" >&2
+                    else
+                        printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch and is not overlaid in any session; its contents changed)\n" \
+                            "$WORK_DIR" "$_p" >&2
+                    fi
                 elif [ -d "$WORK_DIR/$_p" ]; then
                     printf "${YELLOW}[sandy]${NC}   %s/%q/\n" "$WORK_DIR" "$_p" >&2
                     _rm_args="$_rm_args $(printf '%q' "$_p")/"
@@ -6964,7 +6975,7 @@ _sandy_validate_config() {
             else
                 unknown+=("$key")
             fi
-        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
+        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null || true)
     fi
 
     # For passive sources with privileged keys, compute the same approval
@@ -6980,7 +6991,7 @@ _sandy_validate_config() {
                || _sandy_passive_value_privileged "$key" "$value" "$(_sandy_privileged_baseline "$key")"; then
                 kv_set+="$key=$value"$'\n'
             fi
-        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
+        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null || true)
         sorted="$(printf '%s' "$kv_set" | sort -u)"
         if command -v sha256sum >/dev/null 2>&1; then
             set_hash="$(printf '%s' "$sorted" | sha256sum | awk '{print $1}')"
