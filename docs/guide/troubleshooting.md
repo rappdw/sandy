@@ -2,6 +2,37 @@
 
 Known problems and their fixes. Part of the [sandy guides](README.md); back to the [project README](../../README.md).
 
+## Sandy fails oddly on macOS (bash 3.2)
+
+**Symptom.** On a Mac, `sandy` stops with an error that seems to have nothing
+to do with what you asked for, for example a shell error such as `unbound
+variable` or `syntax error`.
+
+**Cause.** Sandy requires bash 5 or newer on the host. `sandy` and `install.sh`
+start with `#!/usr/bin/env bash`, so they run under the first `bash` on your
+`PATH`. On a Mac without Homebrew's bash, that is `/bin/bash`, which is bash
+3.2.57. `sandy` and `install.sh` do not check the version and do not refuse to
+start. Under an older bash sandy is unsupported and may fail anywhere in a
+launch; one that works today is no promise for the next release. `sandy
+--doctor` (or the standalone `doctor.sh`) does check: under bash 4 or older its
+Required section shows `! bash 3.2.57 (/bin/bash) is too old: sandy requires
+bash 5 or newer` with the fix below. It is a warning, so the doctor still exits
+0 when the required checks pass.
+
+**Fix.** Install a current bash and put it first on `PATH`:
+
+```bash
+brew install bash
+# open a new terminal, then:
+command -v bash      # /opt/homebrew/bin/bash (Apple silicon) or /usr/local/bin/bash (Intel)
+bash --version       # GNU bash, version 5.x
+```
+
+If `command -v bash` still prints `/bin/bash`, Homebrew's `bin` directory is not
+ahead of `/bin` on your `PATH`; add `eval "$(/opt/homebrew/bin/brew shellenv)"`
+(Intel: `/usr/local/bin/brew`) to your shell's startup file. Your login shell
+does not need to change. Linux distributions already ship bash 5.
+
 ## The build hangs at "Building sandbox image" on a VM (generic CPU model)
 
 **Symptom.** On a QEMU/KVM virtual machine — Proxmox is the common case — the

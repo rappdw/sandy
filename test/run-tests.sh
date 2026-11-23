@@ -6379,17 +6379,15 @@ check "§88b no test anchors a JSON assertion across a neighbouring field (got: 
 unset _S88B _S88B_DIR _S88B_PAT
 
 # ============================================================
-section "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
+section "§89: macOS / BSD portability lint (the class CI structurally cannot see)"
 # ============================================================
-# CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
-# Several constructs parse or expand DIFFERENTLY there, so `bash -n` in CI
-# passes and the break only ever shows up on one machine. Every one has already
-# bitten this repo, each silent in a way that made it expensive:
+# CI is Ubuntu + GNU userland; the maintainer is macOS + bash 5 + BSD.
+# Several constructs behave DIFFERENTLY there, or break under any bash only
+# quietly, so `bash -n` in CI passes and the break shows up on one machine.
+# Every one has already bitten this repo, each silent in a way that made it
+# expensive:
 #
-#   §83  nested source <(...) inside $( )  -> exit 127, ERR trap, run aborted
 #   §68  backtick inside python3 -c "..."  -> the suite EXECUTED the real sandy
-#   §86  apostrophe in a comment in $( )   -> parse abort, yet the summary still
-#                                             printed "945 passed, 0 failed"
 #   GNUBIN  a GNU-only binary on a BSD host. `timeout` cost THREE debugging
 #           rounds in one session (§108/§109 here, plus acceptance-handoff-dirs
 #           E8): exit 127, swallowed by `|| true`, and the assertion then
@@ -6413,11 +6411,20 @@ check "detectors self-test: clean file yields no findings" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "negative control OK"
 check "detectors self-test: GNUBIN probes are present" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: gnubin"
+# The codes that survived the 2026-11-21 retirement of the bash-3.2-only ones,
+# pinned by probe so a later cleanup cannot drop one as "a bash 3.2 thing":
+# PYBACK, GREPM, and APOSQ including its span and `bash -c` openers and spans
+# in generated scripts (aposq2-5; they break bash 5 too, lint header).
+for _s89_p in pyback aposq aposq2 aposq3 aposq4 aposq5 grepm; do
+    check "detectors self-test: the $_s89_p probe is present and fires" \
+        bash -c 'printf "%s\n" "$1" | grep -qxF "$2"' _ "$_S89_SELF_OUT" "  detector OK: $_s89_p"
+done
+unset _s89_p
 check "detectors self-test: GNUBIN ignores portable constructs" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "GNUBIN does not fire"
 
 # The actual guard.
-check "repo shell scripts are free of bash-3.2 hazards" \
+check "repo shell scripts are free of macOS / BSD portability hazards" \
     bash -c 'bash "$1" >/dev/null 2>&1' -- "$_S89"
 
 # Scope: silently dropping sandy or run-tests.sh from the target set would make
@@ -7330,7 +7337,8 @@ check "§94(3) SANDY_TEAMMATE_MODE has a _sandy_key_metadata row with an EMPTY d
 
 # --- behavior: default preserved, opt-out honored ---------------------------
 # build_claude_cmd runs container-side; extract-then-eval with its two callees
-# stubbed so we can read the composed command. Never source <(...) — SRCSUB.
+# stubbed so we can read the composed command. (Not source <(...): bash-3.2
+# era, SRCSUB; not needed under bash 5.)
 # A temp script, not a shell function: the checks below run via `bash -c`, which
 # does NOT inherit functions from this shell. (Verified the hard way — as a
 # function, checks 5 and 6 passed VACUOUSLY on empty output.)
@@ -8485,6 +8493,49 @@ check "§101(g) reports exactly 2 orphaned sandbox(es)" \
 check "§101(g) --fix --yes never removes an orphaned sandbox directory" \
     bash -c 'test -d "$1/sandboxes/orphan-a-8881" && test -d "$1/sandboxes/orphan-b-8882"' -- "$_S101_H9"
 rm -rf "$_S101_H9"
+
+# --- (j) an old bash is a WARNING in Required, never a failure (2026-11-23).
+# The suite itself refuses bash < 5, so the old bash is simulated test-side:
+# the doctor body is extracted from sandy and its version test rewritten to
+# see major 4 (the product has no hook for this). A uname stub reports Darwin,
+# so the macOS fix text is what gets asserted. Same docker stub as (a).
+_S101_UNAME="$(command -v uname)"
+_S101_MACBIN="$(mktemp -d)"
+printf '#!/bin/sh\n[ "$1" = -s ] && { echo Darwin; exit 0; }\nexec "%s" "$@"\n' "$_S101_UNAME" > "$_S101_MACBIN/uname"
+chmod +x "$_S101_MACBIN/uname"
+_S101_DOC5="$_S101_MACBIN/doctor-host.sh"
+_S101_DOC4="$_S101_MACBIN/doctor-host-bash4.sh"
+awk '/^_sandy_doctor_host\(\) \{/{f=1; next} f && /^SANDY_DOCTOR_HOST$/{exit} f' "$_S101_SANDY" | sed '1d' > "$_S101_DOC5"
+sed 's/"${BASH_VERSINFO\[0\]:-0}" -ge 5/"4" -ge 5/' "$_S101_DOC5" > "$_S101_DOC4"
+_S101_BASH="$(PATH="$_S101_MACBIN:$_S101_BIN:$PATH" command -v bash)"
+check "§101(j0) premise: the doctor body was extracted and the version test rewritten exactly once (mutation: a renamed function or test leaves this red, so (j1-j6) cannot pass vacuously)" \
+    bash -c 'head -1 "$1" | grep -qx "#!/usr/bin/env bash" && [ "$(grep -c "\"4\" -ge 5" "$2")" = 1 ]' -- "$_S101_DOC5" "$_S101_DOC4"
+_S101_RC_J4=0
+_S101_OUT_J4="$(PATH="$_S101_MACBIN:$_S101_BIN:$PATH" bash "$_S101_DOC4" 2>&1)" || _S101_RC_J4=$?
+_S101_RC_J5=0
+_S101_OUT_J5="$(PATH="$_S101_MACBIN:$_S101_BIN:$PATH" bash "$_S101_DOC5" 2>&1)" || _S101_RC_J5=$?
+_S101_REQ_J4="$(printf '%s\n' "$_S101_OUT_J4" | awk '/^Required$/{f=1; next} f && /^$/{exit} f')"
+_S101_REQ_J5="$(printf '%s\n' "$_S101_OUT_J5" | awk '/^Required$/{f=1; next} f && /^$/{exit} f')"
+check "§101(j1) both doctor runs completed and printed a Required section and a Summary (the probe ran)" \
+    bash -c 'for o in "$1" "$2"; do printf "%s" "$o" | grep -qx "Summary" || exit 1; done; [ -n "$3" ] && [ -n "$4" ]' -- \
+    "$_S101_OUT_J4" "$_S101_OUT_J5" "$_S101_REQ_J4" "$_S101_REQ_J5"
+check "§101(j2) bash major < 5: Required shows the warning naming the interpreter and the bash 5 requirement (mutation: the < 5 branch dropped -> the plain ok line comes back)" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "  ! bash " && printf "%s\n" "$1" | grep -qF " ($2) is too old: sandy requires bash 5 or newer"' -- "$_S101_REQ_J4" "$_S101_BASH"
+check "§101(j3) bash major < 5: no ok-bash line in Required" \
+    bash -c '! printf "%s\n" "$1" | grep -q "✓ bash"' -- "$_S101_REQ_J4"
+check "§101(j4) bash major < 5 on macOS: the fix says the first bash on PATH is used, brew install bash, and the Homebrew PATH line" \
+    bash -c 'for n in "first \`bash\` on PATH (#!/usr/bin/env bash)" "brew install bash" "brew shellenv" "bash --version"; do printf "%s" "$1" | grep -qF "$n" || exit 1; done' -- "$_S101_OUT_J4"
+# The warning convention: warn() counts a RECOMMENDED item and never changes
+# the exit code. So the old-bash run exits as the bash-5 run does, with one
+# more recommended item.
+_s101_recs() { printf '%s\n' "$1" | sed -n 's/^  \([0-9][0-9]*\) recommended item(s) to address\.$/\1/p'; }
+check "§101(j5) bash major < 5 follows the warning convention: same exit code as bash 5 (here $_S101_RC_J5), required checks still pass, one more recommended item" \
+    bash -c '[ "$1" -eq "$2" ] && printf "%s" "$3" | grep -qF "All required checks passed." && [ "${4:-0}" -eq $(( ${5:-0} + 1 )) ]' -- \
+    "$_S101_RC_J4" "$_S101_RC_J5" "$_S101_OUT_J4" "$(_s101_recs "$_S101_OUT_J4")" "$(_s101_recs "$_S101_OUT_J5")"
+check "§101(j6) bash 5 or newer: the ok line is unchanged (\"  ✓ bash ${BASH_VERSION%%(*}\") and there is no warning" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  ✓ bash $2" && ! printf "%s\n" "$1" | grep -qF "too old"' -- "$_S101_REQ_J5" "${BASH_VERSION%%(*}"
+rm -rf "$_S101_MACBIN"
+unset _S101_UNAME _S101_MACBIN _S101_DOC5 _S101_DOC4 _S101_BASH _S101_RC_J4 _S101_RC_J5 _S101_OUT_J4 _S101_OUT_J5 _S101_REQ_J4 _S101_REQ_J5
 
 rm -rf "$_S101_BIN"
 
@@ -11662,9 +11713,8 @@ _S119_EXEMPT="SANDY_AUTO_APPROVE_PRIVILEGED SANDY_DEBUG_CLEANUP"
 # is counted as closing the substitution, and the whole file fails to parse --
 # bash reports a syntax error near an unexpected newline. CI is bash 5 and never sees
 # it; the maintainer's macOS bash 3.2 aborts the entire suite here, before any
-# later section runs. Same family as APOSCS in test/lint-bash32.sh, which
-# catches the apostrophe version of the same scanner flaw; CASESUB now catches
-# this one.
+# later section runs. Bash-3.2 era: not needed under bash 5, and the lint
+# codes for it (CASESUB, APOSCS) are retired.
 _S119_EXEMPT_ARGS=()
 for _S119_K in $_S119_EXEMPT; do _S119_EXEMPT_ARGS+=(-e "$_S119_K"); done
 
@@ -12772,8 +12822,10 @@ check "§126(pre-b) the #130 posture block was extracted as a balanced fragment"
 # now closed with fixtures: the `$( {` group opener matched none of the three
 # span-opener rules, so nothing in this function was scanned for ANY detector;
 # and the CASESUB matcher was anchored to the start of a line, while this
-# `case` is buried mid-statement. Keep comments in here free of apostrophes and
-# unbalanced parens for the same reason -- that is the sibling code APOSCS.
+# `case` is buried mid-statement. All bash-3.2 era: bash 5 parses the bare
+# pattern, and CASESUB is retired. Comments in here must still avoid
+# apostrophes, which the APOSQ span scan reports; unbalanced parens no longer
+# matter.
 _s126_posture() {
     local out rc=0
     out="$( {
@@ -12782,8 +12834,8 @@ _s126_posture() {
         . "$_S126_DIR/fn.sh"
         # `break` simulates a host with neither node nor python3, which is the
         # only way the strip can fail without a malformed file.
-        # The leading-paren pattern form below is REQUIRED, not stylistic --
-        # see the CASESUB note above this function.
+        # The leading-paren pattern form below was required under bash 3.2
+        # -- see the note above this function; harmless under bash 5.
         if [ -n "${3:-}" ]; then command(){ case "$2" in (node|python3) return 1 ;; esac; builtin command "$@"; }; fi
         PROFILE_TMPDIR="$_S126_DIR/pt.$$.$RANDOM"; mkdir -p "$PROFILE_TMPDIR/credentials"
         local host="$_S126_DIR/host.$$.$RANDOM.json"
@@ -16420,8 +16472,8 @@ mkdir -p "$_S153_DIR/fa" "$_S153_DIR/fb" "$_S153_DIR/sb"
 printf 'ALPHA-MARKER\n' > "$_S153_DIR/fa/A.md"
 printf 'BETA-MARKER\n'  > "$_S153_DIR/fb/B.md"
 
-# Extract-then-eval, never `source <(...)` (SRCSUB: bash 3.2 sources nothing
-# there and the calls below die 127 into the ERR trap).
+# Extract-then-eval, not `source <(...)` (bash-3.2 era, SRCSUB: 3.2 sourced
+# nothing there; not needed under bash 5).
 _S153_BLK="$(sed -n '/^_sandy_fm_jesc()/,/^}/p; /^_sandy_aa_compose_table()/,/^}/p; /^_sandy_aa_host_path()/,/^}/p; /^_sandy_aa_compose()/,/^}/p' "$_S153_SANDY")"
 _S153_APPLYBLK="$(awk '/^_sandy_fm_projector_js\(\) \{/,/^# Protected directories/' "$_S153_SANDY" | sed '$d')"
 check "§153(pre) the compose block was extracted from sandy and defines _sandy_aa_compose (mutation: a rename empties this and every check below goes vacuous)" \

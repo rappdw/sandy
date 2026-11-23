@@ -15,7 +15,7 @@
 # comparison normalises those three before comparing bytes.
 #
 # Sandbox names start a<NN>- so the glob order is the same in every locale.
-# Used by run-tests.sh §242; keep it bash-3.2 and BSD safe.
+# Used by run-tests.sh §242; keep it BSD safe (macOS userland, bash 5).
 set -euo pipefail
 ROOT="$1"; LIVE="$2"; DEAD="$3"
 H="$ROOT/home"; SB="$H/sandboxes"

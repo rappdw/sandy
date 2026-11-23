@@ -93,7 +93,8 @@
 # BSD/bash-3.2 SAFE ON THE HOST SIDE (the maintainer's actual machine): no GNU
 # `timeout`, no GNU-only `sed -i`/`realpath`, no `grep -P`, every `mktemp -d`
 # canonicalized with `cd ... && pwd -P`, no unbraced `$var` beside non-ASCII,
-# no `case` or apostrophe-bearing comment inside a multi-line `$( )`. The
+# no `case` or apostrophe-bearing comment inside a multi-line `$( )` (the
+# non-ASCII and `case` rules are bash-3.2 era, not needed under bash 5). The
 # CONTAINER-SIDE python/bash driver files below are written through QUOTED
 # heredocs (the PYBACK fix) directly to disk, never through `python3 -c
 # "..."`, and never nested inside a `$( )` substitution — so lint-bash32's
