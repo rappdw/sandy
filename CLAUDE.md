@@ -109,11 +109,10 @@ How to write tests here:
 
 ## Portability: CI is Linux/GNU, the maintainer is macOS/BSD
 
-Host-side shell must run on Linux and on macOS with bash 5 and BSD userland. Sandy requires bash 5 on the host (macOS: Homebrew bash; `/bin/bash` 3.2 is unsupported), so bash 4/5 features are fine; `sandy` and `install.sh` still must not refuse or warn under an older bash. Container-side code (heredoc bodies, `user-setup.sh`) runs on Linux. `test/lint-bash32.sh` catches these. Each has broken a real run while `bash -n` passed (most only on macOS, with CI green):
+Host-side shell must run on Linux and on macOS with bash 5 and BSD userland. Sandy requires bash 5 on the host (macOS: Homebrew bash; `/bin/bash` 3.2 is unsupported), so bash 4/5 features are fine; `sandy` and `install.sh` still must not refuse or warn under an older bash. Container-side code (heredoc bodies, `user-setup.sh`) runs on Linux. `test/lint-bash32.sh` catches these. Each has broken a real run while `bash -n` passed (GNUBIN only on macOS, with CI green):
 
 | Code | Don't | Do |
 |---|---|---|
-| `VARMB` | `$name` directly followed by a non-ASCII char (`"$host…"`; macOS libc reads the byte into the name, inferred for bash 5 too, not yet reproduced there) | `${name}…` |
 | `PYBACK` | backtick or `$(` inside `python3 -c "..."` | quoted heredoc: `python3 - <<'PY'` |
 | `APOSQ` | an apostrophe in a comment inside a multi-line `'...'` argument, or anywhere in a comment inside a multi-line `$( )` | reword the comment |
 | `GREPM` | `grep … \| head` under `pipefail` | `grep -m1` |

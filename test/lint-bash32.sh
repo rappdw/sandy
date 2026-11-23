@@ -10,28 +10,12 @@
 # bash 5 on the host since 2026-11-21 (macOS: Homebrew bash), and the detectors
 # whose hazard existed only in bash 3.2 were retired then (see below).
 #
-# Why this exists. CI runs Ubuntu with GNU userland and glibc; the maintainer
-# runs macOS with BSD userland and Apple's libc. Several constructs behave fine
-# on the former and break on the latter, so `bash -n` in CI passes and the
-# failure only ever appears on one machine, usually mid-task. Three of the codes
-# below (PYBACK, APOSQ, GREPM) are not macOS-specific at all: they break under
-# any bash, but quietly or as a race, so CI does not reliably show them either.
-# Every pattern below has ALREADY broken this repo at least once:
-#
-#   VARMB   an UNBRACED `$name` immediately followed by a non-ASCII character,
-#           e.g. `"Probing $host…"`. bash ends a variable name at the first byte
-#           libc's isalnum() rejects. On macOS in a UTF-8 locale isalnum()
-#           appears to ACCEPT 0xE2 (the first byte of `…`; Apple's ctype reads
-#           the byte as U+00E2, a letter), so the name runs on into the `…`,
-#           names a variable that does not exist, and `set -u` aborts:
-#           `_rsy_host<?>: unbound variable`. glibc rejects the byte in UTF-8
-#           and C locales, so CI never sees it. Kept because it is probably NOT
-#           a bash-3.2 bug: bash 5.3 scans names with the same isalnum() test,
-#           and bash 5.2 and 5.3 abort the same way under a glibc ctype shim
-#           that classifies 0xE2 as alpha. That is inferred from bash source and
-#           the simulation; not yet reproduced with Homebrew bash on macOS. Hit
-#           by the first macOS run of `sandy --rsync` (#374), under bash 3.2.
-#           Fix: `${name}…`.
+# Why this exists. CI runs Ubuntu with GNU userland; the maintainer runs macOS
+# with BSD userland. GNUBIN covers what works on the former and breaks on the
+# latter. The other codes (PYBACK, APOSQ, GREPM) break under any bash, but
+# quietly, at runtime, or as a race, so `bash -n` passes and CI does not
+# reliably show them. Every pattern below has ALREADY broken this repo at
+# least once:
 #
 #   PYBACK  backticks or $( ) inside a DOUBLE-quoted `python3 -c "..."` body.
 #           Bash expands them regardless of Python comment syntax, so the shell
@@ -86,9 +70,9 @@
 #           doctor.sh is host-side and IS scanned as its own file, even though
 #           its heredoc body inside sandy is skipped.
 #
-# RETIRED 2026-11-21, when bash 5 became the host requirement. Each hazard
-# existed only in bash 3.2, and each example runs correctly under bash 5.0,
-# 5.1, 5.2 and 5.3 with `set -euo pipefail`:
+# RETIRED when bash 5 became the host requirement (2026-11-21; VARMB on
+# 2026-11-23). Each hazard existed only in bash 3.2. The first three examples
+# run correctly under bash 5.0, 5.1, 5.2 and 5.3 with `set -euo pipefail`:
 #
 #   SRCSUB  nested `source <(...)` inside `$(...)` sourced nothing (§83).
 #           bash 3.2 read st_size bytes of the sourced file, 0 for a pipe;
@@ -101,6 +85,11 @@
 #           that still matters in bash 5 lives on under APOSQ (above).
 #   CASESUB a `case` pattern's `)` inside a multi-line `$( )` closed the
 #           substitution early: parse abort (§119, §126). Same scanner.
+#   VARMB   an unbraced `$name` followed by a non-ASCII char (`"$host…"`) took
+#           the char into the name; `set -u` aborted (#374). Measured on macOS
+#           2026-11-23, `LC_ALL=en_US.UTF-8 bash -uc 'h=x; echo "$h…"'`:
+#           /bin/bash 3.2.57 fails (`h?: unbound variable`, rc 127); Homebrew
+#           bash 5.3.20 prints `x…` (rc 0).
 #
 # Deliberately NOT checked: `set -E` ERR traps firing in command-substitution
 # subshells for a failure the outer `||` handles. A bash-3.2 behavior (bash 5.0
@@ -256,17 +245,6 @@ def scan(path):
     except OSError as e:
         return [(0, "IOERR", str(e))]
     out = []
-
-    # VARMB — unbraced $name followed directly by a non-ASCII character. Heredoc
-    # BODIES are skipped for the GNUBIN reason: they are container-side scripts,
-    # run on the image's glibc (which ends the name at a non-ASCII byte), or
-    # another language entirely.
-    _vb = heredoc_body_lines(lines)
-    for i, l in enumerate(lines, 1):
-        if (i - 1) in _vb or re.match(r"^\s*#", l):
-            continue
-        if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", l):
-            out.append((i, "VARMB", l.strip()[:88]))
 
     # PYBACK — backticks / $( inside a double-quoted `python3 -c "` body. Only
     # multi-line bodies are considered (the line ends with the opening quote);
@@ -554,13 +532,8 @@ if [ "$SELF_TEST" = true ]; then
     # GNUBIN: GNU-only BRE alternation. The exact run-tests.sh §127 shape --
     # silent empty output on BSD sed, never an error.
     printf '%s\n' '#!/bin/bash' 'v="$(prog | sed -n '"'"'s/.*"agents":\\(\\[[^]]*\\]\\|null\\).*/\\1/p'"'"')"' > "$_fx/gnubin5.sh"
-    # VARMB: the exact line that aborted the first macOS run of sandy --rsync.
-    printf '%s\n' '#!/bin/bash' 'info "Probing $_rsy_host…"' > "$_fx/varmb.sh"
-    # ...and the documented fix must NOT fire, nor may the same text inside a
-    # heredoc body (container-side, bash 5).
-    printf '%s\n' '#!/bin/bash' 'info "Probing ${_rsy_host}…"' 'cat <<EOF' 'Probing $_rsy_host…' 'EOF' > "$_fx/varmbok.sh"
     _fails=0
-    for probe in varmb pyback aposq aposq2 aposq3 aposq4 aposq5 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
+    for probe in pyback aposq aposq2 aposq3 aposq4 aposq5 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
@@ -573,11 +546,6 @@ if [ "$SELF_TEST" = true ]; then
         echo "SELF-TEST FAIL: APOSQ false positive" >&2
         python3 "$_scanner" "$_fx/aposqok.sh" >&2
         _fails=$((_fails + 1))
-    fi
-    if python3 "$_scanner" "$_fx/varmbok.sh" >/dev/null 2>&1; then
-        echo "  negative control OK: \${name} and heredoc bodies do not fire VARMB"
-    else
-        echo "SELF-TEST FAIL: VARMB flagged the braced fix or a heredoc body" >&2; _fails=$((_fails + 1))
     fi
     # The documented fix -- POSIX ERE -- must NOT fire, in either tool.
     {
@@ -632,7 +600,6 @@ if python3 "$_scanner" "${FILES[@]}"; then
 else
     echo "" >&2
     echo "portability lint FAILED — the above break on macOS, or under any bash in a way CI does not reliably show" >&2
-    echo "  VARMB   brace the variable: \"\${name}…\" -- macOS libc reads a following non-ASCII byte as part of the name" >&2
     echo "  PYBACK  use a QUOTED heredoc: python3 - arg <<'PY' ... PY" >&2
     echo "  APOSQ   reword the comment; an apostrophe closes the single-quoted program" >&2
     echo "  GREPM   use 'grep -m1' instead of 'grep | head -1'; keep numeric flag args clear of -m" >&2

@@ -6381,15 +6381,13 @@ unset _S88B _S88B_DIR _S88B_PAT
 # ============================================================
 section "§89: macOS / BSD portability lint (the class CI structurally cannot see)"
 # ============================================================
-# CI is Ubuntu + GNU userland + glibc; the maintainer is macOS + bash 5 + BSD.
+# CI is Ubuntu + GNU userland; the maintainer is macOS + bash 5 + BSD.
 # Several constructs behave DIFFERENTLY there, or break under any bash only
 # quietly, so `bash -n` in CI passes and the break shows up on one machine.
 # Every one has already bitten this repo, each silent in a way that made it
 # expensive:
 #
 #   §68  backtick inside python3 -c "..."  -> the suite EXECUTED the real sandy
-#   #374 "$name…" unbraced before a non-ASCII char -> macOS libc reads the byte
-#                                             into the name, set -u aborts
 #   GNUBIN  a GNU-only binary on a BSD host. `timeout` cost THREE debugging
 #           rounds in one session (§108/§109 here, plus acceptance-handoff-dirs
 #           E8): exit 127, swallowed by `|| true`, and the assertion then
@@ -6415,10 +6413,9 @@ check "detectors self-test: GNUBIN probes are present" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: gnubin"
 # The codes that survived the 2026-11-21 retirement of the bash-3.2-only ones,
 # pinned by probe so a later cleanup cannot drop one as "a bash 3.2 thing":
-# VARMB (macOS libc ctype, any bash), PYBACK, GREPM, and APOSQ including its
-# span and `bash -c` openers and spans in generated scripts (aposq2-5; they
-# break bash 5 too, lint header).
-for _s89_p in varmb pyback aposq aposq2 aposq3 aposq4 aposq5 grepm; do
+# PYBACK, GREPM, and APOSQ including its span and `bash -c` openers and spans
+# in generated scripts (aposq2-5; they break bash 5 too, lint header).
+for _s89_p in pyback aposq aposq2 aposq3 aposq4 aposq5 grepm; do
     check "detectors self-test: the $_s89_p probe is present and fires" \
         bash -c 'printf "%s\n" "$1" | grep -qxF "$2"' _ "$_S89_SELF_OUT" "  detector OK: $_s89_p"
 done
