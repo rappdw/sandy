@@ -2546,7 +2546,7 @@ _sandy_tree_fingerprint() {
         [ -z "$(find . -name "*${_nl}*" -print 2>/dev/null)" ] || exit 1
         _l="$(LC_ALL=C find . -exec ls -ldn {} + | awk '{ $6 = ""; $7 = ""; $8 = ""; print }' \
               && find . -type f -exec $_h {} + \
-              && find . -type l -exec sh -c 'for l; do printf "%s -> " "$l"; readlink "$l" | od -An -tx1 | tr -d " \n"; echo; done' _ {} +)" \
+              && find . -type l -exec sh -c 'for l; do printf "%s -> " "$l"; readlink "$l" | od -An -v -tx1 | tr -d " \n"; echo; done' _ {} +)" \
             || exit 1
         printf '%s\n' "$_l" | LC_ALL=C sort | $_h | awk '{print $1}')" || _out=""
     if [ -n "$_out" ]; then echo "$_out"; else echo unhashable; fi
@@ -2583,29 +2583,25 @@ _sandy_file_sha256() {
     esac
     if [ -n "${2:-}" ]; then printf -v "$2" '%s' "$_fs_o"; else printf '%s' "$_fs_o"; fi
 }
-# Hex of string $1 exactly as `od -An -tx1 | tr -d ' \n'` prints it, into
-# variable $2 when given (else on stdout). Encoded in bash, one character at a
-# time, when every character is ASCII (one byte) and no 16-byte line repeats
-# the line before it, whole or (BSD od) as a shorter last line: there od
-# prints `*` instead, and the two ods differ. Anything else is passed to od
-# itself, so the result is od's in every case.
+# Hex of string $1 exactly as `od -An -v -tx1 | tr -d ' \n'` prints it (two
+# lowercase hex digits per byte, nothing else), into variable $2 when given
+# (else on stdout). `-v` is load-bearing: without it od prints a 16-byte line
+# that repeats the line before it as `*`, and -An drops the repeat count, so
+# a value in which a 16-byte-aligned line repeats the line before it (for
+# example, a run of 47 or more identical bytes) encoded lossily (2.9.0 to
+# 2.10.1): _sandy_unhex refused it, and two values could share one hex. Encoded
+# in bash, one character at a time, when every character is ASCII (one
+# byte); anything else is passed to od itself, which GNU and BSD print alike
+# with -v, so the result is the same either way.
 _sandy_hex() {
-    local _hx_s="$1" _hx_o="" _hx_r _hx_p="" _hx_c _hx_i=0 _hx_e _hx_n=${#1}
+    local _hx_s="$1" _hx_o="" _hx_c _hx_i=0 _hx_n=${#1}
     while [ "$_hx_i" -lt "$_hx_n" ]; do
-        _hx_r=""; _hx_e=$((_hx_i + 16))
-        while [ "$_hx_i" -lt "$_hx_e" ] && [ "$_hx_i" -lt "$_hx_n" ]; do
-            printf -v _hx_c '%02x' "'${_hx_s:_hx_i:1}"
-            case "$_hx_c" in [0-7][0-9a-f]) ;; *) _hx_n=-1; break ;; esac
-            _hx_r="$_hx_r$_hx_c"; _hx_i=$((_hx_i + 1))
-        done
-        [ "$_hx_n" -ge 0 ] || break
-        if [ -n "$_hx_p" ]; then
-            case "$_hx_p" in "$_hx_r"*) _hx_n=-1; break ;; esac
-        fi
-        _hx_o="$_hx_o$_hx_r"; _hx_p="$_hx_r"
+        printf -v _hx_c '%02x' "'${_hx_s:_hx_i:1}"
+        case "$_hx_c" in [0-7][0-9a-f]) ;; *) _hx_n=-1; break ;; esac
+        _hx_o="$_hx_o$_hx_c"; _hx_i=$((_hx_i + 1))
     done
     if [ "$_hx_n" -lt 0 ]; then
-        _hx_o="$(printf '%s' "$1" | od -An -tx1 | tr -d ' \n' || true)"
+        _hx_o="$(printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n' || true)"
     fi
     if [ -n "${2:-}" ]; then printf -v "$2" '%s' "$_hx_o"; else printf '%s' "$_hx_o"; fi
 }
@@ -11257,7 +11253,7 @@ if [[ "${1:-}" == "--provision" ]]; then
     # root, and a docker label is readable by anything that can run
     # docker inspect. Same portable generation idiom, separate value.
     _pv_id="$( (openssl rand -hex 8 2>/dev/null) \
-        || (head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+        || (head -c 8 /dev/urandom 2>/dev/null | od -An -v -tx1 | tr -d ' \n') \
         || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
     info "Starting a real launch for $_pv_wd..."
     _pv_start_rc=0
@@ -20658,7 +20654,7 @@ if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ]; then
     fi
 fi
 _sandy_launch_id="$( (openssl rand -hex 8 2>/dev/null) \
-    || (head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+    || (head -c 8 /dev/urandom 2>/dev/null | od -An -v -tx1 | tr -d ' \n') \
     || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
 mkdir -p "$SANDBOX_DIR/launch/$_sandy_launch_id"
 
@@ -25376,7 +25372,7 @@ if [ -n "${SANDY_SESSION_NONCE:-}" ] && [[ "$SANDY_SESSION_NONCE" =~ ^[A-Za-z0-9
 else
     [ -n "${SANDY_SESSION_NONCE:-}" ] && warn "Ignoring invalid SANDY_SESSION_NONCE (must match ^[A-Za-z0-9._-]{8,128}\$); using a random nonce."
     _sandy_session_nonce="$( (openssl rand -hex 16 2>/dev/null) \
-        || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+        || (head -c 16 /dev/urandom 2>/dev/null | od -An -v -tx1 | tr -d ' \n') \
         || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
 fi
 # The marker is composed into a TEMP and renamed into place below. It changes

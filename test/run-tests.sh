@@ -28293,7 +28293,7 @@ _s248_sha() { { shasum -a 256 2>/dev/null || sha256sum; } < "$1" | awk '{print $
 # the file's own)  $4 = ctime (default "-")].
 _s248_rec() {
     local h
-    h="$(printf '%s' "$2" | od -An -tx1 | tr -d ' \n')"
+    h="$(printf '%s' "$2" | od -An -v -tx1 | tr -d ' \n')"
     if [ "$1" = preset ]; then printf 'preset\t%s\n' "$h"; return 0; fi
     printf 'locked\t%s\t%s\t%s\n' "$h" "${3:-$(ls -di "$2" | awk '{print $1}')}" "${4:--}"
 }
@@ -29835,7 +29835,7 @@ check "§249(e) a non-daemon session prints its report and records nothing (muta
 # .vscode/ (created since) and .github/workflows/ are appearances, and so is
 # .idea/, which the container writes before `docker stop` returns: the report
 # runs after the container is gone.
-_s249_hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+_s249_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
 _S249_C=s249u; _S249_W="$_A6_DIR/$_S249_C/ws"; mkdir -p "$_S249_W/.vscode" "$_S249_W/.github/workflows"
 printf 'x\n' > "$_S249_W/.vscode/tasks.json"; printf 'on: push\n' > "$_S249_W/.github/workflows/ci.yml"
 _S249_S="$(_a6_sandbox "$_S249_C")"; mkdir -p "$_S249_S"; printf '#gitdirs-recorded\n' > "$_S249_S/.protected-existed-at-launch"
@@ -33944,6 +33944,162 @@ check "§256(f) the snapshot lookup answers as grep -qFx and the awk lookup do, 
 _a6_done
 unset -f _s256_shims _s256_count
 unset _S256_SNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
+echo ""
+
+# ============================================================
+section "§257: a recorded value in which a 16-byte-aligned line repeats the line before it (here a workspace path holding 64 bytes of one character) is recorded exactly: a protected file rewritten during the session is reported, the macOS locks and the seeded commondir are undone, and every hex record decodes back to its path (od -v)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. The launch records host paths as hex (_sandy_hex): the #hash, #id,
+# #gitdir, #gitlink and #envfile lines of the snapshot, the .uchg-locked
+# record and the .commondir-seeded record. Up to 2.10.1 the hex was
+# `od -An -tx1 | tr -d ' \n'`. Without -v, od prints a 16-byte line that
+# repeats the line before it as `*`, and -An drops the repeat count, so a
+# value in which a 16-byte-aligned line repeats the line before it (a run of
+# 47 or more identical bytes does so at any alignment) was recorded lossily:
+# _sandy_unhex refused it and the session-end sweep skipped it. A protected
+# file rewritten during such a session went unreported, a macOS lock was
+# never undone, and a seeded commondir was left behind. Each case below
+# launches from a workspace whose path holds a 64-byte run of `a`, once all
+# ASCII (the bash fast path encodes it) and once with a non-ASCII byte in the
+# path (od itself does). Mutations: od without -v in _sandy_hex turns the
+# non-ASCII cases red; the _sandy_hex of #591 (its fast path declines a
+# repeated row and hands it to od without -v), or all of 2.10.1, turns all
+# four red.
+printf -v _S257_RUN '%64s' ''; _S257_RUN="${_S257_RUN// /a}"
+_s257_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
+# Hex back to bytes, independently of sandy; fails on anything but hex pairs.
+_s257_unhex() {
+    local h="$1" e=""
+    case "$h" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ $(( ${#h} % 2 )) = 0 ] || return 1
+    while [ ${#h} -ge 2 ]; do e="$e\\x${h:0:2}"; h="${h:2}"; done
+    printf '%b' "$e"
+}
+# The agent run copies the snapshot and the two records aside, as they stand
+# while the session runs (cleanup removes them).
+_s257_grab() {   # $1 = CASE -> the S248_RUN command
+    local s
+    s="$(_a6_sandbox "$1")"
+    printf 'cp %q "$A6_LOG/snap"; cp %q "$A6_LOG/seeded" 2>/dev/null; cp %q "$A6_LOG/locked" 2>/dev/null; :' \
+        "$s/.protected-existed-at-launch" "$s/.commondir-seeded" "$s/.uchg-locked"
+}
+# Every record line of file $2 of kind $3 has, in field 2, hex that decodes
+# to a path under workspace $1; at least one does. Prints what is unmet.
+_s257_paths() {   # $1 = workspace  $2 = file  $3 = kind
+    local n=0 k h rest p
+    [ -f "$2" ] || { echo "no $3 record captured"; return 0; }
+    while IFS=$'\t' read -r k h rest; do
+        [ "$k" = "$3" ] || continue
+        p="$(_s257_unhex "$h")" || { echo "$3 hex does not decode: $h"; continue; }
+        case "$p" in "$1"/*) n=$((n + 1)) ;; *) echo "$3 decodes outside the workspace: $p" ;; esac
+    done < "$2"
+    [ "$n" -gt 0 ] || echo "no $3 line decodes to a workspace path"
+}
+_s257_repo() {   # $1 = workspace: a git dir, .envrc, .mcp.json, .tool-versions
+    mkdir -p "$1/.git/objects" "$1/.git/refs"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+    printf 'export S257=1\n' > "$1/.envrc"; printf '{"mcpServers":{}}\n' > "$1/.mcp.json"; printf 'nodejs 22\n' > "$1/.tool-versions"
+}
+_S257_CASES="s257-la/$_S257_RUN s257-lu/ß$_S257_RUN s257-ma/$_S257_RUN s257-mu/ß$_S257_RUN"
+for _S257_C in $_S257_CASES; do
+    _S257_W="$_A6_DIR/$_S257_C/ws"; _s257_repo "$_S257_W"
+    case "$_S257_C" in s257-l*) _S257_OS=Linux ;; *) _S257_OS=Darwin ;; esac
+    _a6_bg "$_S257_C" _a6_launch "$_S257_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS="$_S257_OS" \
+        S248_WRITE=.tool-versions S248_RUN="$(_s257_grab "$_S257_C")" PATH="$_S248_PATH"
+done
+# (a) Linux, and (b) the macOS path: the rewrite of .tool-versions (mounted
+# read-only, never locked: the #hash record is all that sees it) is reported,
+# and its #hash record names the path byte for byte; no record sandy wrote
+# holds a `*`, and each decodes back to a path in the workspace; the seeded
+# commondir is removed at the end; on macOS the locked files are unlocked and
+# the lock record is gone, with no "cannot read" warning.
+for _S257_C in $_S257_CASES; do
+    _S257_W="$_A6_DIR/$_S257_C/ws"; _a6_join "$_S257_C"
+    _S257_D="$_A6_DIR/$_S257_C"; _S257_O="$_S257_D/out"; _S257_S="$(_a6_sandbox "$_S257_C")"
+    _S257_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S257_C")" ]; then echo "launch rc $_A6_RC"; fi
+        [ "$(_s248_block "$_S257_O")" = .tool-versions ] || echo "block: [$(_s248_block "$_S257_O" | tr '\n' ' ')]"
+        grep -q "$(printf '^#hash\t%s\t[0-9a-f]' "$(_s257_hex "$_S257_W/.tool-versions")")" "$_S257_D/snap" 2>/dev/null || echo "no exact #hash record for .tool-versions"
+        for _S257_F in snap seeded locked; do
+            if grep -qF '*' "$_S257_D/$_S257_F" 2>/dev/null; then echo "a * in the $_S257_F record"; fi
+        done
+        _s257_paths "$_S257_W" "$_S257_D/snap" '#hash'
+        _s257_paths "$_S257_W" "$_S257_D/seeded" seeded
+        [ ! -e "$_S257_W/.git/commondir" ] || echo "the seeded .git/commondir was left behind"
+        [ ! -e "$_S257_S/.commondir-seeded" ] || echo "the seed record was left behind"
+        if grep -q 'sandy cannot read' "$_S257_O"; then echo "an unreadable record: $(grep -m1 'sandy cannot read' "$_S257_O" | head -c 200)"; fi
+        case "$_S257_C" in
+            s257-m*)
+                _s257_paths "$_S257_W" "$_S257_D/locked" locked
+                for _S257_F in .envrc .git/config; do
+                    grep -qxF "$_S257_W/$_S257_F" "$_S257_D/flags-during-run" 2>/dev/null || echo "not locked during the run: $_S257_F"
+                done
+                [ ! -s "$_S257_D/flags" ] || echo "still locked after the session: $(tr '\n' ' ' < "$_S257_D/flags")"
+                [ ! -e "$_S257_S/.uchg-locked" ] || echo "the lock record was left behind" ;;
+        esac; } 2>&1)" || true
+    if [ -n "$_S257_R" ]; then _a6_diag "§257 $_S257_C" "$_S257_C"; fi
+    case "$_S257_C" in
+        s257-la*) _S257_L="(a) Linux, an ASCII path" ;;
+        s257-lu*) _S257_L="(a) Linux, a path with a non-ASCII byte" ;;
+        s257-ma*) _S257_L="(b) the macOS path, an ASCII path" ;;
+        *) _S257_L="(b) the macOS path, a path with a non-ASCII byte" ;;
+    esac
+    check "§257$_S257_L holding 64 bytes of a: the rewritten .tool-versions is reported, every record decodes back to its workspace path with no *, and the seeded commondir (and on macOS each lock) is undone (mutation: od without -v; the _sandy_hex of #591 or 2.10.1; ${_S257_R:-ok})" \
+        test -z "$_S257_R"
+done
+# (c) _sandy_hex itself, in the C locale and a UTF-8 one: for strings whose
+# 16-byte rows repeat (aligned, after a one-byte offset, and as a shorter last
+# row, where BSD od printed `*` too), ASCII and not, the result is exactly
+# `od -An -v -tx1 | tr -d ' \n'` in both of its forms (stdout and variable)
+# and decodes back; an all-ASCII string needs no od (PATH emptied). The
+# probe proves itself: od WITHOUT -v collapses most of the strings.
+_S257_HEX="$(sed -n '/^_sandy_hex() {/,/^}$/p' "$SANDY_SCRIPT")"
+_S257_UNHEX="$(sed -n '/^_sandy_unhex() {/,/^}$/p' "$SANDY_SCRIPT")"
+_S257_LOCS="C"
+for _S257_L in C.UTF-8 C.utf8 en_US.UTF-8; do
+    if [ "$(LC_ALL="$_S257_L" bash -c 's=ß; echo ${#s}' 2>/dev/null)" = 1 ]; then _S257_LOCS="C $_S257_L"; break; fi
+done
+cat > "$_A6_DIR/s257-unit.sh" <<'S257EOF'
+eval "$1"; eval "$2"; r="$3"
+[ -n "$(declare -F _sandy_hex)" ] && [ -n "$(declare -F _sandy_unhex)" ] || { echo "functions not found"; exit 0; }
+collapsed=0; n=0
+for s in "$r" "x${r:0:47}" "${r:0:32}" "${r:0:24}" "/tmp/x/$r/ws/.envrc" "$r"$'\n' \
+         "ß$r" "/tmp/ß/$r/ws" "$(printf '\377')$r" "${r:0:16}é${r:0:31}"; do
+    n=$((n + 1))
+    want="$(printf '%s' "$s" | od -An -v -tx1 | tr -d ' \n')"
+    case "$(printf '%s' "$s" | od -An -tx1 | tr -d ' \n')" in *'*'*) collapsed=$((collapsed + 1)) ;; esac
+    case "$want" in ''|*[!0-9a-f]*) echo "$LC_ALL #$n: od -v printed [$want]"; continue ;; esac
+    got="$(_sandy_hex "$s")"; _sandy_hex "$s" gotv
+    [ "$got" = "$want" ] || echo "$LC_ALL #$n stdout: [$got] want [$want]"
+    [ "$gotv" = "$want" ] || echo "$LC_ALL #$n variable: [$gotv] want [$want]"
+    [ "$(_sandy_unhex "$want")" = "$(printf '%s' "$s")" ] || echo "$LC_ALL #$n does not decode back"
+    if [ "$n" -le 6 ]; then
+        fast="$(PATH=/nonexistent; _sandy_hex "$s")"
+        [ "$fast" = "$want" ] || echo "$LC_ALL #$n (ASCII) without od: [$fast]"
+    fi
+done
+[ "$n" = 10 ] || echo "$LC_ALL: $n strings probed, want 10"
+[ "$collapsed" -ge 6 ] || echo "$LC_ALL: od without -v collapsed only $collapsed of the strings"
+S257EOF
+_S257_R="$(for _S257_L in $_S257_LOCS; do
+    LC_ALL="$_S257_L" bash "$_A6_DIR/s257-unit.sh" "$_S257_HEX" "$_S257_UNHEX" "$_S257_RUN" 2>&1 || echo "$_S257_L: rc $?"
+done)" || true
+check "§257(c) _sandy_hex is exactly od -An -v -tx1 for strings with repeated rows, ASCII and not, in locales $_S257_LOCS (stdout and variable forms; decodes back; ASCII needs no od) (mutation: od without -v; the fast path of #591; ${_S257_R:-ok})" \
+    test -z "$_S257_R"
+# (d) No od in sandy runs without -v: every hex sandy writes, compares or
+# fingerprints (_sandy_hex, a link target in _sandy_tree_fingerprint, the
+# urandom fallbacks of three ids) is od -v, so none can meet the collapse.
+# Each od call is judged on its own (two on one line are two calls), with
+# full-line and trailing comments stripped first, so an `# od -v` comment
+# cannot vouch for the call before it.
+_S257_ODS="$(grep -vE '^[[:space:]]*#' "$SANDY_SCRIPT" | sed -E 's/[[:space:]]#.*$//' | grep -oE '(^|[^[:alnum:]_.-])od( +-[[:alnum:]]+)+' || true)"
+_S257_R="$(printf '%s\n' "$_S257_ODS" | grep -E 'od' | grep -vE ' -v( |$)' | tr '\n' ';' || true)"
+_S257_N="$(printf '%s\n' "$_S257_ODS" | grep -c 'od' || true)"
+check "§257(d) every od call that sandy makes passes -v ($_S257_N calls; without -v: ${_S257_R:-none}; mutations: a call without -v followed by a trailing # od -v comment, or by a second call with -v on the same line)" \
+    bash -c '[ -z "$1" ] && [ "$2" -ge 5 ]' _ "$_S257_R" "$_S257_N"
+_a6_done
+unset -f _s257_hex _s257_unhex _s257_grab _s257_paths _s257_repo
+unset _S257_ODS _S257_RUN _S257_CASES _S257_C _S257_W _S257_OS _S257_D _S257_O _S257_S _S257_R _S257_F _S257_L _S257_HEX _S257_UNHEX _S257_LOCS _S257_N
 echo ""
 
 # BEGIN SUMMARY
