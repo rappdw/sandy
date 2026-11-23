@@ -34156,6 +34156,79 @@ unset -f _s257_hex _s257_unhex _s257_grab _s257_paths _s257_repo
 unset _S257_ODS _S257_RUN _S257_CASES _S257_C _S257_W _S257_OS _S257_D _S257_O _S257_S _S257_R _S257_F _S257_L _S257_HEX _S257_UNHEX _S257_LOCS _S257_N
 echo ""
 
+# ============================================================
+section "§258: cleanup() removes the agent container before the session-end report, and releases the macOS locks and seeded commondir files only after both, and only once the container is known gone (#584)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. Until 2.11.0 a session's cleanup() ran the session-end protected-path
+# report first and force-removed the agent container afterwards, so a write the
+# agent made between the two (a planted hook, a rewritten .envrc) was never
+# reported. --stop's direct teardown of a supervisor-less daemon already
+# removed the container first (#573). Now cleanup() does too: container
+# removed, report, then the locks and seeds released, as the 2.9.0 fix
+# (GHSA-wjw9-4x75-x5vx) requires, only once the container is known gone.
+#
+# The stub in front of the §248 ones plays an agent that writes until it is
+# removed: at the `docker rm -f sandy-ws-...` that follows the agent's run it
+# appends to the workspace .envrc (S258_LATE=1), and records which files are
+# still locked (CASE/flags-at-rm) and whether the seeded .git/commondir is
+# still there (CASE/seed-at-rm). An rm before the run (none is made today)
+# would find no flags-during-run and do nothing.
+_S258_B="$_A6_DIR/s258bin"; mkdir -p "$_S258_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "rm -f sandy-ws-"*)\n'
+  printf '    if [ -e "$A6_LOG/flags-during-run" ]; then\n'
+  printf '        cp "$A6_LOG/flags" "$A6_LOG/flags-at-rm" 2>/dev/null || : > "$A6_LOG/flags-at-rm"\n'
+  printf '        if [ -f "$A6_WS/.git/commondir" ]; then echo present; else echo gone; fi > "$A6_LOG/seed-at-rm"\n'
+  printf '        if [ -n "${S258_LATE:-}" ]; then printf "late\\n" >> "$A6_WS/.envrc"; fi\n'
+  printf '    fi ;;\n'
+  printf 'esac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S258_B/docker"
+chmod +x "$_S258_B/docker"
+_S258_PATH="$_S258_B:$_S248_PATH"
+_s258_repo() {   # $1 = workspace: a git dir and an .envrc
+    mkdir -p "$1/.git/objects" "$1/.git/refs"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+    printf 'export S258=1\n' > "$1/.envrc"
+}
+# (a) a write the agent makes until it is removed is reported; the locks and
+# the seed were still held when it was removed, and are released after.
+_S258_C=s258-late; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_LATE=1 PATH="$_S258_PATH"
+# (c) the container may still exist after its removal: the report still runs
+# (and sees the late write), the locks and the seed are kept, and said so.
+_S258_C=s258-surv; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_LATE=1 S248_SURVIVE=1 PATH="$_S258_PATH"
+_S258_C=s258-late; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"
+_S258_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S258_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_A6_DIR/$_S258_C/seed-at-rm" ] || echo "the probe did not run (no rm -f of the agent container after its run)"
+    grep -q late "$_S258_W/.envrc" || echo "the late write was not made"
+    [ "$(_s248_block "$_S258_O")" = .envrc ] || echo "CHANGED block: [$(_s248_block "$_S258_O" | tr '\n' ' ')]"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(a)" "$_S258_C"
+check "§258(a) a write the agent makes until its container is removed (here at the docker rm -f itself) is in the session-end report (mutation: the report before the removal, the 2.11.0 order, misses it; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_S258_R="$( { [ "$(cat "$_A6_DIR/$_S258_C/seed-at-rm" 2>/dev/null)" = present ] || echo "the seed was gone when the container was removed"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null || echo "not locked when the container was removed: [$(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null)]"
+    grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null || echo ".git/config not locked when the container was removed"
+    [ ! -s "$_A6_DIR/$_S258_C/flags" ] || echo "still locked after the session: $(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags")"
+    [ ! -e "$_S258_W/.git/commondir" ] || echo "the seed was not removed after the session"; } 2>&1)" || true
+check "§258(b) ...the macOS locks and the seeded commondir were still in place when the container was removed, and are released after it (mutation: the release before the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_S258_C=s258-surv; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_A6_DIR/$_S258_C/seed-at-rm" ] || echo "the probe did not run"
+    [ "$(_s248_block "$_S258_O")" = .envrc ] || echo "CHANGED block: [$(_s248_block "$_S258_O" | tr '\n' ' ')]"
+    [ "$(cat "$_S258_W/.git/commondir" 2>/dev/null)" = . ] || echo "the seed was removed"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked under a surviving container"
+    grep -qF "may still exist, so the macOS file locks and the seeded commondir files are kept" "$_S258_O" || echo "no warning"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c)" "$_S258_C"
+check "§258(c) when the container may still exist after its removal, the report still runs (and names the late write), and the locks and the seed are kept, and said so (mutation: the report skipped when the removal is not confirmed; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_a6_done
+unset -f _s258_repo
+unset _S258_B _S258_PATH _S258_C _S258_W _S258_O _S258_R
+echo ""
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

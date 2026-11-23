@@ -22897,6 +22897,30 @@ cleanup() {
             "$SANDBOX_DIR/claude/tool-audit.jsonl" \
             "$(grep -c . "$SANDBOX_DIR/claude/tool-audit.jsonl" 2>/dev/null || echo '?')" >&2
     fi
+    # Force-remove the agent container FIRST: before the session-end report
+    # below, so a write the agent makes until it is gone cannot land after the
+    # report has looked (#584, as --stop's direct teardown has done since
+    # #573), and before the proxy and networks, so it can never outlive them.
+    # The agent runs `docker run --rm` in the foreground (below), so on a
+    # normal exit the container is already gone and this is a harmless no-op.
+    # But the container's lifetime belongs to the daemon, not the `docker run`
+    # *client*: if that client is killed without the container stopping
+    # (closed terminal, killed session, dropped SSH, SIGHUP), the daemon keeps
+    # the agent running -- and the rest of this trap then tears down its proxy
+    # (docker rm -f below) and egress route, stranding the agent on a
+    # routeless --internal sidecar where every request fails with
+    # FailedToOpenSocket until the next launch. Removing it here makes agent +
+    # proxy teardown atomic, and lets the sidecar `network rm` below actually
+    # succeed instead of failing on a still-attached orphan (which leaks the
+    # subnet). The order is: container removed, report, then the macOS locks
+    # and seeded commondir files released, and those only once the container
+    # is known gone (below); when the removal failed the report still runs,
+    # and the locks and seeds are kept. Guarded with :- because the trap is
+    # armed before CONTAINER_NAME is assigned; at that point the agent doesn't
+    # exist yet, so this is a no-op.
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
     # Detect protected-path appearances: the session-end report
     # (_sandy_session_end_protected_report). A daemon supervisor also records
     # it in the sandbox (#554): its stderr is a log nobody reads, so the next
@@ -22996,23 +23020,8 @@ cleanup() {
             ;;
     esac
     cleanup_network_isolation
-    # Force-remove the agent container FIRST, so it can never outlive this
-    # session's proxy + networks. The agent runs `docker run --rm` in the
-    # foreground (below), so on a normal exit the container is already gone and
-    # this is a harmless no-op. But the container's lifetime belongs to the
-    # daemon, not the `docker run` *client*: if that client is killed without the
-    # container stopping (closed terminal, killed session, dropped SSH, SIGHUP),
-    # the daemon keeps the agent running — and the rest of this trap then tears
-    # down its proxy (docker rm -f below) and egress route, stranding the agent on
-    # a routeless --internal sidecar where every request fails with
-    # FailedToOpenSocket until the next launch. Removing it here makes agent +
-    # proxy teardown atomic, and lets the sidecar `network rm` below actually
-    # succeed instead of failing on a still-attached orphan (which leaks the
-    # subnet). Guarded with :- because the trap is armed before CONTAINER_NAME is
-    # assigned; at that point the agent doesn't exist yet, so this is a no-op.
-    if [ -n "${CONTAINER_NAME:-}" ]; then
-        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    fi
+    # (The agent container was force-removed above, before the session-end
+    # report: #584.)
     # The macOS file locks and the seeded commondir files, only once the
     # container is known to be gone (_sandy_container_gone). Unlocking under a
     # container that survived reopens what the locks close, and a seed removed

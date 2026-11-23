@@ -62,7 +62,8 @@ When a session ends, sandy reports protected paths that appeared, changed or
 were replaced in the workspace during it (a new `.git/hooks/` hook,
 `.github/workflows/` file, `.vscode/` task, `.claude/commands/` command, and so
 on; see [Security](security.md)). A terminal session prints that report as it
-exits. A daemon session has no terminal: its supervisor's output goes to a log
+exits. The report runs once the agent's container has been removed (2.11.1), so
+it also covers anything the agent wrote in its last moments. A daemon session has no terminal: its supervisor's output goes to a log
 file under `~/.sandy/sandboxes/` that nobody reads. So a daemon
 session also **records** the report in its sandbox
 (`~/.sandy/sandboxes/<name>/.session-end-report`, outside the workspace and
