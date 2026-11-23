@@ -33947,7 +33947,7 @@ unset _S256_SNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_
 echo ""
 
 # ============================================================
-section "§257: a workspace whose path holds a run of 47 or more identical bytes is recorded exactly: a protected file rewritten during the session is reported, the macOS locks and the seeded commondir are undone, and every hex record decodes back to its path (od -v)"
+section "§257: a recorded value in which a 16-byte-aligned line repeats the line before it (here a workspace path holding 64 bytes of one character) is recorded exactly: a protected file rewritten during the session is reported, the macOS locks and the seeded commondir are undone, and every hex record decodes back to its path (od -v)"
 # ============================================================
 _fx_a6; _fx_s248
 # WHY. The launch records host paths as hex (_sandy_hex): the #hash, #id,
@@ -33955,7 +33955,8 @@ _fx_a6; _fx_s248
 # record and the .commondir-seeded record. Up to 2.10.1 the hex was
 # `od -An -tx1 | tr -d ' \n'`. Without -v, od prints a 16-byte line that
 # repeats the line before it as `*`, and -An drops the repeat count, so a
-# path holding a run of 47 or more identical bytes was recorded lossily:
+# value in which a 16-byte-aligned line repeats the line before it (a run of
+# 47 or more identical bytes does so at any alignment) was recorded lossily:
 # _sandy_unhex refused it and the session-end sweep skipped it. A protected
 # file rewritten during such a session went unreported, a macOS lock was
 # never undone, and a seeded commondir was left behind. Each case below
@@ -34088,13 +34089,17 @@ check "§257(c) _sandy_hex is exactly od -An -v -tx1 for strings with repeated r
 # (d) No od in sandy runs without -v: every hex sandy writes, compares or
 # fingerprints (_sandy_hex, a link target in _sandy_tree_fingerprint, the
 # urandom fallbacks of three ids) is od -v, so none can meet the collapse.
-_S257_R="$(grep -nE '(^|[^[:alnum:]_.-])od -' "$SANDY_SCRIPT" | grep -v '^[0-9]*:[[:space:]]*#' | grep -vE 'od (-[A-Za-z0-9]+ )*-v( |$)' || true)"
-_S257_N="$(grep -vE '^[[:space:]]*#' "$SANDY_SCRIPT" | grep -cE '(^|[^[:alnum:]_.-])od -' || true)"
-check "§257(d) every od that sandy runs passes -v ($_S257_N lines run od; without -v: ${_S257_R:-none})" \
+# Each od call is judged on its own (two on one line are two calls), with
+# full-line and trailing comments stripped first, so an `# od -v` comment
+# cannot vouch for the call before it.
+_S257_ODS="$(grep -vE '^[[:space:]]*#' "$SANDY_SCRIPT" | sed -E 's/[[:space:]]#.*$//' | grep -oE '(^|[^[:alnum:]_.-])od( +-[[:alnum:]]+)+' || true)"
+_S257_R="$(printf '%s\n' "$_S257_ODS" | grep -E 'od' | grep -vE ' -v( |$)' | tr '\n' ';' || true)"
+_S257_N="$(printf '%s\n' "$_S257_ODS" | grep -c 'od' || true)"
+check "§257(d) every od call that sandy makes passes -v ($_S257_N calls; without -v: ${_S257_R:-none}; mutations: a call without -v followed by a trailing # od -v comment, or by a second call with -v on the same line)" \
     bash -c '[ -z "$1" ] && [ "$2" -ge 5 ]' _ "$_S257_R" "$_S257_N"
 _a6_done
 unset -f _s257_hex _s257_unhex _s257_grab _s257_paths _s257_repo
-unset _S257_RUN _S257_CASES _S257_C _S257_W _S257_OS _S257_D _S257_O _S257_S _S257_R _S257_F _S257_L _S257_HEX _S257_UNHEX _S257_LOCS _S257_N
+unset _S257_ODS _S257_RUN _S257_CASES _S257_C _S257_W _S257_OS _S257_D _S257_O _S257_S _S257_R _S257_F _S257_L _S257_HEX _S257_UNHEX _S257_LOCS _S257_N
 echo ""
 
 # BEGIN SUMMARY

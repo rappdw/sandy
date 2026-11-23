@@ -2587,8 +2587,9 @@ _sandy_file_sha256() {
 # lowercase hex digits per byte, nothing else), into variable $2 when given
 # (else on stdout). `-v` is load-bearing: without it od prints a 16-byte line
 # that repeats the line before it as `*`, and -An drops the repeat count, so
-# a path with a run of 47 or more identical bytes encoded lossily (2.9.0 to
-# 2.10.1): _sandy_unhex refused it, and two paths could share one hex. Encoded
+# a value in which a 16-byte-aligned line repeats the line before it (for
+# example, a run of 47 or more identical bytes) encoded lossily (2.9.0 to
+# 2.10.1): _sandy_unhex refused it, and two values could share one hex. Encoded
 # in bash, one character at a time, when every character is ASCII (one
 # byte); anything else is passed to od itself, which GNU and BSD print alike
 # with -v, so the result is the same either way.
