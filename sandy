@@ -1081,8 +1081,11 @@ _SANDY_APPROVE_PASS=""
 # are intentionally NOT protected — the agent has legitimate reason to edit
 # them. Called by the RUN_FLAGS construction loop (below) and by the test
 # harness via `sandy --print-protected-paths`.
+# These list functions print their here-document with a read loop rather
+# than cat: the same lines, and no process (they are read many times a launch).
 _sandy_protected_files() {
-    cat <<'EOF'
+    local _ln
+    while IFS= read -r _ln; do printf '%s\n' "$_ln"; done <<'EOF'
 .bashrc
 .bash_profile
 .zshrc
@@ -1127,7 +1130,9 @@ _sandy_protected_git_files() {
     # refs from; config.worktree is read as config when the repository enables
     # extensions.worktreeConfig. Either one written by a session redirects the
     # host's git, so both are :ro when present and reported when created.
-    cat <<'EOF'
+    # With $1: every entry but that one (_sandy_watched_git_files).
+    local _ln
+    while IFS= read -r _ln; do [ -n "${1:-}" ] && [ "$_ln" = "$1" ] || printf '%s\n' "$_ln"; done <<'EOF'
 .git/config
 .gitmodules
 .git/packed-refs
@@ -1139,10 +1144,7 @@ EOF
 # creation, like the protected files (2.9.0): all of the above except
 # .git/packed-refs, which git itself creates in-session (gc, pack-refs).
 _sandy_watched_git_files() {
-    local _g
-    while IFS= read -r _g; do
-        [ "$_g" = .git/packed-refs ] || printf '%s\n' "$_g"
-    done < <(_sandy_protected_git_files)
+    _sandy_protected_git_files .git/packed-refs
 }
 
 # #80: pretty-print a snapshotted HEAD value for the session-end notice.
@@ -2202,7 +2204,8 @@ _sandy_fm_apply() {
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
 _sandy_protected_dirs() {
-    cat <<'EOF'
+    local _ln
+    while IFS= read -r _ln; do printf '%s\n' "$_ln"; done <<'EOF'
 .git/hooks
 .git/info
 .vscode
@@ -2237,7 +2240,8 @@ EOF
 # overlay. Mounting is unchanged; the launch snapshot and the session-end
 # report in cleanup() iterate this list alongside the protected dirs.
 _sandy_overlay_detect_dirs() {
-    cat <<'EOF'
+    local _ln
+    while IFS= read -r _ln; do printf '%s\n' "$_ln"; done <<'EOF'
 .claude/commands
 .claude/agents
 .claude/plugins
@@ -2275,18 +2279,26 @@ _sandy_overlay_detect_agent() {
 # because it needs no canonicalization: a symlink-free chain from the anchor
 # down IS proof the file sits inside it, and `realpath` is GNU-only anyway.
 # Bash builtins only, so it is bash-3.2/BSD-clean.
-_sandy_path_symlink_component() {   # $1 = anchor dir, $2 = path under it -> prints the offending component
-    local _anchor="$1" _p="$2" _rest _seg _cur
-    _rest="${_p#"$_anchor"/}"
-    [ "$_rest" = "$_p" ] && return 1        # not under the anchor; nothing to walk
-    _cur="$_anchor"
-    while [ -n "$_rest" ]; do
-        _seg="${_rest%%/*}"
-        _cur="$_cur/$_seg"
-        if [ -L "$_cur" ]; then printf '%s' "${_cur#"$_anchor"/}"; return 0; fi
-        case "$_rest" in
-            */*) _rest="${_rest#*/}" ;;
-            *)   _rest="" ;;
+# With $3 (a variable name) the component goes into that variable instead of
+# stdout, so a caller needs no command substitution (no process) for it; the
+# variable is emptied when there is none.
+_sandy_path_symlink_component() {   # $1 = anchor dir, $2 = path under it [$3 = variable] -> prints the offending component
+    local _psc_anchor="$1" _psc_p="$2" _psc_rest _psc_seg _psc_cur
+    [ -z "${3:-}" ] || printf -v "$3" '%s' ""
+    _psc_rest="${_psc_p#"$_psc_anchor"/}"
+    [ "$_psc_rest" = "$_psc_p" ] && return 1        # not under the anchor; nothing to walk
+    _psc_cur="$_psc_anchor"
+    while [ -n "$_psc_rest" ]; do
+        _psc_seg="${_psc_rest%%/*}"
+        _psc_cur="$_psc_cur/$_psc_seg"
+        if [ -L "$_psc_cur" ]; then
+            if [ -n "${3:-}" ]; then printf -v "$3" '%s' "${_psc_cur#"$_psc_anchor"/}"
+            else printf '%s' "${_psc_cur#"$_psc_anchor"/}"; fi
+            return 0
+        fi
+        case "$_psc_rest" in
+            */*) _psc_rest="${_psc_rest#*/}" ;;
+            *)   _psc_rest="" ;;
         esac
     done
     return 1
@@ -2305,7 +2317,15 @@ _sandy_path_symlink_component() {   # $1 = anchor dir, $2 = path under it -> pri
 # a name with a newline in it (the line listing would be ambiguous).
 # A link's target as lowercase hex (empty when unreadable): one token that a
 # target holding a tab, newline or escape cannot break out of.
-_sandy_link_hex() { readlink "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true; }
+# With $2 (a variable name) the hex goes into that variable; readlink is then
+# the only process (_sandy_hex encodes in bash).
+_sandy_link_hex() {
+    local _lh_t
+    # readlink's output exactly, its trailing newline included: the x keeps
+    # the command substitution from stripping it.
+    _lh_t="$(readlink "$1" 2>/dev/null; printf x)"
+    _sandy_hex "${_lh_t%x}" "${2:-}"
+}
 # Which object a watched path is, as hex (empty when absent): the canonical
 # path it resolves to (`pwd -P`) and the inode (`ls -diL`, POSIX) of each
 # directory ABOVE it inside the workspace. The launch snapshot records it for
@@ -2318,23 +2338,118 @@ _sandy_link_hex() { readlink "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n' || tru
 # replace, so a change there comes from the host -- an editor, `mise use` or
 # Claude Code saving atomically (write a temp file, rename it over), or a git
 # checkout -- and reporting it would offer to delete the user's own file.
+# With $2 (a variable name) the identity goes into that variable instead of
+# stdout. While _SANDY_PI_CACHE is 1 (one launch snapshot or one session-end
+# report: the caller empties _SANDY_PI_K and _SANDY_PI_V, sets it, and unsets
+# it after), the `pwd -P` of a directory and the inode of an ancestor are
+# measured once and reused by every path that shares them, so a snapshot of
+# many watched paths costs one process per directory, not several per path.
+# The string is the same either way: each inode is what `ls -diL | awk
+# '{print $1}'` printed (_sandy_awk_f1), and the hex is od's (_sandy_hex).
 _sandy_path_identity() {
-    local _c _a _rest _i _out
+    local _pi_c _pi_a _pi_rest _pi_i _pi_out _pi_d _pi_isdir="" _pi_k _pi_n
+    [ -z "${2:-}" ] || printf -v "$2" '%s' ""
     [ -e "$1" ] || [ -L "$1" ] || return 0
-    if [ -d "$1" ]; then
-        _c="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
-    else
-        _c="$(cd "${1%/*}" 2>/dev/null && pwd -P)/${1##*/}" || return 0
+    if [ -d "$1" ]; then _pi_isdir=1; _pi_d="$1"; else _pi_d="${1%/*}"; fi
+    # The directory's `pwd -P`: "y<path>", or "n" when it cannot be entered.
+    _pi_k="c$_pi_d"; _pi_c=""
+    if [ "${_SANDY_PI_CACHE:-}" = 1 ]; then
+        _pi_n=0
+        while [ "$_pi_n" -lt "${#_SANDY_PI_K[@]}" ]; do
+            if [ "${_SANDY_PI_K[$_pi_n]}" = "$_pi_k" ]; then _pi_c="${_SANDY_PI_V[$_pi_n]}"; break; fi
+            _pi_n=$((_pi_n + 1))
+        done
     fi
-    _out="$_c"
-    _rest="${1#"$WORK_DIR"/}"; _a="$WORK_DIR"
+    if [ -z "$_pi_c" ]; then
+        if _pi_c="$(cd "$_pi_d" 2>/dev/null && pwd -P)"; then _pi_c="y$_pi_c"; else _pi_c=n; fi
+        if [ "${_SANDY_PI_CACHE:-}" = 1 ]; then _SANDY_PI_K+=("$_pi_k"); _SANDY_PI_V+=("$_pi_c"); fi
+    fi
+    [ "$_pi_c" != n ] || return 0
+    _pi_c="${_pi_c#y}"
+    [ -n "$_pi_isdir" ] || _pi_c="$_pi_c/${1##*/}"
+    _pi_out="$_pi_c"
+    _pi_rest="${1#"$WORK_DIR"/}"; _pi_a="$WORK_DIR"
     while :; do
-        case "$_rest" in */*) ;; *) break ;; esac
-        _a="$_a/${_rest%%/*}"; _rest="${_rest#*/}"
-        _i="$(ls -diL "$_a" 2>/dev/null | awk '{print $1}')" || _i=""
-        _out="$_out $_i"
+        case "$_pi_rest" in */*) ;; *) break ;; esac
+        _pi_a="$_pi_a/${_pi_rest%%/*}"; _pi_rest="${_pi_rest#*/}"
+        # The inode: "v<first fields>".
+        _pi_k="i$_pi_a"; _pi_i=""
+        if [ "${_SANDY_PI_CACHE:-}" = 1 ]; then
+            _pi_n=0
+            while [ "$_pi_n" -lt "${#_SANDY_PI_K[@]}" ]; do
+                if [ "${_SANDY_PI_K[$_pi_n]}" = "$_pi_k" ]; then _pi_i="${_SANDY_PI_V[$_pi_n]}"; break; fi
+                _pi_n=$((_pi_n + 1))
+            done
+        fi
+        if [ -z "$_pi_i" ]; then
+            _pi_i="$(exec ls -diL "$_pi_a" 2>/dev/null)" || _pi_i=""
+            _sandy_awk_f1 "$_pi_i" _pi_i
+            _pi_i="v$_pi_i"
+            if [ "${_SANDY_PI_CACHE:-}" = 1 ]; then _SANDY_PI_K+=("$_pi_k"); _SANDY_PI_V+=("$_pi_i"); fi
+        fi
+        _pi_out="$_pi_out ${_pi_i#v}"
     done
-    printf '%s' "$_out" | od -An -tx1 | tr -d ' \n' || true
+    _sandy_hex "$_pi_out" "${2:-}"
+}
+# While _SANDY_PI_CACHE is 1: measure the `pwd -P` of the directory each of
+# the paths $@ would be measured from (_sandy_path_identity), all in ONE
+# process, into the cache. The same `cd` and `pwd -P` as there, so the cached
+# value is the one _sandy_path_identity would have measured; a path whose
+# directory is not an absolute path, or is cached already, is left to it.
+_sandy_path_identity_prefill() {
+    local _pp_p _pp_d _pp_r _pp_n _pp_nl=$'\n'
+    local -a _pp_ds=()
+    [ "${_SANDY_PI_CACHE:-}" = 1 ] || return 0
+    for _pp_p in "$@"; do
+        [ -e "$_pp_p" ] || [ -L "$_pp_p" ] || continue
+        if [ -d "$_pp_p" ]; then _pp_d="$_pp_p"; else _pp_d="${_pp_p%/*}"; fi
+        case "$_pp_d" in /*) ;; *) continue ;; esac
+        _pp_n=0
+        while [ "$_pp_n" -lt "${#_SANDY_PI_K[@]}" ]; do
+            [ "${_SANDY_PI_K[$_pp_n]}" != "c$_pp_d" ] || continue 2
+            _pp_n=$((_pp_n + 1))
+        done
+        _pp_n=0
+        while [ "$_pp_n" -lt "${#_pp_ds[@]}" ]; do
+            [ "${_pp_ds[$_pp_n]}" != "$_pp_d" ] || continue 2
+            _pp_n=$((_pp_n + 1))
+        done
+        _pp_ds+=("$_pp_d")
+    done
+    [ ${#_pp_ds[@]} -gt 0 ] || return 0
+    # One NUL-ended record per directory: what `pwd -P` printed, then y (cd
+    # and pwd -P both succeeded) or n.
+    _pp_n=0
+    while IFS= read -r -d '' _pp_r; do
+        [ "$_pp_n" -lt "${#_pp_ds[@]}" ] || break
+        case "$_pp_r" in
+            *y) _pp_r="${_pp_r%y}"
+                while [ "${_pp_r%"$_pp_nl"}" != "$_pp_r" ]; do _pp_r="${_pp_r%"$_pp_nl"}"; done
+                _pp_r="y$_pp_r" ;;
+            *) _pp_r=n ;;
+        esac
+        _SANDY_PI_K+=("c${_pp_ds[$_pp_n]}"); _SANDY_PI_V+=("$_pp_r")
+        _pp_n=$((_pp_n + 1))
+    done < <(for _pp_d in "${_pp_ds[@]}"; do
+                 if cd "$_pp_d" 2>/dev/null && pwd -P; then printf 'y\0'; else printf 'n\0'; fi
+             done)
+    return 0
+}
+# What `awk '{print $1}'` prints for input $1, as a command substitution keeps
+# it, into variable $2: the first blank-separated field of each line, one per
+# line, with the trailing newlines dropped. No process.
+_sandy_awk_f1() {
+    local _af_r="$1" _af_l _af_o="" _af_s="" _af_b=$' \t' _af_nl=$'\n'
+    if [ -n "$_af_r" ]; then
+        _af_r="$_af_r$_af_nl"
+        while [ -n "$_af_r" ]; do
+            _af_l="${_af_r%%"$_af_nl"*}"; _af_r="${_af_r#*"$_af_nl"}"
+            _af_l="${_af_l#"${_af_l%%[!$_af_b]*}"}"
+            _af_o="$_af_o$_af_s${_af_l%%[$_af_b]*}"; _af_s="$_af_nl"
+        done
+        while [ "${_af_o%"$_af_nl"}" != "$_af_o" ]; do _af_o="${_af_o%"$_af_nl"}"; done
+    fi
+    printf -v "$2" '%s' "$_af_o"
 }
 # True when an entry the snapshot $2 lists as existing at launch was REPLACED
 # in-session (_sandy_path_identity: a re-pointed link on the way, or a parent
@@ -2348,9 +2463,63 @@ _sandy_replaced_since_launch() {
 # always gets one, so a missing record is a broken snapshot, and failing
 # toward a report is the safe side.
 _sandy_same_object() {
-    local _r
-    _r="$(awk -F '\t' -v p="$1" '$1 == "#id" && $2 == p { print "x" $3; exit }' "$2" 2>/dev/null || true)"
-    [ -n "$_r" ] && [ "$_r" != "x" ] && [ "$_r" = "x$(_sandy_path_identity "$WORK_DIR/$1")" ]
+    local _so_r _so_id
+    _sandy_snap_scan "$2" '#id' "$1" _so_r || true
+    [ -n "$_so_r" ] && [ "$_so_r" != "x" ] || return 1
+    _sandy_path_identity "$WORK_DIR/$1" _so_id || true
+    [ "$_so_r" = "x$_so_id" ]
+}
+# Look snapshot file $1 up the way the session end always has, with no
+# process. With $2 "=": true when a line of it is exactly $3, as
+# `grep -qFx "$3" "$1"`. Otherwise variable $4 gets what
+# `awk -F '\t' -v p="$3" '$1 == "<$2>" && $2 == p { print "x" $3; exit }' "$1"`
+# printed: "x" and the third field of the first line whose fields 1 and 2 are
+# $2 and $3, or nothing. A $3 that command could read differently is looked
+# up by that very command instead, so the answer is always that command's: one
+# holding anything but plain path characters (an awk -v escape, a byte of
+# another encoding), one starting with `-` (an option to grep), and, for awk,
+# one that could look numeric (awk compares two numeric-looking strings as
+# numbers: `1e3 == 1000`). A key that holds a character no number has (`/`,
+# most letters, `_`) cannot, nor can a hex key with a letter in it.
+_sandy_snap_scan() {
+    local _ss_l _ss_r _ss_f2 _ss_t=$'\t' _ss_hit="" _ss_cmd=""
+    [ "$2" = "=" ] || printf -v "$4" '%s' ""
+    case "$3" in
+        ""|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@+,:=%#\ -]*) _ss_cmd=1 ;;
+    esac
+    if [ -z "$_ss_cmd" ] && [ "$2" != "=" ]; then
+        case "$3" in
+            *[/ghjklmoqrsuvwzGHJKLMOQRSUVWZ_#@,:=%]*|.[!0-9]*) ;;
+            *[!0-9a-f]*) _ss_cmd=1 ;;
+            *[abcdf]*|*e*e*|e*|*e) ;;
+            *) _ss_cmd=1 ;;
+        esac
+    fi
+    if [ -n "$_ss_cmd" ]; then
+        if [ "$2" = "=" ]; then grep -qFx "$3" "$1" 2>/dev/null; return; fi
+        printf -v "$4" '%s' "$(awk -F '\t' -v p="$3" -v k="$2" '$1 == k && $2 == p { print "x" $3; exit }' "$1" 2>/dev/null || true)"
+        return 0
+    fi
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+        [ "$2" != "=" ] || return 1
+        return 0
+    fi
+    while IFS= read -r _ss_l || [ -n "$_ss_l" ]; do
+        if [ "$2" = "=" ]; then
+            if [ "$_ss_l" = "$3" ]; then _ss_hit=1; break; fi
+            continue
+        fi
+        case "$_ss_l" in "$2$_ss_t"*) ;; *) continue ;; esac
+        _ss_r="${_ss_l#*"$_ss_t"}"
+        case "$_ss_r" in
+            *"$_ss_t"*) _ss_f2="${_ss_r%%"$_ss_t"*}"; _ss_r="${_ss_r#*"$_ss_t"}"; _ss_r="${_ss_r%%"$_ss_t"*}" ;;
+            *) _ss_f2="$_ss_r"; _ss_r="" ;;
+        esac
+        [ "$_ss_f2" = "$3" ] || continue
+        printf -v "$4" 'x%s' "$_ss_r"
+        break
+    done < "$1"
+    [ "$2" != "=" ] || [ -n "$_ss_hit" ]
 }
 _sandy_tree_fingerprint() {
     local _h _out _l _nl='
@@ -2381,23 +2550,70 @@ _sandy_tree_fingerprint() {
 # every host; on macOS the files most worth it are also locked (below).
 #
 # SHA-256 of file $1 as lowercase hex, or "unhashable".
+# With $2 (a variable name) the result goes into that variable instead of
+# stdout: the hashing tool is then the only process. (`exec`: bash runs a
+# command substitution that has a redirection in a child of its own and the
+# command in another; exec makes them one.)
 _sandy_file_sha256() {
-    local _o=""
+    local _fs_o=""
     if command -v shasum >/dev/null 2>&1; then
-        _o="$(shasum -a 256 < "$1" 2>/dev/null | awk '{print $1}')" || _o=""
+        _fs_o="$(exec shasum -a 256 < "$1" 2>/dev/null)" || _fs_o=""
     elif command -v sha256sum >/dev/null 2>&1; then
-        _o="$(sha256sum < "$1" 2>/dev/null | awk '{print $1}')" || _o=""
+        _fs_o="$(exec sha256sum < "$1" 2>/dev/null)" || _fs_o=""
     fi
-    case "$_o" in
-        [0-9a-f]*) printf '%s' "$_o" ;;
-        *) printf 'unhashable' ;;
+    _sandy_awk_f1 "$_fs_o" _fs_o
+    case "$_fs_o" in
+        [0-9a-f]*) ;;
+        *) _fs_o=unhashable ;;
     esac
+    if [ -n "${2:-}" ]; then printf -v "$2" '%s' "$_fs_o"; else printf '%s' "$_fs_o"; fi
 }
-_sandy_hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n' || true; }
+# Hex of string $1 exactly as `od -An -tx1 | tr -d ' \n'` prints it, into
+# variable $2 when given (else on stdout). Encoded in bash, one character at a
+# time, when every character is ASCII (one byte) and no 16-byte line repeats
+# the line before it, whole or (BSD od) as a shorter last line: there od
+# prints `*` instead, and the two ods differ. Anything else is passed to od
+# itself, so the result is od's in every case.
+_sandy_hex() {
+    local _hx_s="$1" _hx_o="" _hx_r _hx_p="" _hx_c _hx_i=0 _hx_e _hx_n=${#1}
+    while [ "$_hx_i" -lt "$_hx_n" ]; do
+        _hx_r=""; _hx_e=$((_hx_i + 16))
+        while [ "$_hx_i" -lt "$_hx_e" ] && [ "$_hx_i" -lt "$_hx_n" ]; do
+            printf -v _hx_c '%02x' "'${_hx_s:_hx_i:1}"
+            case "$_hx_c" in [0-7][0-9a-f]) ;; *) _hx_n=-1; break ;; esac
+            _hx_r="$_hx_r$_hx_c"; _hx_i=$((_hx_i + 1))
+        done
+        [ "$_hx_n" -ge 0 ] || break
+        if [ -n "$_hx_p" ]; then
+            case "$_hx_p" in "$_hx_r"*) _hx_n=-1; break ;; esac
+        fi
+        _hx_o="$_hx_o$_hx_r"; _hx_p="$_hx_r"
+    done
+    if [ "$_hx_n" -lt 0 ]; then
+        _hx_o="$(printf '%s' "$1" | od -An -tx1 | tr -d ' \n' || true)"
+    fi
+    if [ -n "${2:-}" ]; then printf -v "$2" '%s' "$_hx_o"; else printf '%s' "$_hx_o"; fi
+}
 # Hex back to the string. Built for _sandy_hex output only (pairs of [0-9a-f]).
+# With $2 (a variable name) the string goes into it as `$(_sandy_unhex ...)`
+# would have it (trailing newlines dropped), with no process; one holding a
+# NUL byte (which a command substitution drops) takes the command
+# substitution itself.
 _sandy_unhex() {
+    [ -z "${2:-}" ] || printf -v "$2" '%s' ""
     case "$1" in *[!0-9a-f]*) return 1 ;; esac
-    printf '%b' "$(printf '%s' "$1" | sed 's/../\\x&/g')"
+    local _uh_r="$1" _uh_e="" _uh_o _uh_nl=$'\n'
+    while [ ${#_uh_r} -ge 2 ]; do
+        _uh_e="$_uh_e\\x${_uh_r:0:2}"; _uh_r="${_uh_r:2}"
+    done
+    _uh_e="$_uh_e$_uh_r"
+    if [ -z "${2:-}" ]; then printf '%b' "$_uh_e"; return 0; fi
+    case "$_uh_e" in
+        *'\x00'*) _uh_o="$(printf '%b' "$_uh_e")" ;;
+        *) printf -v _uh_o '%b' "$_uh_e"
+           while [ "${_uh_o%"$_uh_nl"}" != "$_uh_o" ]; do _uh_o="${_uh_o%"$_uh_nl"}"; done ;;
+    esac
+    printf -v "$2" '%s' "$_uh_o"
 }
 # Record the :ro FILE mounts of the assembled argv into snapshot $1, and copy
 # each into directory $2 (created 0700 when absent; a copy older than 30 days
@@ -2405,7 +2621,8 @@ _sandy_unhex() {
 # destination lies under the workspace or the gitdir a .git file names, and
 # whose source is a regular file.
 _sandy_protected_hash_snapshot() {
-    local _snap="$1" _cdir="$2" _i=0 _n=${#RUN_FLAGS[@]} _spec _src _dst _seen=$'\n' _h _t _um
+    local _snap="$1" _cdir="$2" _i=0 _n=${#RUN_FLAGS[@]} _spec _src _dst _seen=$'\n' _h _hx _t _um _hs
+    local -a _touch=()
     if [ ! -d "$_cdir" ] || [ -L "$_cdir" ]; then
         rm -f "$_cdir" 2>/dev/null || true
         mkdir -m 700 "$_cdir" 2>/dev/null || true
@@ -2424,18 +2641,21 @@ _sandy_protected_hash_snapshot() {
             [ -f "$_src" ] || continue
             case "$_seen" in *$'\n'"$_src"$'\n'*) continue ;; esac
             _seen="$_seen$_src"$'\n'
-            _h="$(_sandy_file_sha256 "$_src")"
-            printf '#hash\t%s\t%s\n' "$(_sandy_hex "$_src")" "$_h" >> "$_snap"
+            _sandy_file_sha256 "$_src" _h || true
+            _sandy_hex "$_src" _hx || true
+            printf '#hash\t%s\t%s\n' "$_hx" "$_h" >> "$_snap"
             [ "$_h" != unhashable ] && [ -d "$_cdir" ] && [ ! -L "$_cdir" ] || continue
             if [ -f "$_cdir/$_h" ]; then
-                touch "$_cdir/$_h" 2>/dev/null || true
+                # Touched together, below (one process): only the prune reads the times.
+                _touch+=("$_cdir/$_h")
                 continue
             fi
             _um="$(umask)"; umask 077
             _t="$(mktemp "$_cdir/.copy.XXXXXX" 2>/dev/null)" || _t=""
             umask "$_um"
             [ -n "$_t" ] || continue
-            if cp "$_src" "$_t" 2>/dev/null && [ "$(_sandy_file_sha256 "$_t")" = "$_h" ]; then
+            _hs=""
+            if cp "$_src" "$_t" 2>/dev/null && { _sandy_file_sha256 "$_t" _hs || true; [ "$_hs" = "$_h" ]; }; then
                 mv -f "$_t" "$_cdir/$_h" 2>/dev/null || rm -f "$_t"
             else
                 rm -f "$_t"
@@ -2444,22 +2664,36 @@ _sandy_protected_hash_snapshot() {
         fi
         _i=$((_i + 1))
     done
+    [ ${#_touch[@]} -eq 0 ] || touch "${_touch[@]}" 2>/dev/null || true
     if [ -d "$_cdir" ] && [ ! -L "$_cdir" ]; then
         find "$_cdir" -type f -mtime +30 -exec rm -f {} + 2>/dev/null || true
     fi
     return 0
 }
 # Session end: the #hash records of snapshot $1 whose file now differs (or is
-# gone), one "<host path, hex><TAB><sha256 at launch>" line each.
+# gone), one "<host path, hex><TAB><sha256 at launch>" line each; into
+# variable $2 when given, as `$(_sandy_protected_hash_changed "$1")` would
+# hold them (one hashing process per file, nothing else).
 _sandy_protected_hash_changed() {
-    local _k _hx _h0 _p
+    local _k _hx _h0 _p _hc_s _hc_chg _hc_o="" _hc_nl=$'\n'
     while IFS=$'\t' read -r _k _hx _h0; do
         [ "$_k" = "#hash" ] || continue
-        _p="$(_sandy_unhex "$_hx")" || continue
-        if [ "$_h0" = unhashable ] || [ ! -f "$_p" ] || [ "$(_sandy_file_sha256 "$_p")" != "$_h0" ]; then
-            printf '%s\t%s\n' "$_hx" "$_h0"
+        _sandy_unhex "$_hx" _p || continue
+        _hc_chg=""
+        if [ "$_h0" = unhashable ] || [ ! -f "$_p" ]; then
+            _hc_chg=1
+        else
+            _sandy_file_sha256 "$_p" _hc_s
+            [ "$_hc_s" = "$_h0" ] || _hc_chg=1
+        fi
+        if [ -n "$_hc_chg" ]; then
+            if [ -n "${2:-}" ]; then _hc_o="$_hc_o$_hx"$'\t'"$_h0$_hc_nl"; else printf '%s\t%s\n' "$_hx" "$_h0"; fi
         fi
     done < "$1"
+    if [ -n "${2:-}" ]; then
+        while [ "${_hc_o%"$_hc_nl"}" != "$_hc_o" ]; do _hc_o="${_hc_o%"$_hc_nl"}"; done
+        printf -v "$2" '%s' "$_hc_o"
+    fi
     return 0
 }
 # Print the session-end block for _sandy_protected_hash_changed output $1
@@ -2515,8 +2749,11 @@ _sandy_protected_hash_report() {
 # cache and build trees, where nobody starts gemini), and neither is a link to
 # a directory (find never follows one).
 _SANDY_ENV_SCAN_DEPTH=4
-_sandy_env_scan_skip_dirs() {
-    cat <<'SKIP'
+_sandy_env_scan_skip_dirs() {   # [$1 = variable to set, as a command substitution would hold it]
+    local _ln _sk="" _sk_nl=$'\n'
+    while IFS= read -r _ln; do
+        if [ -n "${1:-}" ]; then _sk="$_sk${_sk:+$_sk_nl}$_ln"; else printf '%s\n' "$_ln"; fi
+    done <<'SKIP'
 .git
 node_modules
 .venv
@@ -2529,6 +2766,7 @@ __pycache__
 .cache
 target
 SKIP
+    [ -z "${1:-}" ] || printf -v "$1" '%s' "$_sk"
 }
 # The watched entries under workspace $1, NUL-terminated records, each a
 # one-letter kind and a workspace-relative path:
@@ -2548,12 +2786,13 @@ SKIP
 # `python -m venv .env` convention): it is neither entered nor reported. Gemini
 # finds it and loads nothing from it, which only hides an env file above it.
 _sandy_env_files() {
-    local _p _b _d _t _n _s _skip=()
+    local _p _b _d _t _n _s _skip=() _skl
     [ -d "$1" ] || return 0
+    _sandy_env_scan_skip_dirs _skl
     while IFS= read -r _s; do
         [ -n "$_s" ] || continue
         if [ ${#_skip[@]} -eq 0 ]; then _skip=(-name "$_s"); else _skip+=(-o -name "$_s"); fi
-    done < <(_sandy_env_scan_skip_dirs)
+    done <<< "$_skl"
     while IFS= read -r -d '' _p; do
         _p="${_p#./}"
         _b="${_p##*/}"
@@ -2870,12 +3109,20 @@ _sandy_git_admin_dirs() {   # $1 = workspace
 }
 # The same below one gitdir $1 (not $1 itself): its worktree admin dirs, its
 # submodule gitdirs, and theirs.
+# (Each walker is started only where it would find something to walk: both
+# return at once without a worktrees/ or modules/ directory, and a process
+# substitution costs a process.)
 _sandy_git_admin_dirs_of() {
     local _d _w
-    while IFS= read -r -d '' _w; do printf '%s\n' "$_w"; done < <(_sandy_worktree_admin_dirs "$1")
+    if [ -d "$1/worktrees" ] && [ ! -L "$1/worktrees" ]; then
+        while IFS= read -r -d '' _w; do printf '%s\n' "$_w"; done < <(_sandy_worktree_admin_dirs "$1")
+    fi
+    [ -d "$1/modules" ] && [ ! -L "$1/modules" ] || return 0
     while IFS= read -r -d '' _d; do
         printf '%s\n' "$_d"
-        while IFS= read -r -d '' _w; do printf '%s\n' "$_w"; done < <(_sandy_worktree_admin_dirs "$_d")
+        if [ -d "$_d/worktrees" ] && [ ! -L "$_d/worktrees" ]; then
+            while IFS= read -r -d '' _w; do printf '%s\n' "$_w"; done < <(_sandy_worktree_admin_dirs "$_d")
+        fi
     done < <(_sandy_submodule_gitdirs "$1/modules")
     return 0
 }
@@ -2902,7 +3149,8 @@ _sandy_worktree_admin_dirs() {
 #
 # The fixed list, workspace-relative, one per line: adding a file is one line.
 _sandy_uchg_files() {
-    cat <<'EOF'
+    local _ln
+    while IFS= read -r _ln; do printf '%s\n' "$_ln"; done <<'EOF'
 .claude/settings.json
 .claude/settings.local.json
 .gemini/settings.json
@@ -2971,35 +3219,42 @@ _sandy_uchg_supported() {
 # earlier launch left are still cleaned up).
 _sandy_commondir_seed_enabled() { return 0; }
 # What sandy created, in the sandbox: "seeded<TAB><path, hex><TAB><inode>".
-_sandy_commondir_record() { printf '%s/.commondir-seeded' "$1"; }
+_sandy_commondir_record() {   # $1 = sandbox [$2 = variable to set instead of printing]
+    if [ -n "${2:-}" ]; then printf -v "$2" '%s/.commondir-seeded' "$1"; else printf '%s/.commondir-seeded' "$1"; fi
+}
 # Seed gitdir $2 (anchor $1: the walk from there passes no link), appending to
 # record $3. Created by mktemp in the gitdir and renamed into place without
 # replacing anything (mv -n), then checked: the file at the path must be the
 # one sandy wrote.
 _sandy_commondir_seed_one() {   # $1 = anchor  $2 = gitdir  $3 = record
-    local _f="$2/commondir" _t _i
+    local _f="$2/commondir" _t _i _i2 _hx
     { [ -e "$_f" ] || [ -L "$_f" ]; } && return 0
     [ -d "$2" ] && [ ! -L "$2" ] || return 0
     if [ "$2" != "$1" ] && _sandy_path_symlink_component "$1" "$_f" >/dev/null; then return 0; fi
-    _t="$(mktemp "$2/.sandy-commondir.XXXXXX" 2>/dev/null)" || return 0
+    _t="$(exec mktemp "$2/.sandy-commondir.XXXXXX" 2>/dev/null)" || return 0
     printf '.\n' > "$_t" && chmod 644 "$_t" || { rm -f "$_t"; return 0; }
-    _i="$(_sandy_file_inode "$_t")"
+    _sandy_file_inode "$_t" _i
     mv -n "$_t" "$_f" 2>/dev/null || true
-    rm -f "$_t" 2>/dev/null || true
-    if [ -f "$_f" ] && [ ! -L "$_f" ] && [ -n "$_i" ] && [ "$(_sandy_file_inode "$_f")" = "$_i" ]; then
-        printf 'seeded\t%s\t%s\n' "$(_sandy_hex "$_f")" "$_i" >> "$3"
+    # Left behind only when mv -n refused (rm -f of a missing name does nothing).
+    if [ -e "$_t" ] || [ -L "$_t" ]; then rm -f "$_t" 2>/dev/null || true; fi
+    if [ -f "$_f" ] && [ ! -L "$_f" ] && [ -n "$_i" ] && { _sandy_file_inode "$_f" _i2 || true; [ "$_i2" = "$_i" ]; }; then
+        _sandy_hex "$_f" _hx || true
+        printf 'seeded\t%s\t%s\n' "$_hx" "$_i" >> "$3"
     fi
     return 0
 }
 # True when record line fields ($1 path hex, $2 inode) still name the file
 # sandy created: no link at the path, same inode, content exactly `.`.
 _sandy_commondir_is_ours() {
-    local _f
-    _f="$(_sandy_unhex "$1")" || return 1
-    [ -f "$_f" ] && [ ! -L "$_f" ] && [ "$(_sandy_file_inode "$_f")" = "$2" ] || return 1
+    local _f _io_i="" _io_c=""
+    _sandy_unhex "$1" _f || return 1
+    [ -f "$_f" ] && [ ! -L "$_f" ] && { _sandy_file_inode "$_f" _io_i || true; [ "$_io_i" = "$2" ]; } || return 1
     case "$_f" in
         "${WORK_DIR:-/nonexistent}"/*) ! _sandy_path_symlink_component "$WORK_DIR" "$_f" >/dev/null || return 1 ;;
     esac
+    # Exactly ".\n" (read to the end with no NUL on the way) needs no process;
+    # anything else is judged by cat, as always.
+    if ! IFS= read -r -d '' _io_c 2>/dev/null < "$_f" && [ "$_io_c" = "."$'\n' ]; then return 0; fi
     if [ "$(cat "$_f" 2>/dev/null; echo x)" = ".
 x" ]; then return 0; fi
     return 1
@@ -3009,7 +3264,7 @@ x" ]; then return 0; fi
 # so a later cleanup removes them.
 _sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
     local _rec _k _h _i _keep="" _g _d _w _a
-    _rec="$(_sandy_commondir_record "$2")"
+    _sandy_commondir_record "$2" _rec
     _sandy_commondir_fix_dirs "$1" "$2"
     if [ -f "$_rec" ]; then
         while IFS=$'\t' read -r _k _h _i; do
@@ -3034,12 +3289,12 @@ _sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
 # what it created. One the session changed stays (the content report names it).
 _sandy_commondir_unseed() {   # $1 = sandbox
     local _rec _k _h _i _f
-    _rec="$(_sandy_commondir_record "$1")"
+    _sandy_commondir_record "$1" _rec
     [ -f "$_rec" ] || return 0
     while IFS=$'\t' read -r _k _h _i; do
         [ "$_k" = seeded ] || continue
         if _sandy_commondir_is_ours "$_h" "$_i"; then
-            _f="$(_sandy_unhex "$_h")" && rm -f "$_f"
+            _sandy_unhex "$_h" _f && rm -f "$_f"
         fi
     done < "$_rec"
     rm -f "$_rec"
@@ -3049,7 +3304,17 @@ _sandy_uchg_is_set() {
     case ",$(stat -f '%Sf' "$1" 2>/dev/null)," in *,uchg,*) return 0 ;; esac
     return 1
 }
-_sandy_file_inode() { ls -di "$1" 2>/dev/null | awk '{print $1}'; }
+# With $2 (a variable name) the inode goes into that variable, as a command
+# substitution would hold it, and ls is the only process; the status is ls's,
+# as under pipefail.
+_sandy_file_inode() {
+    local _fi_o _fi_rc=0
+    if [ -z "${2:-}" ]; then ls -di "$1" 2>/dev/null | awk '{print $1}'; return; fi
+    _fi_o="$(exec ls -di "$1" 2>/dev/null)" || _fi_rc=$?
+    _sandy_awk_f1 "$_fi_o" _fi_o
+    printf -v "$2" '%s' "$_fi_o"
+    return "$_fi_rc"
+}
 # Status-change time (seconds): chflags moves it, and an immutable file's
 # contents, mode and owner cannot change, so a ctime other than the one sandy
 # recorded after setting the flag means its flags were changed since.
@@ -3213,21 +3478,7 @@ _sandy_container_gone() {
 # gitdir of workspace $1 and at each path the seed record of sandbox $2 names.
 _sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
     local _g _d _p _k _h _i _rec
-    {
-        for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
-            [ -d "$_g" ] && [ ! -L "$_g" ] || continue
-            printf '%s\n' "$_g/commondir"
-            while IFS= read -r _d; do [ -n "$_d" ] && printf '%s\n' "$_d/commondir"; done < <(_sandy_git_admin_dirs_of "$_g")
-        done
-        if [ -n "$2" ]; then
-            _rec="$(_sandy_commondir_record "$2")"
-            if [ -f "$_rec" ]; then
-                while IFS=$'\t' read -r _k _h _i; do
-                    [ "$_k" = seeded ] && _sandy_unhex "$_h" && printf '\n'
-                done < "$_rec"
-            fi
-        fi
-    } | while IFS= read -r _p; do
+    while IFS= read -r _p; do
         [ -n "$_p" ] && [ -d "$_p" ] && [ ! -L "$_p" ] || continue
         case "$_p" in "$1"/*) ! _sandy_path_symlink_component "$1" "$_p" >/dev/null || continue ;; esac
         if [ -n "$(ls -A "$_p" 2>/dev/null)" ]; then
@@ -3237,7 +3488,21 @@ _sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
         if rmdir "$_p" 2>/dev/null; then
             warn "Removed an empty directory at $(_sandy_uchg_show "$_p"): a container that outlived its session left it where sandy's commondir file was, and git cannot run with it there."
         fi
-    done
+    done < <({
+        for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
+            [ -d "$_g" ] && [ ! -L "$_g" ] || continue
+            printf '%s\n' "$_g/commondir"
+            while IFS= read -r _d; do [ -n "$_d" ] && printf '%s\n' "$_d/commondir"; done < <(_sandy_git_admin_dirs_of "$_g")
+        done
+        if [ -n "$2" ]; then
+            _sandy_commondir_record "$2" _rec
+            if [ -f "$_rec" ]; then
+                while IFS=$'\t' read -r _k _h _i; do
+                    [ "$_k" = seeded ] && _sandy_unhex "$_h" && printf '\n'
+                done < "$_rec"
+            fi
+        fi
+    })
     return 0
 }
 
@@ -3410,7 +3675,10 @@ _sandy_note_session_created_sandy_dir() {
 _sandy_session_end_protected_report() {
     local SANDBOX_DIR="$1" WORK_DIR="$2"
     local _new_protected _changed_protected _replaced_protected _pd _pf _fp0 _cfg_hooks
-    local _sandy_df_flagged _rm_args _rm_links _seen_links _e _p _lnk _tgt _lhex0 _lhex
+    local _sandy_df_flagged _rm_args _rm_links _seen_links _e _p _lnk _tgt _lhex0 _lhex _hchg
+    # One measurement of each directory for the whole report (_sandy_path_identity).
+    local _SANDY_PI_CACHE=1 _SANDY_PI_K _SANDY_PI_V
+    _SANDY_PI_K=(); _SANDY_PI_V=()
     # Detect protected-path appearances: with the hybrid mount model, an
     # absent protected dir gets no in-session protection — an agent can
     # `mkdir .vscode/` and write into it, and the writes land on the host
@@ -3428,20 +3696,29 @@ _sandy_session_end_protected_report() {
         _new_protected=()
         _changed_protected=()
         _replaced_protected=()
+        # The paths recorded as existing at launch (its plain lines) are the
+        # ones measured again below: their directories in one process.
+        if [ "${_SANDY_PI_CACHE:-}" = 1 ]; then
+            local -a _pre=()
+            { while IFS= read -r _pd || [ -n "$_pd" ]; do
+                case "$_pd" in ""|"#"*) ;; *) _pre+=("$WORK_DIR/$_pd") ;; esac
+            done < "$SANDBOX_DIR/.protected-existed-at-launch"; } 2>/dev/null || true
+            _sandy_path_identity_prefill ${_pre[@]+"${_pre[@]}"} || true
+        fi
         while IFS= read -r _pd; do
             [ -z "$_pd" ] && continue
             # Only flag dirs that DIDN'T exist at launch but DO now (with content).
             # One that existed at launch is reported only if the session REPLACED
             # it (a separate list: it was the user's, so no removal is offered).
-            if grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = "$_pd"; then
                 if _sandy_replaced_since_launch "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
                     _replaced_protected+=("$_pd")
                 fi
                 continue
             fi
             # ...or that existed with no overlay (a #content fingerprint) and changed.
-            _fp0="$(awk -F '\t' -v p="$_pd" '$1 == "#content" && $2 == p { print $3; exit }' \
-                "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
+            _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" '#content' "$_pd" _fp0 || true
+            _fp0="${_fp0#x}"
             if [ -n "$_fp0" ]; then
                 if [ -d "$WORK_DIR/$_pd" ] && { [ "$_fp0" = unhashable ] \
                         || [ "$(_sandy_tree_fingerprint "$WORK_DIR/$_pd")" != "$_fp0" ]; }; then
@@ -3463,7 +3740,7 @@ _sandy_session_end_protected_report() {
         # persists to the host workspace and otherwise goes unreported.
         while IFS= read -r _pf; do
             [ -z "$_pf" ] && continue
-            if grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+            if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = "$_pf"; then
                 if _sandy_replaced_since_launch "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
                     _replaced_protected+=("$_pf")
                 fi
@@ -3479,7 +3756,7 @@ _sandy_session_end_protected_report() {
         # flag it if it now exists with content. git hooks fire on the user's next
         # host git operation, so this belongs in the same warning.
         _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
-        if [ -n "$_cfg_hooks" ] && grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+        if [ -n "$_cfg_hooks" ] && _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = "$_cfg_hooks"; then
             if _sandy_replaced_since_launch "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; then
                 _replaced_protected+=("$_cfg_hooks")
             fi
@@ -3507,13 +3784,13 @@ _sandy_session_end_protected_report() {
             for _e in ${_new_protected[@]+"${_new_protected[@]}"} \
                       ${_changed_protected[@]+"${_changed_protected[@]/#/changed:}"}; do
                 _p="${_e#changed:}"
-                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                if _sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p" _lnk; then
                     _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
                     # Target at launch, hex-encoded (#link<TAB>link<TAB>hex); "x" alone = recorded
                     # with an unreadable target, nothing = not there at launch.
-                    _lhex0="$(awk -F '\t' -v p="$_lnk" '$1 == "#link" && $2 == p { print "x" $3; exit }' \
-                        "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true)"
-                    _lhex="x$(_sandy_link_hex "$WORK_DIR/$_lnk")"
+                    _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" '#link' "$_lnk" _lhex0 || true
+                    _sandy_link_hex "$WORK_DIR/$_lnk" _lhex || true
+                    _lhex="x$_lhex"
                     if [ -n "$_lhex0" ] && [ "$_lhex0" = "$_lhex" ]; then
                         printf "${YELLOW}[sandy]${NC}   %s/%q (through %q -> %q, a link that existed at launch: review it there)\n" \
                             "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
@@ -3574,7 +3851,7 @@ _sandy_session_end_protected_report() {
         if [ ${#_replaced_protected[@]} -gt 0 ]; then
             printf "\n${YELLOW}[sandy]${NC} Protected paths REPLACED during this session (they existed at launch):\n" >&2
             for _p in "${_replaced_protected[@]}"; do
-                if _lnk="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p")"; then
+                if _sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_p" _lnk; then
                     _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
                     printf "${YELLOW}[sandy]${NC}   %s/%q (through %q, now -> %q)\n" "$WORK_DIR" "$_p" "$_lnk" "$_tgt" >&2
                 else
@@ -3594,15 +3871,14 @@ _sandy_session_end_protected_report() {
         fi
         # Protected FILES whose contents changed although mounted :ro (#hash
         # records; _sandy_protected_hash_snapshot). Reported, never restored.
-        _sandy_protected_hash_report \
-            "$(_sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch")" \
-            "$SANDBOX_DIR/.protected-copies"
+        _sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch" _hchg || true
+        _sandy_protected_hash_report "$_hchg" "$SANDBOX_DIR/.protected-copies"
         # .env files created or changed in-session (#envfile records; only
         # when the launch recorded them).
         _sandy_env_file_report "$SANDBOX_DIR/.protected-existed-at-launch" "$WORK_DIR"
         # Git admin dirs created in-session (#gitdir records; only when the
         # launch got as far as recording them).
-        if grep -qx '#gitdirs-recorded' "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null; then
+        if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = '#gitdirs-recorded'; then
             _sandy_git_admin_report "$SANDBOX_DIR/.protected-existed-at-launch"
         fi
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
@@ -3754,7 +4030,7 @@ _sandy_session_report_show() {
 _sandy_configured_hooks_rel() {
     local wd="$1" hp rel wd_real pd
     command -v git >/dev/null 2>&1 || return 0
-    hp="$(git -C "$wd" config --path --get core.hooksPath 2>/dev/null)" || return 0
+    hp="$(exec git -C "$wd" config --path --get core.hooksPath 2>/dev/null)" || return 0
     [ -n "$hp" ] || return 0
     wd_real="$(cd "$wd" 2>/dev/null && pwd -P || echo "$wd")"
     case "$hp" in
@@ -3821,7 +4097,7 @@ _sandy_extra_hooks_dir() {
     local wd="$1" hp hp_abs hp_real wd_real rel pd
     command -v git >/dev/null 2>&1 || return 0
     # --path: core.hooksPath is a path-type value; git tilde-expands it, so match that.
-    hp="$(git -C "$wd" config --path --get core.hooksPath 2>/dev/null)" || return 0
+    hp="$(exec git -C "$wd" config --path --get core.hooksPath 2>/dev/null)" || return 0
     [ -n "$hp" ] || return 0
     case "$hp" in /*) hp_abs="$hp" ;; *) hp_abs="$wd/$hp" ;; esac
     hp_real="$(cd "$hp_abs" 2>/dev/null && pwd -P)" || return 0
@@ -18409,7 +18685,7 @@ _sandy_dir_has_entry() {
 # must not be able to choose what the gate sees.
 _sandy_symlink_skip_parse() {
     local _raw="${SANDY_SYMLINK_SCAN_SKIP:-}" _e _c _rest _bad _copied _seg _ce _cc _gits="" _ga
-    _copied="$(_sandy_symlink_copied)"
+    _sandy_symlink_copied _copied
     _SANDY_SL_SKIPS=(); _SANDY_SL_SKIP_EXPR=()
     # Where .git and the gitdir a .git file names resolve (lower-cased, as
     # below): sandy mounts paths there by name, and a .git link or a gitdir
@@ -18493,8 +18769,10 @@ _sandy_symlink_skip_parse() {
 # (_sandy_symlink_skip_parse), so every scan walks them whole.
 # (A function, not a variable, so a test that extracts the scan functions
 # gets it too.)
-_sandy_symlink_copied() {
-    printf '%s\n' .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands
+_sandy_symlink_copied() {   # [$1 = variable to set, as a command substitution would hold it]
+    local _sc_o _sc_nl=$'\n'
+    printf -v _sc_o '%s\n' .claude/commands .claude/agents .claude/plugins .gemini/extensions .gemini/commands
+    if [ -n "${1:-}" ]; then printf -v "$1" '%s' "${_sc_o%"$_sc_nl"}"; else printf '%s' "$_sc_o"; fi
 }
 # True when workspace-relative $1 is one of those trees.
 _sandy_symlink_is_copied_rel() {
@@ -18607,15 +18885,24 @@ _sandy_symlink_inside() {
 # Where workspace-relative $1 resolves on the host: `readlink -f` of its
 # deepest existing prefix with the rest appended (portable for a path that
 # does not exist yet). Empty when even the workspace cannot be resolved.
+# With $2 (a variable name) the path goes into that variable as
+# `$(_sandy_symlink_resolve "$1")` would hold it, with no process of its own.
 _sandy_symlink_resolve() {
-    local _r="$1" _pre="" _tail="" _t
+    local _sr_r="$1" _sr_pre="" _sr_tail="" _sr_t _sr_o _sr_nl=$'\n'
     while :; do
-        if [ -n "$_r" ] && { [ -e "$WORK_DIR/$_r" ] || [ -L "$WORK_DIR/$_r" ]; }; then
-            _t="$(readlink -f "$WORK_DIR/$_r" 2>/dev/null || true)"
-            [ -n "$_t" ] && { printf '%s%s' "$_t" "$_tail"; return 0; }
+        _sr_o=""
+        if [ -n "$_sr_r" ] && { [ -e "$WORK_DIR/$_sr_r" ] || [ -L "$WORK_DIR/$_sr_r" ]; }; then
+            _sr_t="$(exec readlink -f "$WORK_DIR/$_sr_r" 2>/dev/null)" || true
+            if [ -n "$_sr_t" ]; then _sr_o="$_sr_t$_sr_tail"; fi
         fi
-        [ -n "$_r" ] || { printf '%s%s' "$REAL_WORK_DIR" "$_tail"; return 0; }
-        case "$_r" in */*) _tail="/${_r##*/}$_tail"; _r="${_r%/*}" ;; *) _tail="/$_r$_tail"; _r="" ;; esac
+        [ -n "$_sr_o" ] || [ -n "$_sr_r" ] || _sr_o="$REAL_WORK_DIR$_sr_tail"
+        if [ -n "$_sr_o" ] || [ -z "$_sr_r" ]; then
+            if [ -z "${2:-}" ]; then printf '%s' "$_sr_o"; return 0; fi
+            while [ "${_sr_o%"$_sr_nl"}" != "$_sr_o" ]; do _sr_o="${_sr_o%"$_sr_nl"}"; done
+            printf -v "$2" '%s' "$_sr_o"
+            return 0
+        fi
+        case "$_sr_r" in */*) _sr_tail="/${_sr_r##*/}$_sr_tail"; _sr_r="${_sr_r%/*}" ;; *) _sr_tail="/$_sr_r$_sr_tail"; _sr_r="" ;; esac
     done
 }
 
@@ -18634,12 +18921,15 @@ _sandy_symlink_resolve() {
 # the workspace is checked against what the gate judged
 # (_sandy_symlink_check_mounts), and refused instead of mounted.
 _sandy_symlink_byname_rels() {
-    local _r _g="" _ga _root _d _w
+    local _r _g="" _ga _root _d _w _cp
     _sandy_is_protected_rel . || true    # loads _SANDY_PROTECTED_RELS
-    for _r in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"} .gstack $(_sandy_symlink_copied); do
+    _sandy_symlink_copied _cp
+    for _r in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"} .gstack $_cp; do
         printf '%s\0' "$_r"
     done
-    _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
+    # Both helpers print nothing unless .git is a file (one process each).
+    _ga=""
+    if [ -f "$WORK_DIR/.git" ]; then _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"; fi
     case "$_ga" in
         "$WORK_DIR") _g=. ;;
         "$WORK_DIR"/*) _g="${_ga#"$WORK_DIR"/}" ;;
@@ -18841,12 +19131,12 @@ _sandy_symlink_protected_sweep() {
             if [ "$_par" = . ]; then
                 _lpin=1
             else
-                _t="$(_sandy_symlink_resolve "$_par")"
+                _sandy_symlink_resolve "$_par" _t || true
                 if [ -n "$_t" ] && _sandy_symlink_inside "$_t"; then _lpin=1; fi
             fi
         fi
         if [ -n "$_lpin" ] && [ ! -L "$WORK_DIR/$_p" ]; then continue; fi
-        _t="$(_sandy_symlink_resolve "$_p")"
+        _sandy_symlink_resolve "$_p" _t || true
         if [ -z "$_t" ] || _sandy_symlink_inside "$_t"; then continue; fi
         _sandy_symlink_walk "$_p" || true
     done < <(_sandy_symlink_byname_rels)
@@ -18872,7 +19162,8 @@ _sandy_symlink_protected_sweep() {
 # be told, is printed. A path with no link and no `..` component cannot leave
 # where it is, so it costs no readlink.
 _sandy_symlink_path_unjudged() {
-    local _rest="$1" _w="" _c _any="" _t _in=0 _ent="" _ok="" _q _qp _shp=""
+    local _rest="$1" _w="" _c _any="" _t _in=0 _ent="" _ok="" _q _qp _shp="" _pu_q="" _pu_hit="" _pu_s _pu_nl=$'\n'
+    [ -z "${2:-}" ] || printf -v "$2" '%s' ""
     case "$_rest" in /*) ;; *) _rest="$PWD/$_rest" ;; esac
     while [ -n "$_rest" ]; do
         _c="${_rest%%/*}"
@@ -18904,7 +19195,7 @@ _sandy_symlink_path_unjudged() {
                     case "$_qp" in "$WORK_DIR"/*) _q="${_qp#"$WORK_DIR"/}" ;; esac
                 fi
                 if [ -n "$_q" ] && _sandy_symlink_is_byname_mount_rel "$_q" && ! _sandy_symlink_recorded "$_q" "$_t"; then
-                    printf '%s -> %s\n' "$_q" "$_t"; return 0
+                    _pu_q="$_q"; _pu_hit=1; break
                 fi
             fi
             _in=1; _ent=1; continue
@@ -18928,16 +19219,23 @@ _sandy_symlink_path_unjudged() {
         [ -n "$_shp" ] || _shp="$(cd "$SANDY_HOME" 2>/dev/null && pwd -P)" || _shp=""
         case "$_t" in
             "$SANDY_HOME"|"$SANDY_HOME"/*|"${_shp:-$SANDY_HOME}"|"${_shp:-$SANDY_HOME}"/*)
-                printf '%s -> %s\n' "${_q:-${_qp:-$_w}}" "$_t"; return 0 ;;
+                _pu_q="${_q:-${_qp:-$_w}}"; _pu_hit=1; break ;;
         esac
         if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
         if [[ "$_t" == "$HOME"/* ]] || { [ -z "$_q" ] && [ -z "$_qp" ]; } \
            || { [ -n "$_q" ] && { _sandy_is_protected_rel "$_q" || _sandy_symlink_is_copied_rel "$_q" || _sandy_symlink_is_byname_mount_rel "$_q"; }; } \
            || { [ -n "$_qp" ] && { _sandy_is_protected_rel "$_qp" || _sandy_symlink_is_copied_rel "$_qp" || _sandy_symlink_is_byname_mount_rel "$_qp"; }; }; then
-            printf '%s -> %s\n' "${_q:-${_qp:-$_w}}" "$_t"; return 0
+            _pu_q="${_q:-${_qp:-$_w}}"; _pu_hit=1; break
         fi
     done
-    return 1
+    [ -n "$_pu_hit" ] || return 1
+    # The finding: printed, or, with $2 (a variable name), put into that
+    # variable as a command substitution of this function would hold it.
+    if [ -z "${2:-}" ]; then printf '%s -> %s\n' "$_pu_q" "$_t"; return 0; fi
+    _pu_s="$_pu_q -> $_t"
+    while [ "${_pu_s%"$_pu_nl"}" != "$_pu_s" ]; do _pu_s="${_pu_s%"$_pu_nl"}"; done
+    printf -v "$2" '%s' "$_pu_s"
+    return 0
 }
 
 # Refuse the launch for the "PREFIX -> TARGET" lines in $1. A target in
@@ -18980,7 +19278,7 @@ _sandy_symlink_check_mounts() {
     if _sandy_symlink_is_byname_mount_rel .gstack; then _sandy_gstack_refuse_forbidden "$WORK_DIR"; fi
     while [ "$_i" -lt "$_n" ]; do
         if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
-            if _hit="$(_sandy_symlink_path_unjudged "${RUN_FLAGS[$((_i + 1))]%%:*}")"; then
+            if _sandy_symlink_path_unjudged "${RUN_FLAGS[$((_i + 1))]%%:*}" _hit; then
                 _bad="$_bad$_hit"$'\n'
             fi
         fi
@@ -19050,7 +19348,7 @@ _sandy_resolve_symlinks() {
     # so strip it or nothing inside the workspace would compare as inside.
     while case "$REAL_WORK_DIR" in //*) true ;; *) false ;; esac; do REAL_WORK_DIR="${REAL_WORK_DIR#/}"; done
     _SANDY_PROTECTED_RELS_LOADED=""   # #494: re-read the protected lists for this scan
-    _SANDY_BYNAME_HOOKSPATH="$(git -C "$WORK_DIR" config --path --get core.hooksPath 2>/dev/null)" || _SANDY_BYNAME_HOOKSPATH=""
+    _SANDY_BYNAME_HOOKSPATH="$(exec git -C "$WORK_DIR" config --path --get core.hooksPath 2>/dev/null)" || _SANDY_BYNAME_HOOKSPATH=""
     DANGEROUS_SYMLINKS=()
     # Parallel arrays: resolved host path and the container path where it should be mounted
     SYMLINK_HOST_PATHS=()
@@ -19379,7 +19677,7 @@ _sandy_parent_image_id() {
 }
 
 # Phase 1: Base image (language runtimes — rebuilds rarely)
-BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | sha256 | cut -d' ' -f1)"
+BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | sha256)"; BASE_HASH="${BASE_HASH%% *}"
 BASE_HASH_FILE="$SANDY_HOME/.base_build_hash"
 BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
@@ -19465,7 +19763,7 @@ fi
 # a base rebuilt by ANOTHER agent's launch leaves BASE_REBUILT false here.
 # The id is stable while the base is, and "absent" (also stable) when docker
 # cannot answer, so the key never moves from one launch to the next by itself.
-BUILD_HASH="$( { cat "$DOCKERFILE_PATH" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/user-setup.sh" "$SANDY_HOME/tmux.conf"; printf 'parent:%s\n' "$(_sandy_parent_image_id "$DOCKERFILE_PATH")"; } | sha256 | cut -d' ' -f1)"
+BUILD_HASH="$( { cat "$DOCKERFILE_PATH" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/user-setup.sh" "$SANDY_HOME/tmux.conf"; printf 'parent:%s\n' "$(_sandy_parent_image_id "$DOCKERFILE_PATH")"; } | sha256)"; BUILD_HASH="${BUILD_HASH%% *}"
 HASH_FILE="$SANDY_HOME/$BUILD_HASH_FILE_NAME"
 NEEDS_BUILD=false
 if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || [ "$BASE_REBUILT" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
@@ -24558,18 +24856,27 @@ done < <(_sandy_protected_files; _sandy_watched_git_files)
 # dangerous-symlink gate judged any that leave the workspace), and which object
 # each existing watched path is (#id lines, _sandy_path_identity). The session-end
 # report treats a link it finds as planted unless it is recorded here, and
-# never prints a removal command that would act through a link.
+# never prints a removal command that would act through a link. The helpers
+# return through variables and share one measurement of each directory
+# (_SANDY_PI_CACHE, this loop only): no process per watched path.
+_SANDY_PI_K=(); _SANDY_PI_V=(); _SANDY_PI_CACHE=1
+_sandy_watched_rels=(); _sandy_watched_paths=()
 while IFS= read -r _pd; do
-    [ -z "$_pd" ] && continue
-    if _lnk_snap="$(_sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_pd")"; then
-        printf '#link\t%s\t%s\n' "$_lnk_snap" "$(_sandy_link_hex "$WORK_DIR/$_lnk_snap")" \
+    [ -z "$_pd" ] || { _sandy_watched_rels+=("$_pd"); _sandy_watched_paths+=("$WORK_DIR/$_pd"); }
+done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs; _sandy_protected_files; _sandy_watched_git_files; printf '%s\n' "$_cfg_hooks_snap")
+_sandy_path_identity_prefill ${_sandy_watched_paths[@]+"${_sandy_watched_paths[@]}"} || true
+for _pd in ${_sandy_watched_rels[@]+"${_sandy_watched_rels[@]}"}; do
+    if _sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_pd" _lnk_snap; then
+        _sandy_link_hex "$WORK_DIR/$_lnk_snap" _lhex_snap || true
+        printf '#link\t%s\t%s\n' "$_lnk_snap" "$_lhex_snap" \
             >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
-    _id_snap="$(_sandy_path_identity "$WORK_DIR/$_pd")"
+    _sandy_path_identity "$WORK_DIR/$_pd" _id_snap || true
     if [ -n "$_id_snap" ]; then
         printf '#id\t%s\t%s\n' "$_pd" "$_id_snap" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
-done < <(_sandy_protected_dirs; _sandy_overlay_detect_dirs; _sandy_protected_files; _sandy_watched_git_files; printf '%s\n' "$_cfg_hooks_snap")
+done
+unset _lhex_snap _sandy_watched_rels _sandy_watched_paths _SANDY_PI_CACHE _SANDY_PI_K _SANDY_PI_V
 unset _lnk_snap _id_snap
 
 # #80: .git/HEAD is rw in-container (git switch/checkout work). Snapshot the
@@ -26246,7 +26553,7 @@ fi
 # pinned. A relative core.hooksPath such as `tools/x/../hooks` is the case this
 # exists for.
 _sandy_pin_clean_rel() {
-    local _rest="$1" _seg _out=""
+    local _rest="$1" _seg _out="" _pc_nl=$'\n'
     while [ -n "$_rest" ]; do
         _seg="${_rest%%/*}"
         case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
@@ -26258,7 +26565,9 @@ _sandy_pin_clean_rel() {
         esac
     done
     [ -n "$_out" ] || return 1
-    printf '%s' "$_out"
+    if [ -z "${2:-}" ]; then printf '%s' "$_out"; return 0; fi
+    while [ "${_out%"$_pc_nl"}" != "$_out" ]; do _out="${_out%"$_pc_nl"}"; done
+    printf -v "$2" '%s' "$_out"
 }
 _sandy_pin_under() {   # $1 = anchor host dir  $2 = its container path
     local _i=0 _n=${#RUN_FLAGS[@]} _spec _dst _rel _rest _seg _p _wsmount _ws_seen=""
@@ -26272,7 +26581,7 @@ _sandy_pin_under() {   # $1 = anchor host dir  $2 = its container path
             _dst="${_spec#*:}"; _dst="${_dst%:ro}"
             case "$_dst" in
                 "$2"/?*)
-                    if _rel="$(_sandy_pin_clean_rel "${_dst#"$2"/}")"; then
+                    if _sandy_pin_clean_rel "${_dst#"$2"/}" _rel; then
                         _dsts="$_dsts$_rel"$'\n'
                     fi ;;
             esac

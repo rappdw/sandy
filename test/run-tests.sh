@@ -22473,7 +22473,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_overlay_detect_dirs', '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint',
-         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
+         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_path_identity_prefill', '_sandy_awk_f1', '_sandy_snap_scan', '_sandy_same_object', '_sandy_replaced_since_launch',
          '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
@@ -32441,7 +32441,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
          '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint', '_sandy_agent_has',
-         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
+         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_path_identity_prefill', '_sandy_awk_f1', '_sandy_snap_scan', '_sandy_same_object', '_sandy_replaced_since_launch',
          '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
@@ -33720,6 +33720,131 @@ pkill -f 'sleep 47\.548' 2>/dev/null || true
 unset -f _s255_count _s255_run _s255_bg _s255_join _s255_e1 _s255_e2 _s255_f _s255_f3 _s255_f4 _s255_client _s255_a2 _s255_k _s255_watch
 rm -rf "$_S255_D"
 unset _S255_D _S255_SLEEP _S255_A _S255_K _S255_L _S255_E3 _S255_D_ARGS _S255_G _S255_I _S255_SCAN
+
+# ============================================================
+section "§256: a stubbed launch and exit in a small git workspace creates at most 350 processes; the count is the launch's own, so a check run beside other sections cannot flake (row 38)"
+# ============================================================
+_fx_a6
+# One stubbed launch (codex, the A6 stubs) in a small git workspace with
+# protected paths used to create 788 processes, against 272 in v2.8.0, almost
+# all of them in loops that started one to three processes for each watched
+# path (a command substitution per call, an ls|awk per inode, an od|tr per
+# hex string). The loops now return through variables; this budget keeps
+# them from creeping back.
+#
+# What is counted: every process of the launch's own tree that is a bash
+# (its shells and every subshell, command substitution and pipeline element:
+# a DEBUG trap from BASH_ENV, inherited by functions and subshells with
+# set -T, records $BASHPID the first time it runs in each), and every command
+# looked up on PATH (a shim per command name records its pid, then execs the
+# real one, so the pid is the command's). The records are unique pids, so a
+# command substitution that execs its command is counted once. Nothing else
+# on the machine runs the trap or a shim with A6_COUNT_LOG set, so other
+# sections forking at the same moment (suite_runner --jobs N) add nothing: a
+# global pid counter would. Not counted: a pipeline element that is a single
+# builtin (the printf of `printf x | od`: bash runs the DEBUG trap for it
+# before the fork), and what a non-bash program forks without a PATH lookup
+# (an absolute path, git's own helpers). Measured on Linux against ptrace,
+# the count is 5 below the real one (306 vs 311, outside the suite).
+#
+# Budget: 316 counted here at row 38 (306 outside the suite; ptrace 311; a
+# plain workspace 257, ptrace 262), plus about 10 % for unrelated growth. One
+# more process per watched path (about 49 of them) takes it over, which (p2)
+# checks.
+_S256_BUDGET=350
+_S256_D="$_A6_DIR/s256"
+mkdir -p "$_S256_D/shim"
+cat > "$_S256_D/count.sh" <<'S256EOF'
+set -T
+_s256_last=
+trap '[[ $BASHPID == "$_s256_last" ]] || { _s256_last=$BASHPID; printf "%s\n" "$BASHPID" >> "${A6_COUNT_LOG:-/dev/null}"; } 2>/dev/null || :' DEBUG
+S256EOF
+# A shim for every command name on PATH, the A6 stubs first, the first match
+# winning as a lookup would.
+_s256_shims() {
+    local d f n q
+    local -a ds
+    IFS=: read -r -a ds <<< "$_A6_DIR/bin:$PATH"
+    for d in "${ds[@]}"; do
+        case "$d" in /*) ;; *) continue ;; esac
+        [ -d "$d" ] || continue
+        for f in "$d"/*; do
+            n="${f##*/}"
+            [ ! -e "$_S256_D/shim/$n" ] && [ -f "$f" ] && [ -x "$f" ] || continue
+            q="'${f//\'/\'\\\'\'}'"
+            printf '#!/bin/sh\nprintf "%%s\\n" "$$" >> "${A6_COUNT_LOG:-/dev/null}"\nexec %s "$@"\n' "$q" > "$_S256_D/shim/$n"
+        done
+    done
+    chmod +x "$_S256_D/shim"/*
+}
+_s256_shims
+# _s256_count CASE [VAR=value ...]: one counted launch of CASE -> _S256_N
+_s256_count() {
+    local c="$1"; shift
+    : > "$_S256_D/log"
+    _a6_launch "$c" "$@" PATH="$_S256_D/shim:$_A6_DIR/bin:$PATH" BASH_ENV="$_S256_D/count.sh" A6_COUNT_LOG="$_S256_D/log"
+    _S256_N="$(awk '!s[$0]++ { n++ } END { print n + 0 }' "$_S256_D/log")"
+}
+# The reference workspace: git, a few protected paths (as mac-launch-probe.sh
+# in the optimization-pass notes builds it).
+mkdir -p "$_A6_DIR/s256/ws"
+( cd "$_A6_DIR/s256/ws" && git init -q . && git config user.email probe@example.invalid && git config user.name probe \
+    && mkdir -p .claude .github/workflows .vscode src && echo '{}' > .claude/settings.json && echo 'x' > .envrc \
+    && echo 'name: ci' > .github/workflows/ci.yml && echo '{}' > .vscode/settings.json && echo hi > src/a.txt \
+    && git add -A && git commit -q -m init ) >/dev/null 2>&1
+
+# (p1) The counter counts what it claims, exactly: the root shell, five
+# command substitutions, three commands run directly, two command
+# substitutions that exec theirs (one process each), a subshell, and a
+# pipeline of a function and a command -- 14 -- and not the two elements of
+# `: | :` (the blind spot above; ptrace counts 16). A counter that lost
+# $BASHPID (bash 3.2), set -T, its shims or its dedupe gets another number.
+cat > "$_S256_D/known.sh" <<'S256EOF'
+for _i in 1 2 3 4 5; do _x="$(:)"; done
+ls / >/dev/null; ls / >/dev/null; ls / >/dev/null
+_x="$(exec ls /)"; _x="$(exec ls /)"
+( : )
+_s256_f() { :; }; _s256_f | cat
+: | :
+S256EOF
+: > "$_S256_D/log"
+env PATH="$_S256_D/shim:$_A6_DIR/bin:$PATH" BASH_ENV="$_S256_D/count.sh" A6_COUNT_LOG="$_S256_D/log" \
+    bash "$_S256_D/known.sh" </dev/null >/dev/null 2>&1 || true
+_S256_K="$(awk '!s[$0]++ { n++ } END { print n + 0 }' "$_S256_D/log")"
+check "§256(p1) the counter counts a script of known shape exactly: 14 processes (got $_S256_K; mutations: the trap without set -T, a shim that forks instead of exec, counting lines instead of pids)" \
+    test "$_S256_K" = 14
+
+# Three launches, as the reference measures the third; the second is not
+# counted, so (b) can compare what counting changes.
+_a6_launch s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_a6_launch s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_S256_RC2="$_A6_RC"; cp "$_A6_DIR/s256/out" "$_S256_D/out2"
+awk '{ print $1, $2, $3 }' "$_A6_DIR/s256/events.log" > "$_S256_D/events2"
+_s256_count s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_S256_RC3="$_A6_RC"
+awk '{ print $1, $2, $3 }' "$_A6_DIR/s256/events.log" > "$_S256_D/events3"
+[ "$_S256_RC3" = 0 ] || _a6_diag "§256(a) counted launch" s256
+check "§256(a) the reference launch (codex, small git workspace, third launch) creates at most $_S256_BUDGET processes (counted: $_S256_N, rc $_S256_RC3; 316 at row 38; 783 before it, by ptrace; mutation: (p2))" \
+    bash -c '[ "$1" = 0 ] && [ "$2" -gt 100 ] && [ "$2" -le "$3" ]' _ "$_S256_RC3" "$_S256_N" "$_S256_BUDGET"
+check "§256(b) counting does not change the launch: the counted run prints what the uncounted run before it printed, with the same rc, and makes the same calls (each call's first words: names and ids carry the launcher's pid)" \
+    bash -c '[ "$1" = "$2" ] && cmp "$3/out2" "$4/out" && cmp "$3/events2" "$3/events3"' _ "$_S256_RC2" "$_S256_RC3" "$_S256_D" "$_A6_DIR/s256"
+
+# (p2) The budget sees a per-path process: a copy of sandy with one command
+# substitution added to the launch's watched-path loop (once per watched
+# path, as the loops cost before row 38) goes over it.
+_S256_ANCHOR='    if _sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_pd" _lnk_snap; then'
+_S256_M="$_S256_D/sandy-mutant"
+awk -v a="$_S256_ANCHOR" '$0 == a { print "    : \"$(printf x)\""; n++ } { print } END { exit n == 1 ? 0 : 1 }' "$SANDY_SCRIPT" > "$_S256_M" \
+    && _S256_MOK=1 || _S256_MOK=0
+_S256_SAVED="$_A6_SCRIPT"; _A6_SCRIPT="$_S256_M"
+_s256_count s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_A6_SCRIPT="$_S256_SAVED"
+check "§256(p2) one more process per watched path takes the reference launch over the budget (mutant counted: $_S256_N, rc $_A6_RC, anchor found: $_S256_MOK; budget $_S256_BUDGET)" \
+    bash -c '[ "$1" = 1 ] && [ "$2" = 0 ] && [ "$3" -gt "$4" ]' _ "$_S256_MOK" "$_A6_RC" "$_S256_N" "$_S256_BUDGET"
+_a6_done
+unset -f _s256_shims _s256_count
+unset _S256_BUDGET _S256_D _S256_K _S256_N _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED
+echo ""
 
 # BEGIN SUMMARY
 # ============================================================
