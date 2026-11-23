@@ -5,14 +5,15 @@ Known problems and their fixes. Part of the [sandy guides](README.md); back to t
 ## Sandy fails oddly on macOS (bash 3.2)
 
 **Symptom.** On a Mac, `sandy` stops with an error that seems to have nothing
-to do with what you asked for, such as `unbound variable`, `syntax error`, or
-`bad substitution`.
+to do with what you asked for, for example a shell error such as `unbound
+variable` or `syntax error`.
 
 **Cause.** Sandy requires bash 5 or newer on the host. `sandy` and `install.sh`
 start with `#!/usr/bin/env bash`, so they run under the first `bash` on your
 `PATH`. On a Mac without Homebrew's bash, that is `/bin/bash`, which is bash
-3.2.57. Sandy does not check the version and does not refuse to start, so an old
-bash shows up as a failure somewhere in the middle of a launch.
+3.2.57. Sandy does not check the version and does not refuse to start. Under an
+older bash it is unsupported and may fail anywhere in a launch; one that works
+today is no promise for the next release.
 
 **Fix.** Install a current bash and put it first on `PATH`:
 

@@ -113,9 +113,9 @@ Host-side shell must run on Linux and on macOS with bash 5 and BSD userland. San
 
 | Code | Don't | Do |
 |---|---|---|
-| `VARMB` | `$name` directly followed by a non-ASCII char (`"$host…"`; macOS libc reads the byte into the name, any bash) | `${name}…` |
+| `VARMB` | `$name` directly followed by a non-ASCII char (`"$host…"`; macOS libc reads the byte into the name, inferred for bash 5 too, not yet reproduced there) | `${name}…` |
 | `PYBACK` | backtick or `$(` inside `python3 -c "..."` | quoted heredoc: `python3 - <<'PY'` |
-| `APOSQ` | an apostrophe in a comment inside a multi-line `'...'` argument | reword the comment |
+| `APOSQ` | an apostrophe in a comment inside a multi-line `'...'` argument, or anywhere in a comment inside a multi-line `$( )` | reword the comment |
 | `GREPM` | `grep … \| head` under `pipefail` | `grep -m1` |
 | `GNUBIN` | `timeout`, `sha256sum`, `realpath`, `date -d`, `grep -P`, `stat -c`, `sed -i` without a suffix, `xargs -r`, `find -printf`, `sleep infinity`, `\|` in a `sed` BRE | a BSD fallback, `shasum -a 256`, `sed -E`, `sed -i ''`, a poll loop |
 

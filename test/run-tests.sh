@@ -6413,11 +6413,15 @@ check "detectors self-test: clean file yields no findings" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "negative control OK"
 check "detectors self-test: GNUBIN probes are present" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: gnubin"
-# VARMB survived the 2026-11-21 retirement of the bash-3.2-only codes because
-# its hazard is Apple libc ctype, not the bash version (lint header). Pinned so
-# a later cleanup cannot drop it as "a bash 3.2 thing".
-check "detectors self-test: VARMB probe is present (macOS libc hazard under any bash)" \
-    bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: varmb"
+# The codes that survived the 2026-11-21 retirement of the bash-3.2-only ones,
+# pinned by probe so a later cleanup cannot drop one as "a bash 3.2 thing":
+# VARMB (macOS libc ctype, any bash), PYBACK, GREPM, and APOSQ including its
+# span and `bash -c` openers (aposq2-4; they break bash 5 too, lint header).
+for _s89_p in varmb pyback aposq aposq2 aposq3 aposq4 grepm; do
+    check "detectors self-test: the $_s89_p probe is present and fires" \
+        bash -c 'printf "%s\n" "$1" | grep -qxF "$2"' _ "$_S89_SELF_OUT" "  detector OK: $_s89_p"
+done
+unset _s89_p
 check "detectors self-test: GNUBIN ignores portable constructs" \
     bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "GNUBIN does not fire"
 
@@ -7335,7 +7339,8 @@ check "§94(3) SANDY_TEAMMATE_MODE has a _sandy_key_metadata row with an EMPTY d
 
 # --- behavior: default preserved, opt-out honored ---------------------------
 # build_claude_cmd runs container-side; extract-then-eval with its two callees
-# stubbed so we can read the composed command. Never source <(...) — SRCSUB.
+# stubbed so we can read the composed command. (Not source <(...): bash-3.2
+# era, SRCSUB; not needed under bash 5.)
 # A temp script, not a shell function: the checks below run via `bash -c`, which
 # does NOT inherit functions from this shell. (Verified the hard way — as a
 # function, checks 5 and 6 passed VACUOUSLY on empty output.)
@@ -11667,9 +11672,8 @@ _S119_EXEMPT="SANDY_AUTO_APPROVE_PRIVILEGED SANDY_DEBUG_CLEANUP"
 # is counted as closing the substitution, and the whole file fails to parse --
 # bash reports a syntax error near an unexpected newline. CI is bash 5 and never sees
 # it; the maintainer's macOS bash 3.2 aborts the entire suite here, before any
-# later section runs. Same family as APOSCS in test/lint-bash32.sh, which
-# catches the apostrophe version of the same scanner flaw; CASESUB now catches
-# this one.
+# later section runs. Bash-3.2 era: not needed under bash 5, and the lint
+# codes for it (CASESUB, APOSCS) are retired.
 _S119_EXEMPT_ARGS=()
 for _S119_K in $_S119_EXEMPT; do _S119_EXEMPT_ARGS+=(-e "$_S119_K"); done
 
@@ -12777,8 +12781,10 @@ check "§126(pre-b) the #130 posture block was extracted as a balanced fragment"
 # now closed with fixtures: the `$( {` group opener matched none of the three
 # span-opener rules, so nothing in this function was scanned for ANY detector;
 # and the CASESUB matcher was anchored to the start of a line, while this
-# `case` is buried mid-statement. Keep comments in here free of apostrophes and
-# unbalanced parens for the same reason -- that is the sibling code APOSCS.
+# `case` is buried mid-statement. All bash-3.2 era: bash 5 parses the bare
+# pattern, and CASESUB is retired. Comments in here must still avoid
+# apostrophes, which the APOSQ span scan reports; unbalanced parens no longer
+# matter.
 _s126_posture() {
     local out rc=0
     out="$( {
@@ -12787,8 +12793,8 @@ _s126_posture() {
         . "$_S126_DIR/fn.sh"
         # `break` simulates a host with neither node nor python3, which is the
         # only way the strip can fail without a malformed file.
-        # The leading-paren pattern form below is REQUIRED, not stylistic --
-        # see the CASESUB note above this function.
+        # The leading-paren pattern form below was required under bash 3.2
+        # -- see the note above this function; harmless under bash 5.
         if [ -n "${3:-}" ]; then command(){ case "$2" in (node|python3) return 1 ;; esac; builtin command "$@"; }; fi
         PROFILE_TMPDIR="$_S126_DIR/pt.$$.$RANDOM"; mkdir -p "$PROFILE_TMPDIR/credentials"
         local host="$_S126_DIR/host.$$.$RANDOM.json"
@@ -16425,8 +16431,8 @@ mkdir -p "$_S153_DIR/fa" "$_S153_DIR/fb" "$_S153_DIR/sb"
 printf 'ALPHA-MARKER\n' > "$_S153_DIR/fa/A.md"
 printf 'BETA-MARKER\n'  > "$_S153_DIR/fb/B.md"
 
-# Extract-then-eval, never `source <(...)` (SRCSUB: bash 3.2 sources nothing
-# there and the calls below die 127 into the ERR trap).
+# Extract-then-eval, not `source <(...)` (bash-3.2 era, SRCSUB: 3.2 sourced
+# nothing there; not needed under bash 5).
 _S153_BLK="$(sed -n '/^_sandy_fm_jesc()/,/^}/p; /^_sandy_aa_compose_table()/,/^}/p; /^_sandy_aa_host_path()/,/^}/p; /^_sandy_aa_compose()/,/^}/p' "$_S153_SANDY")"
 _S153_APPLYBLK="$(awk '/^_sandy_fm_projector_js\(\) \{/,/^# Protected directories/' "$_S153_SANDY" | sed '$d')"
 check "§153(pre) the compose block was extracted from sandy and defines _sandy_aa_compose (mutation: a rename empties this and every check below goes vacuous)" \

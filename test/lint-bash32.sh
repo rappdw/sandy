@@ -20,15 +20,18 @@
 #
 #   VARMB   an UNBRACED `$name` immediately followed by a non-ASCII character,
 #           e.g. `"Probing $host…"`. bash ends a variable name at the first byte
-#           libc's isalnum() rejects, and on macOS in a UTF-8 locale isalnum()
-#           ACCEPTS 0xE2 (the first byte of `…`; Apple's ctype reads the byte as
-#           U+00E2, a letter). So the name runs on into the `…`, names a variable
-#           that does not exist, and `set -u` aborts:
-#           `_rsy_host<?>: unbound variable`. glibc rejects the byte, so CI
-#           never sees it. NOT a bash-3.2 bug: bash 5.3 scans names with the same
-#           isalnum() test, and bash 5.2 aborts the same way here when 0xE2 is
-#           classified alpha. Hit by the first macOS run of `sandy --rsync`
-#           (#374). Fix: `${name}…`.
+#           libc's isalnum() rejects. On macOS in a UTF-8 locale isalnum()
+#           appears to ACCEPT 0xE2 (the first byte of `…`; Apple's ctype reads
+#           the byte as U+00E2, a letter), so the name runs on into the `…`,
+#           names a variable that does not exist, and `set -u` aborts:
+#           `_rsy_host<?>: unbound variable`. glibc rejects the byte in UTF-8
+#           and C locales, so CI never sees it. Kept because it is probably NOT
+#           a bash-3.2 bug: bash 5.3 scans names with the same isalnum() test,
+#           and bash 5.2 and 5.3 abort the same way under a glibc ctype shim
+#           that classifies 0xE2 as alpha. That is inferred from bash source and
+#           the simulation; not yet reproduced with Homebrew bash on macOS. Hit
+#           by the first macOS run of `sandy --rsync` (#374), under bash 3.2.
+#           Fix: `${name}…`.
 #
 #   PYBACK  backticks or $( ) inside a DOUBLE-quoted `python3 -c "..."` body.
 #           Bash expands them regardless of Python comment syntax, so the shell
@@ -41,7 +44,17 @@
 #           closes the string and the shell reinterprets the rest as code. A
 #           "jq's" in a jq program broke `bash -n`. Detected via an explicit
 #           opener, NOT quote parity: parity was tried and floods false
-#           positives on any ordinary "don't" in prose.
+#           positives on any ordinary "don't" in prose. Three openers: a
+#           program-taking command (jq, awk, sed, python, node, ...) or
+#           `bash -c` whose line ENDS in the quote; and, for a program opened
+#           mid-line (`v="$(echo "$j" | jq -r '.a as $x |`), any comment line
+#           with an apostrophe inside a multi-line $( ). That last one is the
+#           remnant of the retired APOSCS span tracker: in bash 5 such a program
+#           still passes `bash -n` and dies at runtime (jq rc 3) or fails to
+#           parse, and APOSCS was the only scan that saw it. It over-reports an
+#           apostrophe in a genuine shell comment inside $( ), which bash 5
+#           accepts; telling the two apart needs quote tracking, which is the
+#           parity approach above.
 #
 #   GREPM   `grep -n ... | head` under pipefail (grep dies on EPIPE, exit 2,
 #           ERR trap aborts the run — a race, so it passes locally and fails in
@@ -73,19 +86,27 @@
 #           doctor.sh is host-side and IS scanned as its own file, even though
 #           its heredoc body inside sandy is skipped.
 #
-# RETIRED 2026-11-21, when bash 5 became the host requirement. Each was a
-# bash-3.2 parser bug, and each example runs correctly under bash 5.2 with
-# `set -euo pipefail` (bash 4.0 began parsing $( ) with the real parser):
+# RETIRED 2026-11-21, when bash 5 became the host requirement. Each hazard
+# existed only in bash 3.2, and each example runs correctly under bash 5.0,
+# 5.1, 5.2 and 5.3 with `set -euo pipefail`:
 #
 #   SRCSUB  nested `source <(...)` inside `$(...)` sourced nothing (§83).
+#           bash 3.2 read st_size bytes of the sourced file, 0 for a pipe;
+#           bash 4+ reads a non-regular file to EOF.
 #   APOSCS  an apostrophe or unbalanced paren in a comment inside a multi-line
-#           `$( )` opened a quote that never closed: parse abort (§86).
+#           `$( )` opened a quote that never closed: parse abort (§86). bash
+#           3.2 scanned the substitution for its closing `)` without knowing
+#           comments; 4.0 taught that scanner comments and `case`, and 5.2
+#           replaced it with a recursive call to the parser. The one part
+#           that still matters in bash 5 lives on under APOSQ (above).
 #   CASESUB a `case` pattern's `)` inside a multi-line `$( )` closed the
-#           substitution early: parse abort (§119, §126).
+#           substitution early: parse abort (§119, §126). Same scanner.
 #
 # Deliberately NOT checked: `set -E` ERR traps firing in command-substitution
-# subshells (real — see sandy:1043 — but not reliably detectable statically, and
-# a false positive here is worse than a miss). Also not checked: `readlink -f`,
+# subshells for a failure the outer `||` handles. A bash-3.2 behavior (bash 5.0
+# and 5.2 do not fire the trap for `x="$(false)" || x=""` under set -eE; see
+# _sandy_emit_container_daemon_fields in sandy), and not reliably detectable
+# statically anyway. Also not checked: `readlink -f`,
 # which macOS has supported since 12.3 — flagging it now would be crying wolf.
 
 set -uo pipefail
@@ -310,18 +331,77 @@ def scan(path):
     # floods the rest of the file with false positives. So this requires an
     # explicit opener — a known program-taking command whose line ENDS with the
     # opening quote — and closes on a line whose first character is that quote.
+    #
+    # `bash -c '` / `sh -c '` ending the line opens one too: a shell program
+    # passed that way breaks the same way. Its body usually closes MID-line
+    # (`  done' _ "$x"`), so it closes on the first line holding any quote --
+    # which is exactly where the shell closes it, since nothing escapes inside
+    # single quotes. With the program closer above, the scan ran on past such
+    # bodies and flagged ~40 ordinary comments below them.
     i = 0
     while i < len(lines):
-        if re.search(r"\b(jq|awk|gawk|sed|perl|python3?|node)\b[^']*'\s*$", lines[i]):
+        _prog = re.search(r"\b(jq|awk|gawk|sed|perl|python3?|node)\b[^']*'\s*$", lines[i])
+        _shc = re.search(r"(?:^|[\s;&|(])(?:bash|sh)\s+-[A-Za-z]*c\s+'\s*$", lines[i])
+        if _prog or _shc:
             j, start = i + 1, i
             while j < len(lines) and j - start < MAX_BLOCK:
                 if re.match(r"^\s*'", lines[j]):
                     break
                 if re.match(r"^\s*#", lines[j]) and "'" in lines[j]:
                     out.append((j + 1, "APOSQ", lines[j].strip()[:88]))
+                    if _shc and not _prog:
+                        break
+                elif _shc and not _prog and "'" in lines[j]:
+                    break
                 j += 1
             i = j
         i += 1
+
+    # APOSQ, second scan: the same hazard where the single-quoted program does
+    # NOT open at the end of a line, so the scan above never starts. Typical:
+    #
+    #     v="$(
+    #       echo "$j" | jq -r '.a as $x |
+    #         # a comment with an apostrophe here closes the program
+    #         .b + $x'
+    #     )"
+    #
+    # `bash -n` passes, and the run dies at runtime (jq syntax error, rc 3), in
+    # bash 5 as in 3.2. This is the remnant of the retired APOSCS span tracker,
+    # whose spans caught it as a side effect: inside a multi-line $( ) span, a
+    # comment line holding an apostrophe is reported. It over-approximates on
+    # purpose. In bash 5 an apostrophe in a GENUINE shell comment inside $( ) is
+    # harmless, but telling that apart needs quote-state tracking, and quote
+    # parity is the approach the header records as a false-positive flood. The
+    # tree already avoids the pattern (APOSCS enforced it for months), and the
+    # fix -- reword the comment -- costs nothing. What the 3.2-only parts of
+    # APOSCS did is gone: unbalanced parens in comments, `case` patterns, and
+    # the heredoc-carrying opener (a heredoc body is not shell, so its lines are
+    # skipped here). Openers, each requiring a GENUINELY multi-line span:
+    #   - `$(` at the end of a line;
+    #   - an unclosed `$(` on a line ending in a continuation (`\` or `|`);
+    #   - `$( {` opening a brace group at the end of a line.
+    # The span closes on a bare `)` line, when paren balance returns to zero
+    # (the closing line often closes inline: `.b + $x')"`), or after MAX_BLOCK.
+    _hb = heredoc_body_lines(lines)
+    depth, opened_at, bal = 0, 0, 0
+    for i, l in enumerate(lines, 1):
+        if depth == 0:
+            _open = ("$(" in l and l.count("(") > l.count(")")
+                     and re.search(r"(?:\\|\|)\s*$", l) is not None)
+            if (re.search(r"\$\(\s*$", l) or _open
+                    or re.search(r"\$\(\s*\{\s*$", l)):
+                depth, opened_at = 1, i
+                bal = l.count("(") - l.count(")")
+            continue
+        if re.match(r'^\s*\)"?\s*$', l) or i - opened_at > MAX_BLOCK:
+            depth = 0
+            continue
+        if (i - 1) not in _hb and re.match(r"^\s*#", l) and "'" in l:
+            out.append((i, "APOSQ", l.strip()[:88]))
+        bal += l.count("(") - l.count(")")
+        if bal <= 0:
+            depth = 0
 
     # GNUBIN — see the header for scope and why heredoc bodies are out.
     if os.path.basename(path) not in GNUBIN_EXEMPT:
@@ -380,6 +460,56 @@ if [ "$SELF_TEST" = true ]; then
     _fx="$(mktemp -d)"
     printf '%s\n' '#!/bin/bash' 'python3 -c "' '# the `sandy` binary' 'print(1)' '" arg' > "$_fx/pyback.sh"
     printf '%s\n' '#!/bin/bash' "jq --arg s x '" '  .a //= 1 |' "  # note: jq's //= is odd here" '  .b' "' file" > "$_fx/aposq.sh"
+    # APOSQ where the program does NOT open at end of line (the remnant of the
+    # retired APOSCS span tracker). Reviewer fixtures, copied verbatim: bash 5
+    # passes `bash -n` on aposq2 and dies at runtime (jq syntax error, rc 3);
+    # aposq3 fails `bash -n`. aposq4 is a `bash -c '` body.
+    {
+        echo 'set -euo pipefail'
+        echo 'trap '"'"'echo ERR-TRAP rc=$? line=$LINENO'"'"' ERR'
+        echo 'v="$('
+        echo '  echo '"'"'{"a":1,"b":2}'"'"' | jq -r '"'"'.a as $x |'
+        echo '    # don'"'"'t drop it, it'"'"'s the key'
+        echo '    .b + $x'"'"''
+        echo ')"'
+        echo 'echo "v=$v"'
+    } > "$_fx/aposq2.sh"
+    {
+        echo 'set -euo pipefail'
+        echo 'trap '"'"'echo ERR-TRAP rc=$? line=$LINENO'"'"' ERR'
+        echo 'v="$(echo '"'"'{"a":1}'"'"' | jq -r '"'"'.a as $a |'
+        echo '  # jq'"'"'s binding, kept for later'
+        echo '  $a + 1'"'"')"'
+        echo 'echo "v=$v"'
+        echo 'y='"'"'another'"'"''
+        echo 'echo "$y"'
+    } > "$_fx/aposq3.sh"
+    {
+        echo 'set -euo pipefail'
+        echo 'trap '"'"'echo ERR-TRAP rc=$? line=$LINENO'"'"' ERR'
+        echo 'out="$(bash -c '"'"''
+        echo '  # the probe can'"'"'t see the host here'
+        echo '  echo inner'
+        echo "')\""
+        echo 'echo "out=$out"'
+        echo 'echo "after"'
+        echo 'x='"'"'later quote'"'"''
+        echo 'echo "x=$x"'
+    } > "$_fx/aposq4.sh"
+    # ...and what is NOT the hazard must not fire: a `bash -c` body that has
+    # closed mid-line, followed by an ordinary comment; a heredoc body inside a
+    # $( ) span (not shell, so its "#" lines are not comments).
+    {
+        echo '#!/bin/bash'
+        echo 'bash -c '"'"''
+        echo '  for f in a b; do echo "$f"; done'"'"' _ x'
+        echo '# the probe'"'"'s comment after the body closed'
+        echo 'v="$('
+        echo '  cat <<'"'"'EOF'"'"''
+        echo '# a heredoc line with an apostrophe'"'"'s worth of text'
+        echo 'EOF'
+        echo ')"'
+    } > "$_fx/aposqok.sh"
     printf '%s\n' '#!/bin/bash' 'L="$(grep -n PATTERN f | head -1 | cut -d: -f1)"' > "$_fx/grepm.sh"
     # Second GREPM shape: a cluster ending in an argument-taking flag whose
     # numeric argument was split off by a bulk -m1 conversion.
@@ -402,13 +532,20 @@ if [ "$SELF_TEST" = true ]; then
     # heredoc body (container-side, bash 5).
     printf '%s\n' '#!/bin/bash' 'info "Probing ${_rsy_host}…"' 'cat <<EOF' 'Probing $_rsy_host…' 'EOF' > "$_fx/varmbok.sh"
     _fails=0
-    for probe in varmb pyback aposq grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
+    for probe in varmb pyback aposq aposq2 aposq3 aposq4 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
             echo "  detector OK: $probe"
         fi
     done
+    if python3 "$_scanner" "$_fx/aposqok.sh" >/dev/null 2>&1; then
+        echo "  negative control OK: APOSQ does not fire past a closed bash -c body or in a heredoc"
+    else
+        echo "SELF-TEST FAIL: APOSQ false positive" >&2
+        python3 "$_scanner" "$_fx/aposqok.sh" >&2
+        _fails=$((_fails + 1))
+    fi
     if python3 "$_scanner" "$_fx/varmbok.sh" >/dev/null 2>&1; then
         echo "  negative control OK: \${name} and heredoc bodies do not fire VARMB"
     else

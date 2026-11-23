@@ -397,8 +397,9 @@ INJECT
 # removed heredoc body -- not sandy's own tooling. It keeps this harness's
 # row-format-based wait-for-a-bound-socket logic unchanged. Written straight
 # to a temp FILE, not captured via "$(cat <<TAG ... TAG)" -- a heredoc nested
-# inside a multi-line $( ) is the APOSCS/CASESUB bash-3.2 parser trap
-# (test/lint-bash32.sh), and the body below has apostrophes in its comments.
+# inside a multi-line $( ) was the APOSCS/CASESUB bash-3.2 parser trap
+# (bash-3.2 era; not needed under bash 5), and the body below has apostrophes
+# in its comments.
 _UDS_SESSIONS_FILE="$(mktemp)"
 # Belt-and-suspenders: the explicit rm near the bottom of the script covers
 # the normal exit path, but an aborted run (Ctrl-C, an unexpected early exit)
