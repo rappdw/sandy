@@ -376,15 +376,20 @@ def scan(path):
     # tree already avoids the pattern (APOSCS enforced it for months), and the
     # fix -- reword the comment -- costs nothing. What the 3.2-only parts of
     # APOSCS did is gone: unbalanced parens in comments, `case` patterns, and
-    # the heredoc-carrying opener (a heredoc body is not shell, so its lines are
-    # skipped here). Openers, each requiring a GENUINELY multi-line span:
+    # the heredoc-carrying opener. Heredoc bodies depend on where the span
+    # opened. Opened OUTSIDE a heredoc body, the span's own heredoc lines are
+    # data fed to a command, not shell, and are skipped. Opened INSIDE one, the
+    # body is very likely a generated shell script (sandy writes entrypoint.sh,
+    # user-setup.sh and the relay this way) that passes the host's `bash -n`
+    # and breaks at runtime in the container, so its lines are scanned.
+    # Openers, each requiring a GENUINELY multi-line span:
     #   - `$(` at the end of a line;
     #   - an unclosed `$(` on a line ending in a continuation (`\` or `|`);
     #   - `$( {` opening a brace group at the end of a line.
     # The span closes on a bare `)` line, when paren balance returns to zero
     # (the closing line often closes inline: `.b + $x')"`), or after MAX_BLOCK.
     _hb = heredoc_body_lines(lines)
-    depth, opened_at, bal = 0, 0, 0
+    depth, opened_at, bal, in_body = 0, 0, 0, False
     for i, l in enumerate(lines, 1):
         if depth == 0:
             _open = ("$(" in l and l.count("(") > l.count(")")
@@ -392,12 +397,14 @@ def scan(path):
             if (re.search(r"\$\(\s*$", l) or _open
                     or re.search(r"\$\(\s*\{\s*$", l)):
                 depth, opened_at = 1, i
+                in_body = (i - 1) in _hb
                 bal = l.count("(") - l.count(")")
             continue
         if re.match(r'^\s*\)"?\s*$', l) or i - opened_at > MAX_BLOCK:
             depth = 0
             continue
-        if (i - 1) not in _hb and re.match(r"^\s*#", l) and "'" in l:
+        if ((in_body or (i - 1) not in _hb)
+                and re.match(r"^\s*#", l) and "'" in l):
             out.append((i, "APOSQ", l.strip()[:88]))
         bal += l.count("(") - l.count(")")
         if bal <= 0:
@@ -496,6 +503,27 @@ if [ "$SELF_TEST" = true ]; then
         echo 'x='"'"'later quote'"'"''
         echo 'echo "x=$x"'
     } > "$_fx/aposq4.sh"
+    # aposq5: the same hazard inside a heredoc BODY that is itself a generated
+    # shell script (as sandy writes entrypoint.sh / user-setup.sh). The host
+    # file passes `bash -n`; the generated script dies at runtime (rc 3).
+    {
+        echo '#!/usr/bin/env bash'
+        echo '# Host writes a container-side script from a heredoc, the way sandy writes'
+        echo '# entrypoint.sh / user-setup.sh. The generated script carries the APOSQ hazard.'
+        echo 'set -euo pipefail'
+        echo 'OUT="${1:-./generated.sh}"'
+        echo 'cat > "$OUT" <<'"'"'ENTRY'"'"''
+        echo 'set -euo pipefail'
+        echo 'trap '"'"'echo ERR-TRAP rc=$? line=$LINENO'"'"' ERR'
+        echo 'v="$('
+        echo '  echo '"'"'{"a":1,"b":2}'"'"' | jq -r '"'"'.a as $x |'
+        echo '    # don'"'"'t drop it, it'"'"'s the key'
+        echo '    .b + $x'"'"''
+        echo ')"'
+        echo 'echo "v=$v"'
+        echo 'ENTRY'
+        echo 'echo "wrote $OUT"'
+    } > "$_fx/aposq5.sh"
     # ...and what is NOT the hazard must not fire: a `bash -c` body that has
     # closed mid-line, followed by an ordinary comment; a heredoc body inside a
     # $( ) span (not shell, so its "#" lines are not comments).
@@ -532,7 +560,7 @@ if [ "$SELF_TEST" = true ]; then
     # heredoc body (container-side, bash 5).
     printf '%s\n' '#!/bin/bash' 'info "Probing ${_rsy_host}…"' 'cat <<EOF' 'Probing $_rsy_host…' 'EOF' > "$_fx/varmbok.sh"
     _fails=0
-    for probe in varmb pyback aposq aposq2 aposq3 aposq4 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
+    for probe in varmb pyback aposq aposq2 aposq3 aposq4 aposq5 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else

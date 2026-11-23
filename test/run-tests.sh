@@ -6416,8 +6416,9 @@ check "detectors self-test: GNUBIN probes are present" \
 # The codes that survived the 2026-11-21 retirement of the bash-3.2-only ones,
 # pinned by probe so a later cleanup cannot drop one as "a bash 3.2 thing":
 # VARMB (macOS libc ctype, any bash), PYBACK, GREPM, and APOSQ including its
-# span and `bash -c` openers (aposq2-4; they break bash 5 too, lint header).
-for _s89_p in varmb pyback aposq aposq2 aposq3 aposq4 grepm; do
+# span and `bash -c` openers and spans in generated scripts (aposq2-5; they
+# break bash 5 too, lint header).
+for _s89_p in varmb pyback aposq aposq2 aposq3 aposq4 aposq5 grepm; do
     check "detectors self-test: the $_s89_p probe is present and fires" \
         bash -c 'printf "%s\n" "$1" | grep -qxF "$2"' _ "$_S89_SELF_OUT" "  detector OK: $_s89_p"
 done
