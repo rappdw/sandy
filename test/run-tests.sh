@@ -13372,6 +13372,8 @@ _S130_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 # The block, after the two helpers it resolves the gitdir with (shared with
 # the by-name symlink sweep).
 sed -n '/^_sandy_gitdir_rel() {/,/^}$/p; /^_sandy_gitdir_host() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S130_DIR/gitblk.sh"
+# #582: and the two it accepts a linked worktree's admin dir with.
+sed -n '/^_sandy_gitdir_mount_dir() {/,/^}$/p; /^_sandy_gitdir_worktree_common() {/,/^}$/p; /^_sandy_is_gitdir() {/,/^}$/p; /^_sandy_ws_physical() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
 awk '/^if \[ -f "\$WORK_DIR\/\.git" \]; then$/,/^fi$/' "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
 sed -n '/^_sandy_is_protected_rel() {/,/^}$/p'   "$SANDY_SCRIPT"  > "$_S130_DIR/pred.sh"
 sed -n '/^_sandy_protected_files() {/,/^}$/p'    "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
@@ -13382,7 +13384,8 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 : > "$_S130_DIR/scan.sh"
 for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_is_copied_rel _sandy_symlink_inside _sandy_symlink_resolve \
           _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_symlink_byname_rels _sandy_symlink_canon _sandy_symlink_target_judged _sandy_symlink_walk \
-          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan; do
+          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_gitdir_mount_dir _sandy_gitdir_worktree_common _sandy_worktree_admin_dirs _sandy_is_gitdir _sandy_ws_physical; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
 done
 unset _f
@@ -27770,7 +27773,9 @@ check "§238(latecp) .claude swapped for a link out of the workspace after the g
 _S238_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify _sandy_symlink_is_copied_rel \
           _sandy_symlink_walk _sandy_ws_physical _sandy_gitdir_host _sandy_symlink_path_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_gitdir_rel \
+          _sandy_gitdir_mount_dir _sandy_gitdir_worktree_common _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S238_D/fns.sh"
 done
 mkdir -p "$_S238_D/h/ws/c" "$_S238_D/h/o" "$_S238_D/h/p" "$_S238_D/h/dots" "$_S238_D/h/stow" "$_S238_D/h/.sandy/x" "$_S238_D/sys"
@@ -28121,7 +28126,9 @@ check "§239(g4) control: a real empty .github/workflows (debris) and an empty .
 # uncopied path linked to the same place is not.
 _S239_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host \
+          _sandy_gitdir_mount_dir _sandy_gitdir_worktree_common _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S239_D/fns.sh"
 done
 unset _f
@@ -29097,7 +29104,9 @@ _S251_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
           _sandy_symlink_is_byname_mount_rel _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts _sandy_path_overlaps _sandy_gstack_forbidden \
           _sandy_gstack_refuse_forbidden _sandy_symlink_resolve _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host _sandy_symlink_recorded \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_byname_rels _sandy_gitdir_mount_dir _sandy_gitdir_worktree_common \
+          _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S251_D/fns.sh"
 done
 unset _f
@@ -34227,6 +34236,235 @@ check "§258(c) when the container may still exist after its removal, the report
 _a6_done
 unset -f _s258_repo
 unset _S258_B _S258_PATH _S258_C _S258_W _S258_O _S258_R
+echo ""
+
+# ============================================================
+section "§259: every git path sandy mounts by name (the gitdir a .git file names, its config, hooks, info, commondir and config.worktree, those of each submodule gitdir and worktree admin dir, the core.hooksPath directory) is judged by the dangerous-symlink gate wherever a link there points, a target outside \$HOME included, and mounted only after approval"
+# ============================================================
+_fx_a6; _fx_s236; _fx_s230
+# WHY. The scan (_sandy_symlink_classify) and the -v check before docker run
+# (_sandy_symlink_path_unjudged) judged a link to a target outside $HOME only at
+# a protected path, a copied tree or .gstack. The git paths sandy derives from
+# the workspace and mounts by name are none of those, so `.git` FILE
+# `gitdir: vendor/g` (an in-workspace git directory) with vendor/g/config ->
+# a host file outside $HOME launched with rc 0, no prompt, and
+# `-v <ws>/vendor/g/config:...:ro` handed that file to the container (Docker
+# follows a link at a -v source). Both now ask one predicate
+# (_sandy_symlink_is_byname_rel: the whole _sandy_symlink_byname_rels list), so
+# such a link reaches the gate (a headless launch refuses it), is mounted
+# after approval, and one planted after the gate is refused before docker run.
+# Changing only the -v check would refuse every launch with "Launch again",
+# which could never help: (b) and (c) launch with the link approved.
+#
+# Targets live in CASE-out, beside the fixture HOME (CASE), so outside it.
+_s259_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+_s259_case() {   # $1 = CASE: CASE-out/secret (a file) and CASE-out/dir (a directory)
+    mkdir -p "$_A6_DIR/$1/ws" "$_A6_DIR/$1-out/dir"
+    printf 'S259-SECRET\n' > "$_A6_DIR/$1-out/secret"; printf 'S259-HOOK\n' > "$_A6_DIR/$1-out/dir/pre-commit"
+}
+_S259_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+# _s259_fix CASE KIND: the layout of one kind, with its link, in CASE/ws.
+# Prints the link as the gate names it: "<rel> -> <target>".
+_s259_fix() {
+    local w="$_A6_DIR/$1/ws" o="$_A6_DIR/$1-out" rel tgt
+    case "$2" in
+        g-*)   _s259_gd "$w/vendor/g"; printf 'gitdir: vendor/g\n' > "$w/.git" ;;
+        gs-*)  _s259_gd "$w/vendor/g"; _s259_gd "$w/vendor/g/modules/sub"; printf 'gitdir: vendor/g\n' > "$w/.git" ;;
+        s-*)   _s259_gd "$w/.git"; _s259_gd "$w/.git/modules/sub" ;;
+        wt-*)  _s259_gd "$w/.git"; mkdir -p "$w/.git/worktrees/w"; printf 'ref: refs/heads/w\n' > "$w/.git/worktrees/w/HEAD" ;;
+        hp)    _s259_gd "$w/.git"; printf '[core]\n\thooksPath = tools/hooks\n' > "$w/.git/config"; mkdir -p "$w/tools" ;;
+    esac
+    case "$2" in
+        g-config) rel=vendor/g/config; tgt="$o/secret" ;;
+        g-hooks) rel=vendor/g/hooks; tgt="$o/dir" ;;
+        g-info) rel=vendor/g/info; tgt="$o/dir" ;;
+        g-commondir) rel=vendor/g/commondir; tgt="$o/secret" ;;
+        g-cfgwt) rel=vendor/g/config.worktree; tgt="$o/secret" ;;
+        gs-hooks) rel=vendor/g/modules/sub/hooks; tgt="$o/dir" ;;
+        s-config) rel=.git/modules/sub/config; tgt="$o/secret" ;;
+        s-hooks) rel=.git/modules/sub/hooks; tgt="$o/dir" ;;
+        s-info) rel=.git/modules/sub/info; tgt="$o/dir" ;;
+        wt-commondir) rel=.git/worktrees/w/commondir; tgt="$o/secret" ;;
+        hp) rel=tools/hooks; tgt="$o/dir" ;;
+    esac
+    ln -s "$tgt" "$w/$rel"
+    printf '%s -> %s\n' "$rel" "$tgt"
+}
+# (a) each kind, a headless launch with no approval: refused by the gate,
+# naming the link; no docker run of any kind carried the outside path.
+_S259_KINDS="g-config g-hooks g-info g-commondir g-cfgwt gs-hooks s-config s-hooks s-info wt-commondir hp"
+for _S259_N in $_S259_KINDS; do
+    _S259_C="s259-$_S259_N"; _s259_case "$_S259_C"
+    _s259_fix "$_S259_C" "$_S259_N" > "$_A6_DIR/$_S259_C.link"
+    _a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+done
+# (b) approved (the list a "y" at the prompt persists): the launch runs and
+# mounts the by-name path, so Docker hands the container the approved target.
+_S259_C=s259-ok; _s259_case "$_S259_C"; _S259_L="$(_s259_fix "$_S259_C" g-config)"; _s236_seed "$_S259_C" "$_S259_L"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+_S259_C=s259-oks; _s259_case "$_S259_C"; _S259_L="$(_s259_fix "$_S259_C" s-hooks)"; _s236_seed "$_S259_C" "$_S259_L"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+# (c) planted after the gate (at the second core.hooksPath read: the scan
+# reads it first, the hooks mount next), with vendor/g/config a plain file at
+# the scan: the -v check refuses it, by name.
+_S259_C=s259-late; _s259_case "$_S259_C"; _S259_W="$_A6_DIR/$_S259_C/ws"; _S259_G="$_A6_DIR/$_S259_C/gitbin"
+_s259_gd "$_S259_W/vendor/g"; printf '[core]\n' > "$_S259_W/vendor/g/config"; printf 'gitdir: vendor/g\n' > "$_S259_W/.git"; mkdir -p "$_S259_G"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in *core.hooksPath*) n=$(cat %q 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > %q
+    [ "$n" -lt 2 ] || [ -e %q ] || { rm -f %q; ln -s %q %q; : > %q; } ;; esac\n' \
+      "$_A6_DIR/$_S259_C/hp-reads" "$_A6_DIR/$_S259_C/hp-reads" "$_A6_DIR/$_S259_C/planted" \
+      "$_S259_W/vendor/g/config" "$_A6_DIR/$_S259_C-out/secret" "$_S259_W/vendor/g/config" "$_A6_DIR/$_S259_C/planted"
+  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S259_G/git"
+chmod +x "$_S259_G/git"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}" PATH="$_S259_G:$_A6_DIR/bin:$PATH"
+# (d) under --start, planted between the approval pass and the supervisor:
+# the supervisor's own scan judges it.
+_s259_plant() { _s259_case s259-start; _s259_fix s259-start g-config > "$_A6_DIR/s259-start.link"; }
+_a6_bg s259-start _s230_sup_after s259-start _s259_plant
+for _S259_N in $_S259_KINDS; do
+    _S259_C="s259-$_S259_N"; _a6_join "$_S259_C"
+    _S259_L="$(cat "$_A6_DIR/$_S259_C.link")"
+    _S259_OK=0; { _s230_refused "$_S259_C" "$_S259_L" && ! grep -rqsF -- "$_A6_DIR/$_S259_C-out" "$_A6_DIR/$_S259_C/runs"; } || _S259_OK=$?
+    [ "$_S259_OK" = 0 ] || _a6_diag "§259(a) $_S259_N" "$_S259_C"
+    check "§259(a) $_S259_N: a headless launch with ${_S259_L%% -> *} linked to a target outside \$HOME is refused by the dangerous-symlink gate, naming the link; nothing outside reaches a docker run (mutation: the predicate dropped from _sandy_symlink_classify, or this path left out of _sandy_symlink_byname_rels; rc ${_A6_RC:-none})" \
+        test "$_S259_OK" = 0
+done
+_S259_C=s259-ok; _S259_W="$_A6_DIR/$_S259_C/ws"; _a6_join "$_S259_C"
+_S259_R="$(_s236_unmet "$_S259_C" "$_A6_DIR/$_S259_C" "vendor/g/config -> $_A6_DIR/$_S259_C-out/secret" "")"
+if [ -z "$_S259_R" ] && ! _a6_pair "$(_a6_agent_args "$_S259_C")" -v "$_S259_W/vendor/g/config:/home/sandy/ws/vendor/g/config:ro"; then _S259_R="no -v of vendor/g/config"; fi
+[ -z "$_S259_R" ] || _a6_diag "§259(b)" "$_S259_C"
+check "§259(b) approved, the same gitdir config link launches (rc 0, the list unchanged) and vendor/g/config is mounted :ro, so the container gets the approved target (mutation: the predicate in the -v check only: every launch refused with \"Launch again\"; ${_S259_R:-ok})" \
+    test -z "$_S259_R"
+_S259_C=s259-oks; _S259_W="$_A6_DIR/$_S259_C/ws"; _a6_join "$_S259_C"
+_S259_R="$(_s236_unmet "$_S259_C" "$_A6_DIR/$_S259_C" ".git/modules/sub/hooks -> $_A6_DIR/$_S259_C-out/dir" "")"
+if [ -z "$_S259_R" ] && ! _a6_pair "$(_a6_agent_args "$_S259_C")" -v "$_S259_W/.git/modules/sub/hooks:/home/sandy/ws/.git/modules/sub/hooks:ro"; then _S259_R="no -v of .git/modules/sub/hooks"; fi
+[ -z "$_S259_R" ] || _a6_diag "§259(b2)" "$_S259_C"
+check "§259(b2) ...and an approved submodule hooks link the same (${_S259_R:-ok})" \
+    test -z "$_S259_R"
+_S259_C=s259-late; _a6_join "$_S259_C"
+_S259_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S259_C")" ] && [ -e "$_A6_DIR/$_S259_C/planted" ] \
+  && grep -qF "leaves the workspace through a link the" "$_A6_DIR/$_S259_C/out" \
+  && grep -qF "vendor/g/config -> $_A6_DIR/$_S259_C-out/secret" "$_A6_DIR/$_S259_C/out" \
+  && ! grep -rqsF -- "$_A6_DIR/$_S259_C-out" "$_A6_DIR/$_S259_C/runs"; } || _S259_OK=$?
+[ "$_S259_OK" = 0 ] || _a6_diag "§259(c)" "$_S259_C"
+check "§259(c) vendor/g/config made a link to a target outside \$HOME after the gate (before docker run) is refused by the -v check, named, no agent run (mutation: the predicate dropped from _sandy_symlink_path_unjudged; rc ${_A6_RC:-none})" \
+    test "$_S259_OK" = 0
+_a6_join s259-start
+_S259_OK=0; _s230_refused s259-start "$(cat "$_A6_DIR/s259-start.link")" && ! grep -rqsF -- "$_A6_DIR/s259-start-out" "$_A6_DIR/s259-start/runs" || _S259_OK=$?
+[ "$_S259_OK" = 0 ] || _a6_diag "§259(d)" s259-start
+check "§259(d) under --start, the gitdir config link planted after the approval pass is refused by the supervisor's gate (rc ${_A6_RC:-none})" \
+    test "$_S259_OK" = 0
+_a6_done
+unset -f _s259_gd _s259_case _s259_fix _s259_plant
+unset _S259_K _S259_KINDS _S259_N _S259_C _S259_W _S259_G _S259_L _S259_OK _S259_R
+echo ""
+
+# ============================================================
+section "§260: a linked worktree (git worktree add) launches: its admin dir is accepted when its commondir names a git directory that holds it, and that common dir is mounted and protected like any gitdir a .git file names; an admin dir that is not one is still refused (#582)"
+# ============================================================
+_fx_a6; _fx_s236; _fx_s230; _fx_s248
+# WHY. A linked worktree's .git file names <main>/.git/worktrees/<name>,
+# which has HEAD and commondir but no objects/ or refs/ (they live in the
+# main .git). The R5a structural check (HEAD, objects/, refs/) refused every
+# linked worktree. Now an admin dir is accepted when its commondir names a
+# directory that passes the same check and holds the admin dir as
+# worktrees/<name> (_sandy_gitdir_worktree_common); that common dir is what is
+# mounted, read-write, with its config, hooks, info, commondir and
+# config.worktree :ro, its worktree admin files and submodules protected, and
+# on macOS its files locked, exactly as a gitdir a .git file names. The
+# property R5a exists for still holds: a .git file cannot make sandy mount a
+# directory that is not a git directory (~/.ssh, /etc).
+_s260_git() { git -c user.name=s260 -c user.email=s260@example.invalid -c init.defaultBranch=main -c core.hooksPath= "$@"; }
+_s260_wt() {   # $1 = CASE: CASE/main a repository with one commit, CASE/ws its linked worktree
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h"
+    _s260_git init -q "$h/main" && _s260_git -C "$h/main" commit -q --allow-empty -m init \
+        && _s260_git -C "$h/main" worktree add -q "$h/ws" -b wt >/dev/null 2>&1
+}
+_s260_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+# (a) a real linked worktree, Linux path.
+_S260_C=s260-wt; _s260_wt "$_S260_C"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+# (b) the same on the macOS path: the common dir's config and commondir are
+# locked during the run and unlocked after; the seed is removed.
+_S260_C=s260-wtm; _s260_wt "$_S260_C"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S248_PATH"
+# (c) tampered admin dirs, each refused: (c1) commondir names a directory that
+# is not a git directory (~/.ssh); (c2) commondir names a real git directory
+# that does not hold the admin dir; (c3) commondir is a link; (c4) the admin
+# dir lies under worktrees/ of a directory with HEAD but no objects/ or refs/.
+_S260_C=s260-c1; mkdir -p "$_A6_DIR/$_S260_C/ws" "$_A6_DIR/$_S260_C/.ssh/worktrees/x"; printf 'S260-KEY\n' > "$_A6_DIR/$_S260_C/.ssh/id_ed25519"
+printf 'ref: refs/heads/x\n' > "$_A6_DIR/$_S260_C/.ssh/worktrees/x/HEAD"; printf '../..\n' > "$_A6_DIR/$_S260_C/.ssh/worktrees/x/commondir"
+printf 'gitdir: ../.ssh/worktrees/x\n' > "$_A6_DIR/$_S260_C/ws/.git"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S260_C=s260-c2; _s260_wt "$_S260_C"; mkdir -p "$_A6_DIR/$_S260_C/adm/x"
+printf 'ref: refs/heads/x\n' > "$_A6_DIR/$_S260_C/adm/x/HEAD"; printf '%s\n' "$_A6_DIR/$_S260_C/main/.git" > "$_A6_DIR/$_S260_C/adm/x/commondir"
+printf 'gitdir: ../adm/x\n' > "$_A6_DIR/$_S260_C/ws/.git"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S260_C=s260-c3; _s260_wt "$_S260_C"; _S260_A="$_A6_DIR/$_S260_C/main/.git/worktrees/ws"
+printf '../..\n' > "$_A6_DIR/$_S260_C/cd"; rm -f "$_S260_A/commondir"; ln -s "$_A6_DIR/$_S260_C/cd" "$_S260_A/commondir"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+_S260_C=s260-c4; mkdir -p "$_A6_DIR/$_S260_C/ws" "$_A6_DIR/$_S260_C/half/worktrees/x"; printf 'ref: refs/heads/main\n' > "$_A6_DIR/$_S260_C/half/HEAD"
+printf 'ref: refs/heads/x\n' > "$_A6_DIR/$_S260_C/half/worktrees/x/HEAD"; printf '../..\n' > "$_A6_DIR/$_S260_C/half/worktrees/x/commondir"
+printf 'gitdir: ../half/worktrees/x\n' > "$_A6_DIR/$_S260_C/ws/.git"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6
+# (d) a common dir inside the workspace is judged by the symlink gate like
+# any gitdir there (issue 42): vendor/c/hooks -> a directory outside $HOME.
+_S260_C=s260-d; _S260_W="$_A6_DIR/$_S260_C/ws"; mkdir -p "$_S260_W" "$_A6_DIR/$_S260_C-out/dir"
+_s260_gd "$_S260_W/vendor/c"; mkdir -p "$_S260_W/vendor/c/worktrees/x"
+printf 'ref: refs/heads/x\n' > "$_S260_W/vendor/c/worktrees/x/HEAD"; printf '../..\n' > "$_S260_W/vendor/c/worktrees/x/commondir"
+ln -s "$_A6_DIR/$_S260_C-out/dir" "$_S260_W/vendor/c/hooks"; printf 'gitdir: vendor/c/worktrees/x\n' > "$_S260_W/.git"
+_a6_bg "$_S260_C" _a6_launch "$_S260_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S260_C=s260-wt; _S260_H="$_A6_DIR/$_S260_C"; _a6_join "$_S260_C"
+_S260_A="$(_a6_agent_args "$_S260_C")"
+_S260_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S260_A" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_S260_H/main/.git/worktrees/ws/commondir" ] || echo "fixture: no linked worktree"
+    _a6_pair "$_S260_A" -v "$_S260_H/main/.git:/home/sandy/main/.git" || echo "the common dir is not mounted"
+    for _S260_P in config hooks info commondir worktrees/ws/commondir; do
+        _a6_pair "$_S260_A" -v "$_S260_H/main/.git/$_S260_P:/home/sandy/main/.git/$_S260_P:ro" || echo "no :ro mount of $_S260_P"
+    done
+    _a6_pair "$_S260_A" -v "$_S260_H/ws/.git:/home/sandy/ws/.git:ro" || echo "the .git file is not :ro"
+    grep -qF "Git worktree: common dir at /home/sandy/main/.git" "$_A6_DIR/$_S260_C/out" || echo "no worktree line"
+    [ ! -e "$_S260_H/main/.git/commondir" ] || echo "the common dir's seed was left behind"; } 2>&1)" || true
+[ -z "$_S260_R" ] || _a6_diag "§260(a)" "$_S260_C"
+check "§260(a) a linked worktree made by git worktree add launches (rc 0): the main .git is mounted read-write, its config, hooks, info and seeded commondir and the worktree's commondir :ro, the .git file :ro, the seed removed after (mutation: the structural check alone, as before #582, refuses it; ${_S260_R:-ok})" \
+    test -z "$_S260_R"
+_S260_C=s260-wtm; _S260_H="$_A6_DIR/$_S260_C"; _a6_join "$_S260_C"
+_S260_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S260_C")" ]; then echo "launch rc $_A6_RC"; fi
+    for _S260_P in main/.git/config main/.git/commondir main/.git/worktrees/ws/commondir; do
+        grep -qxF "$_S260_H/$_S260_P" "$_S260_H/flags-during-run" 2>/dev/null || echo "$_S260_P not locked during the run"
+    done
+    [ ! -s "$_S260_H/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_S260_H/flags")"
+    [ ! -e "$_S260_H/main/.git/commondir" ] || echo "the seed was left behind"; } 2>&1)" || true
+[ -z "$_S260_R" ] || _a6_diag "§260(b)" "$_S260_C"
+check "§260(b) macOS path: the common dir's config and seeded commondir and the worktree's commondir are locked for the run and unlocked after it (${_S260_R:-ok})" \
+    test -z "$_S260_R"
+for _S260_N in c1 c2 c3 c4; do
+    _S260_C="s260-$_S260_N"; _a6_join "$_S260_C"
+    case "$_S260_N" in c1) _S260_P="$_A6_DIR/$_S260_C/.ssh" ;; c2) _S260_P="$_A6_DIR/$_S260_C/main/.git" ;; c3) _S260_P="$_A6_DIR/$_S260_C/main/.git" ;; c4) _S260_P="$_A6_DIR/$_S260_C/half" ;; esac
+    _S260_OK=0
+    { [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S260_C")" ] \
+      && grep -qF "names a gitdir that is not a git directory" "$_A6_DIR/$_S260_C/out" \
+      && ! grep -rqsF -- "$_S260_P:" "$_A6_DIR/$_S260_C/runs"; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260($_S260_N)" "$_S260_C"
+    case "$_S260_N" in
+        c1) _S260_D="commondir naming a directory that is not a git directory (~/.ssh)" ;;
+        c2) _S260_D="commondir naming a real git directory that does not hold it under worktrees/" ;;
+        c3) _S260_D="commondir that is a link" ;;
+        c4) _S260_D="admin dir under a directory with HEAD but no objects/ or refs/" ;;
+    esac
+    check "§260($_S260_N) an admin dir with a $_S260_D is refused: no agent run, nothing of it mounted (mutation: accept any HEAD + commondir; rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+done
+_S260_C=s260-d; _a6_join "$_S260_C"
+_S260_OK=0; { _s230_refused "$_S260_C" "vendor/c/hooks -> $_A6_DIR/$_S260_C-out/dir" && ! grep -rqsF -- "$_A6_DIR/$_S260_C-out" "$_A6_DIR/$_S260_C/runs"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(d)" "$_S260_C"
+check "§260(d) a worktree whose common dir lies in the workspace: vendor/c/hooks -> a directory outside \$HOME is refused by the dangerous-symlink gate, named, nothing outside mounted (mutation: the by-name list keeps the admin dir, not the common dir; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_done
+unset -f _s260_git _s260_wt _s260_gd
+unset _S260_C _S260_H _S260_W _S260_A _S260_R _S260_P _S260_N _S260_OK _S260_D
 echo ""
 
 # BEGIN SUMMARY

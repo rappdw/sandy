@@ -3086,6 +3086,48 @@ _sandy_gitdir_host() {   # $1 = the gitdir value -> the directory, or nothing
 _sandy_is_gitdir() {
     [ -d "$1" ] && [ ! -L "$1" ] && [ -e "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
 }
+# #582: a linked worktree (`git worktree add`) has a .git FILE naming its admin
+# dir, <common>/worktrees/<name>, which holds HEAD and commondir but no
+# objects/ or refs/: git takes those, and config, hooks and info, from the
+# common dir its commondir names (the main repository's .git). Prints that
+# common dir, spelled under $WORK_DIR when it lies physically in the workspace
+# (as _sandy_gitdir_host spells a gitdir), when directory $1 is such an admin
+# dir: a directory, not a link, holding a HEAD and a commondir that are
+# regular files, not links, whose commondir (one line; relative to $1, as git
+# reads it) names a git directory by structure (_sandy_is_gitdir) of which $1
+# is PHYSICALLY worktrees/<its own name>, so mounting the common dir mounts
+# the admin dir with it. Nothing otherwise. Read-only. The property the R5a
+# check exists for still holds: what is mounted is a directory with HEAD,
+# objects/ and refs/, never ~/.ssh or /etc.
+_sandy_gitdir_worktree_common() {   # $1 = the directory a .git file names
+    local _a="$1" _cd="" _ap _cp _w _nl=$'\n' _cr=$'\r'
+    [ -n "$_a" ] && [ -d "$_a" ] && [ ! -L "$_a" ] || return 0
+    [ -f "$_a/HEAD" ] && [ ! -L "$_a/HEAD" ] && [ -f "$_a/commondir" ] && [ ! -L "$_a/commondir" ] || return 0
+    IFS= read -r -d '' _cd 2>/dev/null < "$_a/commondir" || true
+    # git drops trailing newlines and carriage returns, and nothing else.
+    while [ "${_cd%"$_nl"}" != "$_cd" ] || [ "${_cd%"$_cr"}" != "$_cd" ]; do _cd="${_cd%"$_nl"}"; _cd="${_cd%"$_cr"}"; done
+    case "$_cd" in ''|*"$_nl"*) return 0 ;; esac
+    _ap="$(CDPATH='' cd -P -- "$_a" 2>/dev/null && pwd -P)" || return 0
+    case "$_cd" in /*) ;; *) _cd="$_ap/$_cd" ;; esac
+    _cp="$(CDPATH='' cd -P -- "$_cd" 2>/dev/null && pwd -P)" || return 0
+    [ -n "$_cp" ] && [ -n "$_ap" ] || return 0
+    [ "$_ap" = "${_cp%/}/worktrees/${_ap##*/}" ] || return 0
+    _sandy_is_gitdir "$_cp" || return 0
+    if _w="$(_sandy_ws_physical "$_cp")"; then printf '%s' "$_w"; else printf '%s' "$_cp"; fi
+}
+# The directory sandy mounts for the gitdir a .git FILE names ($1, from
+# _sandy_gitdir_host): $1 itself when it passes the R5a structural check
+# (HEAD, objects/ and refs/), or, for a linked worktree's admin dir, the
+# common dir that holds it (_sandy_gitdir_worktree_common, #582), which is
+# then protected exactly as such a gitdir is (E.8, E.10). Nothing when
+# neither: the launch refuses that .git file. Shared by the mount code and by
+# the by-name list (_sandy_symlink_byname_rels), so the gate judges the paths
+# that are mounted.
+_sandy_gitdir_mount_dir() {   # $1 = the directory a .git file names
+    [ -n "$1" ] || return 0
+    if [ -f "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]; then printf '%s' "$1"; return 0; fi
+    _sandy_gitdir_worktree_common "$1"
+}
 # The submodule gitdirs under modules/ directory $1 that get the :ro overlay,
 # NUL-separated: walked with no depth limit and without following links. A
 # directory there is either a submodule gitdir (_sandy_is_gitdir: printed, and
@@ -18630,9 +18672,12 @@ _sandy_symlink_classify() {
             # #544: and a path sandy mounts read-write by name
             # (_sandy_symlink_is_byname_mount_rel: .gstack). Docker mounts
             # the link's target, so it is judged wherever it points.
+            # Issue 42: and every other path sandy mounts by name, the git
+            # paths it derives from the workspace among them: one predicate
+            # for all of them, shared with the -v check
+            # (_sandy_symlink_is_byname_rel).
             _sl_rel="${link#$WORK_DIR/}"
-            if _sandy_is_protected_rel "$_sl_rel" || _sandy_symlink_is_copied_rel "$_sl_rel" \
-               || _sandy_symlink_is_byname_mount_rel "$_sl_rel"; then
+            if _sandy_symlink_is_byname_rel "$_sl_rel"; then
                 DANGEROUS_SYMLINKS+=("$_sl_rel -> $target")
                 _SANDY_SL_RELS+=("$_sl_rel"); _SANDY_SL_TGTS+=("$target")
             fi
@@ -18730,6 +18775,12 @@ _sandy_symlink_skip_parse() {
         _gits="$(_sandy_symlink_resolve .git | tr '[:upper:]' '[:lower:]')"
         _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
         if [ -n "$_ga" ]; then
+            # #582: and the common dir a linked worktree's admin dir lies in.
+            _ce="$(_sandy_gitdir_worktree_common "$_ga")"
+            if [ -n "$_ce" ]; then
+                _ce="$(readlink -f "$_ce" 2>/dev/null || true)"
+                [ -z "$_ce" ] || _gits="$_gits"$'\n'"$(printf '%s' "$_ce" | tr '[:upper:]' '[:lower:]')"
+            fi
             _ga="$(readlink -f "$_ga" 2>/dev/null || true)"
             [ -z "$_ga" ] || _gits="$_gits"$'\n'"$(printf '%s' "$_ga" | tr '[:upper:]' '[:lower:]')"
         fi
@@ -18831,6 +18882,42 @@ _sandy_symlink_is_copied_rel() {
 _sandy_symlink_is_byname_mount_rel() {
     [ "$1" = .gstack ] || return 1
     case ",${SANDY_SKILL_PACKS:-}," in *,gstack,*) return 0 ;; esac
+    return 1
+}
+
+# Issue 42: the ONE predicate the scan's classification
+# (_sandy_symlink_classify) and the -v check (_sandy_symlink_path_unjudged)
+# share for "a path sandy mounts or copies by name": a link there is judged
+# wherever it points, a target outside $HOME included, because Docker follows
+# a link at a -v source and cp copies what it finds. It is every entry of
+# _sandy_symlink_byname_rels: the protected paths, the copied trees, .gstack
+# while gstack is on (_sandy_symlink_is_byname_mount_rel; a link at .gstack
+# is an ordinary workspace link otherwise), and the git paths the mount code
+# derives from the workspace (the gitdir a .git file names, with its config,
+# hooks, info, packed-refs, commondir and config.worktree, those of every
+# submodule gitdir and linked-worktree admin dir, worktrees/ and its entries,
+# and the core.hooksPath directory). Before, both judged such a target only
+# at the first three, so `gitdir: vendor/g` with vendor/g/config -> a host
+# file outside $HOME was mounted :ro with no prompt. Both must ask the same
+# question: a path the -v check refuses that the scan did not judge is
+# refused on every launch ("Launch again" could never help).
+# The list is read on first need, once per scan and once per -v check
+# (_SANDY_BYNAME_LOADED, cleared by _sandy_resolve_symlinks and by
+# _sandy_symlink_check_mounts), so a workspace with no link that leaves it at
+# such a path never reads it.
+_sandy_symlink_is_byname_rel() {
+    local _bn_p _bn_s
+    if _sandy_is_protected_rel "$1" || _sandy_symlink_is_copied_rel "$1" \
+       || _sandy_symlink_is_byname_mount_rel "$1"; then
+        return 0
+    fi
+    [ "$1" != .gstack ] || return 1
+    if [ "${_SANDY_BYNAME_LOADED:-}" != 1 ]; then
+        _bn_s=$'\n'
+        while IFS= read -r -d '' _bn_p; do _bn_s="$_bn_s$_bn_p"$'\n'; done < <(_sandy_symlink_byname_rels)
+        _SANDY_BYNAME_SET="$_bn_s"; _SANDY_BYNAME_LOADED=1
+    fi
+    case "$_SANDY_BYNAME_SET" in *$'\n'"$1"$'\n'*) return 0 ;; esac
     return 1
 }
 
@@ -18964,8 +19051,17 @@ _sandy_symlink_byname_rels() {
         printf '%s\0' "$_r"
     done
     # Both helpers print nothing unless .git is a file (one process each).
+    # A linked worktree's admin dir stands for the common dir that is mounted
+    # for it (_sandy_gitdir_mount_dir, #582); one that is neither is listed
+    # as named (the launch refuses it).
     _ga=""
-    if [ -f "$WORK_DIR/.git" ]; then _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"; fi
+    if [ -f "$WORK_DIR/.git" ]; then
+        _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
+        if [ -n "$_ga" ] && { [ ! -f "$_ga/HEAD" ] || [ ! -d "$_ga/objects" ] || [ ! -d "$_ga/refs" ]; }; then
+            _w="$(_sandy_gitdir_worktree_common "$_ga")"
+            [ -z "$_w" ] || _ga="$_w"
+        fi
+    fi
     case "$_ga" in
         "$WORK_DIR") _g=. ;;
         "$WORK_DIR"/*) _g="${_ga#"$WORK_DIR"/}" ;;
@@ -19193,8 +19289,8 @@ _sandy_symlink_protected_sweep() {
 # target in $SANDY_HOME is never covered; one that is, or lies under, a
 # target this launch's gate judged is covered (and so is the rest of its
 # tree, until a prefix comes back in); otherwise a target under $HOME, or
-# any target at a protected path, at a copied tree, at the path mounted by name
-# (_sandy_symlink_is_byname_mount_rel), or at one whose workspace name cannot
+# any target at a path sandy mounts or copies by name (_sandy_symlink_is_byname_rel,
+# the scan's own predicate: issue 42), or at one whose workspace name cannot
 # be told, is printed. A path with no link and no `..` component cannot leave
 # where it is, so it costs no readlink.
 _sandy_symlink_path_unjudged() {
@@ -19259,8 +19355,8 @@ _sandy_symlink_path_unjudged() {
         esac
         if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
         if [[ "$_t" == "$HOME"/* ]] || { [ -z "$_q" ] && [ -z "$_qp" ]; } \
-           || { [ -n "$_q" ] && { _sandy_is_protected_rel "$_q" || _sandy_symlink_is_copied_rel "$_q" || _sandy_symlink_is_byname_mount_rel "$_q"; }; } \
-           || { [ -n "$_qp" ] && { _sandy_is_protected_rel "$_qp" || _sandy_symlink_is_copied_rel "$_qp" || _sandy_symlink_is_byname_mount_rel "$_qp"; }; }; then
+           || { [ -n "$_q" ] && _sandy_symlink_is_byname_rel "$_q"; } \
+           || { [ -n "$_qp" ] && _sandy_symlink_is_byname_rel "$_qp"; }; then
             _pu_q="${_q:-${_qp:-$_w}}"; _pu_hit=1; break
         fi
     done
@@ -19310,6 +19406,9 @@ _sandy_symlink_unjudged_refuse() {
 # list (_sandy_symlink_byname_rels) does not know of yet.
 _sandy_symlink_check_mounts() {
     local _i=0 _n=${#RUN_FLAGS[@]} _hit _bad=""
+    # The by-name list as it is now, on first need (issue 42): a gitdir a
+    # .git file names since the gate is judged where it lies today.
+    _SANDY_BYNAME_LOADED=""
     # #544: re-pointed onto .git, a protected path or the workspace since the gate.
     if _sandy_symlink_is_byname_mount_rel .gstack; then _sandy_gstack_refuse_forbidden "$WORK_DIR"; fi
     while [ "$_i" -lt "$_n" ]; do
@@ -19384,6 +19483,7 @@ _sandy_resolve_symlinks() {
     # so strip it or nothing inside the workspace would compare as inside.
     while case "$REAL_WORK_DIR" in //*) true ;; *) false ;; esac; do REAL_WORK_DIR="${REAL_WORK_DIR#/}"; done
     _SANDY_PROTECTED_RELS_LOADED=""   # #494: re-read the protected lists for this scan
+    _SANDY_BYNAME_LOADED=""           # issue 42: and the by-name list, on first need
     _SANDY_BYNAME_HOOKSPATH="$(exec git -C "$WORK_DIR" config --path --get core.hooksPath 2>/dev/null)" || _SANDY_BYNAME_HOOKSPATH=""
     DANGEROUS_SYMLINKS=()
     # Parallel arrays: resolved host path and the container path where it should be mounted
@@ -24626,7 +24726,11 @@ if [ -f "$WORK_DIR/.git" ]; then
     # every prefix, wherever in the workspace it lies.
     GITDIR_REL="$(_sandy_gitdir_rel)"
     if [ -n "$GITDIR_REL" ]; then
-        GITDIR_HOST="$(_sandy_gitdir_host "$GITDIR_REL")"
+        GITDIR_NAMED="$(_sandy_gitdir_host "$GITDIR_REL")"
+        # #582: a linked worktree's admin dir is mounted through the common
+        # dir that holds it (_sandy_gitdir_mount_dir); every other gitdir as
+        # itself.
+        GITDIR_HOST="$(_sandy_gitdir_mount_dir "$GITDIR_NAMED")"
         # R5a (1.14.0): the `gitdir:` line is REPOSITORY CONTENT, and this used
         # to be a bare `cd` with no containment check feeding a bind mount with
         # no :ro. Measured: `gitdir: ../../.ssh` produced
@@ -24643,13 +24747,21 @@ if [ -f "$WORK_DIR/.git" ]; then
         # from ~/.ssh, ~/.aws and /etc, and it needs no canonicalization. A
         # directory an attacker could already furnish with HEAD/objects/refs is
         # one they can already write, so the check gives nothing away.
+        #
+        # #582: a linked worktree's admin dir (<common>/worktrees/<name>) has
+        # HEAD and commondir, but objects/ and refs/ live in the common dir.
+        # It is accepted only when its commondir names a directory that passes
+        # this same check and holds it as worktrees/<name>; that common dir is
+        # what is mounted and protected (_sandy_gitdir_worktree_common).
         if [ -z "$GITDIR_HOST" ] || [ ! -f "$GITDIR_HOST/HEAD" ] || \
            [ ! -d "$GITDIR_HOST/objects" ] || [ ! -d "$GITDIR_HOST/refs" ]; then
             echo "[sandy] ERROR: .git names a gitdir that is not a git directory: '$GITDIR_REL'" >&2
-            echo "[sandy]        Resolved to: ${GITDIR_HOST:-<unresolvable>}" >&2
+            echo "[sandy]        Resolved to: ${GITDIR_NAMED:-<unresolvable>}" >&2
             echo "[sandy]        Refusing to bind-mount it. A .git FILE is repository content, so an" >&2
             echo "[sandy]        arbitrary path there would mount a host directory of the repository's" >&2
-            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/." >&2
+            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/, or a" >&2
+            echo "[sandy]        linked worktree's admin directory: HEAD and a commondir naming such a" >&2
+            echo "[sandy]        directory, which holds it as worktrees/<name>." >&2
             _sandy_daemon_fatal
             exit 1
         fi
@@ -24679,7 +24791,11 @@ if [ -f "$WORK_DIR/.git" ]; then
         # read as config. Both redirect the host's git when rewritten.
         [ -f "$GITDIR_HOST/commondir" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/commondir:$GITDIR_CONTAINER/commondir:ro")
         [ -f "$GITDIR_HOST/config.worktree" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config.worktree:$GITDIR_CONTAINER/config.worktree:ro")
-        info "  Git submodule: gitdir at $GITDIR_CONTAINER"
+        if [ "$GITDIR_HOST" != "$GITDIR_NAMED" ]; then
+            info "  Git worktree: common dir at $GITDIR_CONTAINER"
+        else
+            info "  Git submodule: gitdir at $GITDIR_CONTAINER"
+        fi
     fi
 fi
 _sandy_resolve_symlinks
