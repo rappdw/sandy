@@ -9686,8 +9686,24 @@ printf " / %s\n" "$ARCH"
 # ---- required ----
 section "Required"
 
-# bash (we're already in it — just report)
-ok "bash ${BASH_VERSION%%(*}"
+# bash (we're already in it). sandy requires bash 5 or newer and runs under the
+# first `bash` on PATH (#!/usr/bin/env bash). An older one is a WARNING, never a
+# required failure: sandy itself does not check the version. Plain [ ] tests
+# and BASH_VERSINFO only, so this runs under bash 3.2 (macOS /bin/bash), which
+# is exactly where it has to work.
+if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] 2>/dev/null; then
+    ok "bash ${BASH_VERSION%%(*}"
+else
+    _bash_fix="$(pkg_hint bash)"
+    if [ "$OS" = "macos" ]; then
+        _bash_fix="$_bash_fix
+    eval \"\$(/opt/homebrew/bin/brew shellenv)\"   # Intel Macs: /usr/local/bin/brew"
+    fi
+    warn "bash ${BASH_VERSION%%(*} (${BASH:-bash}) is too old: sandy requires bash 5 or newer" \
+         "sandy runs under the first \`bash\` on PATH (#!/usr/bin/env bash). Install bash 5 or newer and put it first on PATH:
+    $_bash_fix
+Then open a new terminal and check: bash --version"
+fi
 
 # git
 if command -v git >/dev/null 2>&1; then

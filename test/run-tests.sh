@@ -8494,6 +8494,49 @@ check "§101(g) --fix --yes never removes an orphaned sandbox directory" \
     bash -c 'test -d "$1/sandboxes/orphan-a-8881" && test -d "$1/sandboxes/orphan-b-8882"' -- "$_S101_H9"
 rm -rf "$_S101_H9"
 
+# --- (j) an old bash is a WARNING in Required, never a failure (2026-11-23).
+# The suite itself refuses bash < 5, so the old bash is simulated test-side:
+# the doctor body is extracted from sandy and its version test rewritten to
+# see major 4 (the product has no hook for this). A uname stub reports Darwin,
+# so the macOS fix text is what gets asserted. Same docker stub as (a).
+_S101_UNAME="$(command -v uname)"
+_S101_MACBIN="$(mktemp -d)"
+printf '#!/bin/sh\n[ "$1" = -s ] && { echo Darwin; exit 0; }\nexec "%s" "$@"\n' "$_S101_UNAME" > "$_S101_MACBIN/uname"
+chmod +x "$_S101_MACBIN/uname"
+_S101_DOC5="$_S101_MACBIN/doctor-host.sh"
+_S101_DOC4="$_S101_MACBIN/doctor-host-bash4.sh"
+awk '/^_sandy_doctor_host\(\) \{/{f=1; next} f && /^SANDY_DOCTOR_HOST$/{exit} f' "$_S101_SANDY" | sed '1d' > "$_S101_DOC5"
+sed 's/"${BASH_VERSINFO\[0\]:-0}" -ge 5/"4" -ge 5/' "$_S101_DOC5" > "$_S101_DOC4"
+_S101_BASH="$(PATH="$_S101_MACBIN:$_S101_BIN:$PATH" command -v bash)"
+check "§101(j0) premise: the doctor body was extracted and the version test rewritten exactly once (mutation: a renamed function or test leaves this red, so (j1-j6) cannot pass vacuously)" \
+    bash -c 'head -1 "$1" | grep -qx "#!/usr/bin/env bash" && [ "$(grep -c "\"4\" -ge 5" "$2")" = 1 ]' -- "$_S101_DOC5" "$_S101_DOC4"
+_S101_RC_J4=0
+_S101_OUT_J4="$(PATH="$_S101_MACBIN:$_S101_BIN:$PATH" bash "$_S101_DOC4" 2>&1)" || _S101_RC_J4=$?
+_S101_RC_J5=0
+_S101_OUT_J5="$(PATH="$_S101_MACBIN:$_S101_BIN:$PATH" bash "$_S101_DOC5" 2>&1)" || _S101_RC_J5=$?
+_S101_REQ_J4="$(printf '%s\n' "$_S101_OUT_J4" | awk '/^Required$/{f=1; next} f && /^$/{exit} f')"
+_S101_REQ_J5="$(printf '%s\n' "$_S101_OUT_J5" | awk '/^Required$/{f=1; next} f && /^$/{exit} f')"
+check "§101(j1) both doctor runs completed and printed a Required section and a Summary (the probe ran)" \
+    bash -c 'for o in "$1" "$2"; do printf "%s" "$o" | grep -qx "Summary" || exit 1; done; [ -n "$3" ] && [ -n "$4" ]' -- \
+    "$_S101_OUT_J4" "$_S101_OUT_J5" "$_S101_REQ_J4" "$_S101_REQ_J5"
+check "§101(j2) bash major < 5: Required shows the warning naming the interpreter and the bash 5 requirement (mutation: the < 5 branch dropped -> the plain ok line comes back)" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "  ! bash " && printf "%s\n" "$1" | grep -qF " ($2) is too old: sandy requires bash 5 or newer"' -- "$_S101_REQ_J4" "$_S101_BASH"
+check "§101(j3) bash major < 5: no ok-bash line in Required" \
+    bash -c '! printf "%s\n" "$1" | grep -q "✓ bash"' -- "$_S101_REQ_J4"
+check "§101(j4) bash major < 5 on macOS: the fix says the first bash on PATH is used, brew install bash, and the Homebrew PATH line" \
+    bash -c 'for n in "first \`bash\` on PATH (#!/usr/bin/env bash)" "brew install bash" "brew shellenv" "bash --version"; do printf "%s" "$1" | grep -qF "$n" || exit 1; done' -- "$_S101_OUT_J4"
+# The warning convention: warn() counts a RECOMMENDED item and never changes
+# the exit code. So the old-bash run exits as the bash-5 run does, with one
+# more recommended item.
+_s101_recs() { printf '%s\n' "$1" | sed -n 's/^  \([0-9][0-9]*\) recommended item(s) to address\.$/\1/p'; }
+check "§101(j5) bash major < 5 follows the warning convention: same exit code as bash 5 (here $_S101_RC_J5), required checks still pass, one more recommended item" \
+    bash -c '[ "$1" -eq "$2" ] && printf "%s" "$3" | grep -qF "All required checks passed." && [ "${4:-0}" -eq $(( ${5:-0} + 1 )) ]' -- \
+    "$_S101_RC_J4" "$_S101_RC_J5" "$_S101_OUT_J4" "$(_s101_recs "$_S101_OUT_J4")" "$(_s101_recs "$_S101_OUT_J5")"
+check "§101(j6) bash 5 or newer: the ok line is unchanged (\"  ✓ bash ${BASH_VERSION%%(*}\") and there is no warning" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "  ✓ bash $2" && ! printf "%s\n" "$1" | grep -qF "too old"' -- "$_S101_REQ_J5" "${BASH_VERSION%%(*}"
+rm -rf "$_S101_MACBIN"
+unset _S101_UNAME _S101_MACBIN _S101_DOC5 _S101_DOC4 _S101_BASH _S101_RC_J4 _S101_RC_J5 _S101_OUT_J4 _S101_OUT_J5 _S101_REQ_J4 _S101_REQ_J5
+
 rm -rf "$_S101_BIN"
 
 # --- (h) regen-doctor.sh --check: passes against the real repo, and fails
