@@ -2481,8 +2481,12 @@ _sandy_same_object() {
 # one that could look numeric (awk compares two numeric-looking strings as
 # numbers: `1e3 == 1000`). A key that holds a character no number has (`/`,
 # most letters, `_`) cannot, nor can a hex key with a letter in it.
+# Bash reads at most the first 200 lines (about 0.7 ms on Linux, one grep's
+# cost there); a lookup not answered by then is made by the command, so a
+# snapshot the session grew (one #envfile line per .env file) costs no more
+# than it used to. Both find the same first matching line.
 _sandy_snap_scan() {
-    local _ss_l _ss_r _ss_f2 _ss_t=$'\t' _ss_hit="" _ss_cmd=""
+    local _ss_l _ss_r _ss_f2 _ss_t=$'\t' _ss_hit="" _ss_cmd="" _ss_n=0
     [ "$2" = "=" ] || printf -v "$4" '%s' ""
     case "$3" in
         ""|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@+,:=%#\ -]*) _ss_cmd=1 ;;
@@ -2495,31 +2499,42 @@ _sandy_snap_scan() {
             *) _ss_cmd=1 ;;
         esac
     fi
-    if [ -n "$_ss_cmd" ]; then
-        if [ "$2" = "=" ]; then grep -qFx "$3" "$1" 2>/dev/null; return; fi
-        printf -v "$4" '%s' "$(awk -F '\t' -v p="$3" -v k="$2" '$1 == k && $2 == p { print "x" $3; exit }' "$1" 2>/dev/null || true)"
-        return 0
-    fi
-    if [ ! -f "$1" ] || [ ! -r "$1" ]; then
-        [ "$2" != "=" ] || return 1
-        return 0
-    fi
-    while IFS= read -r _ss_l || [ -n "$_ss_l" ]; do
-        if [ "$2" = "=" ]; then
-            if [ "$_ss_l" = "$3" ]; then _ss_hit=1; break; fi
-            continue
+    if [ -z "$_ss_cmd" ]; then
+        if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+            [ "$2" != "=" ] || return 1
+            return 0
         fi
-        case "$_ss_l" in "$2$_ss_t"*) ;; *) continue ;; esac
-        _ss_r="${_ss_l#*"$_ss_t"}"
-        case "$_ss_r" in
-            *"$_ss_t"*) _ss_f2="${_ss_r%%"$_ss_t"*}"; _ss_r="${_ss_r#*"$_ss_t"}"; _ss_r="${_ss_r%%"$_ss_t"*}" ;;
-            *) _ss_f2="$_ss_r"; _ss_r="" ;;
-        esac
-        [ "$_ss_f2" = "$3" ] || continue
-        printf -v "$4" 'x%s' "$_ss_r"
-        break
-    done < "$1"
-    [ "$2" != "=" ] || [ -n "$_ss_hit" ]
+        { while IFS= read -r _ss_l || [ -n "$_ss_l" ]; do
+            _ss_n=$((_ss_n + 1))
+            if [ "$_ss_n" -gt 200 ]; then _ss_cmd=1; break; fi
+            if [ "$2" = "=" ]; then
+                if [ "$_ss_l" = "$3" ]; then _ss_hit=1; break; fi
+                continue
+            fi
+            case "$_ss_l" in "$2$_ss_t"*) ;; *) continue ;; esac
+            _ss_r="${_ss_l#*"$_ss_t"}"
+            case "$_ss_r" in
+                *"$_ss_t"*) _ss_f2="${_ss_r%%"$_ss_t"*}"; _ss_r="${_ss_r#*"$_ss_t"}"; _ss_r="${_ss_r%%"$_ss_t"*}" ;;
+                *) _ss_f2="$_ss_r"; _ss_r="" ;;
+            esac
+            [ "$_ss_f2" = "$3" ] || continue
+            printf -v "$4" 'x%s' "$_ss_r"
+            _ss_hit=1
+            break
+        done < "$1"; } 2>/dev/null || true
+        # (Explicit statuses: a bare return in a function run from a trap,
+        # cleanup's included, returns the status the trap was entered with.)
+        if [ -z "$_ss_cmd" ]; then
+            if [ "$2" = "=" ] && [ -z "$_ss_hit" ]; then return 1; fi
+            return 0
+        fi
+    fi
+    if [ "$2" = "=" ]; then
+        if grep -qFx "$3" "$1" 2>/dev/null; then return 0; fi
+        return 1
+    fi
+    printf -v "$4" '%s' "$(awk -F '\t' -v p="$3" -v k="$2" '$1 == k && $2 == p { print "x" $3; exit }' "$1" 2>/dev/null || true)"
+    return 0
 }
 _sandy_tree_fingerprint() {
     local _h _out _l _nl='
@@ -3309,7 +3324,7 @@ _sandy_uchg_is_set() {
 # as under pipefail.
 _sandy_file_inode() {
     local _fi_o _fi_rc=0
-    if [ -z "${2:-}" ]; then ls -di "$1" 2>/dev/null | awk '{print $1}'; return; fi
+    if [ -z "${2:-}" ]; then ls -di "$1" 2>/dev/null | awk '{print $1}' || _fi_rc=$?; return "$_fi_rc"; fi
     _fi_o="$(exec ls -di "$1" 2>/dev/null)" || _fi_rc=$?
     _sandy_awk_f1 "$_fi_o" _fi_o
     printf -v "$2" '%s' "$_fi_o"
