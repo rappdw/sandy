@@ -22473,7 +22473,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
          '_sandy_overlay_detect_dirs', '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint',
-         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
+         '_sandy_agent_has', '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_path_identity_prefill', '_sandy_awk_f1', '_sandy_snap_scan', '_sandy_same_object', '_sandy_replaced_since_launch',
          '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
          '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
@@ -22485,9 +22485,11 @@ open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
 b = src.index('done < <(_sandy_protected_files; _sandy_watched_git_files)\n', a) + len('done < <(_sandy_protected_files; _sandy_watched_git_files)\n')
 open(out + '/snap.sh', 'w').write(src[a:b])
-a = src.index('    # Detect protected-path appearances')
-b = src.index('    # #80: .git/HEAD is rw in-container', a)
-open(out + '/end.sh', 'w').write(src[a:b])
+# The session end: the report function itself, run as production runs it
+# (its directory cache and the prefill included), on this fixture.
+open(out + '/end.sh', 'w').write(fn('_sandy_session_end_protected_report')
+                                 + '_sandy_session_end_protected_report "$SANDBOX_DIR" "$WORK_DIR"\n')
+open(out + '/cleanupfn.sh', 'w').write(fn('cleanup'))
 S182_EXTRACT
 cat > "$_S182_D/drive.sh" <<'S182_DRIVE'
 set -euo pipefail
@@ -22567,7 +22569,7 @@ _s182_created() {   # $1 = fixture: launch without .sandy/, the session creates 
 }
 
 check "§182(pre) sliced the launch snapshot, the session-end block and the gate out of sandy (mutation: a rename empties a slice and must fail HERE)" \
-    bash -c 'grep -q "protected-existed-at-launch" "$1/snap.sh" && grep -q "_sandy_note_session_created_sandy_dir" "$1/end.sh" && grep -q "^_sandy_project_dockerfile_approved()" "$1/fns.sh"' _ "$_S182_D"
+    bash -c 'bash -n "$1/end.sh" && grep -q "protected-existed-at-launch" "$1/snap.sh" && grep -q "_sandy_note_session_created_sandy_dir" "$1/end.sh" && grep -q "^_sandy_project_dockerfile_approved()" "$1/fns.sh"' _ "$_S182_D"
 
 # --- A: the session that CREATES .sandy/ -------------------------------------
 _s182_created A
@@ -32441,7 +32443,7 @@ def fn(name):
     raise SystemExit('missing function ' + name)
 names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_overlay_detect_dirs',
          '_sandy_overlay_detect_agent', '_sandy_tree_fingerprint', '_sandy_agent_has',
-         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_same_object', '_sandy_replaced_since_launch',
+         '_sandy_path_symlink_component', '_sandy_link_hex', '_sandy_path_identity', '_sandy_path_identity_prefill', '_sandy_awk_f1', '_sandy_snap_scan', '_sandy_same_object', '_sandy_replaced_since_launch',
          '_sandy_protected_git_files', '_sandy_watched_git_files', '_sandy_file_sha256', '_sandy_hex', '_sandy_unhex', '_sandy_protected_hash_changed', '_sandy_protected_hash_report', '_sandy_uchg_record', '_sandy_uchg_write_record', '_sandy_uchg_is_set', '_sandy_file_inode', '_sandy_file_ctime', '_sandy_uchg_show', '_sandy_uchg_unlock',
          '_sandy_protected_files', '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir',
          '_sandy_dir_is_inert_git', '_sandy_context_hash', '_sandy_df_session_record',
@@ -32453,9 +32455,11 @@ open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
 a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
 b = src.index('unset _lnk_snap _id_snap\n', a) + len('unset _lnk_snap _id_snap\n')
 open(out + '/snap.sh', 'w').write(src[a:b])
-a = src.index('    # Detect protected-path appearances')
-b = src.index('    # #80: .git/HEAD is rw in-container', a)
-open(out + '/end.sh', 'w').write(src[a:b])
+# The session end: the report function itself, run as production runs it
+# (its directory cache and the prefill included), on this fixture.
+open(out + '/end.sh', 'w').write(fn('_sandy_session_end_protected_report')
+                                 + '_sandy_session_end_protected_report "$SANDBOX_DIR" "$WORK_DIR"\n')
+open(out + '/cleanupfn.sh', 'w').write(fn('cleanup'))
 open(out + '/endfn.sh', 'w').write(fn('_sandy_session_end_protected_report'))
 S245_EXTRACT
 cat > "$_S245_D/drive.sh" <<'S245_DRIVE'
@@ -32484,7 +32488,7 @@ _s245_fix() {   # $1 = session-end output: run every remediation line it printed
 }
 
 check "§245(pre) sliced the launch snapshot and the session-end block out of sandy, and both use the detection list (mutation: a rename empties a slice and must fail HERE)" \
-    bash -c 'grep -q "_sandy_overlay_detect_dirs" "$1/snap.sh" && grep -q "_sandy_session_end_report " "$1/end.sh" && grep -q "_sandy_overlay_detect_dirs" "$1/endfn.sh" && grep -q "Protected paths appeared" "$1/endfn.sh"' _ "$_S245_D"
+    bash -c 'bash -n "$1/end.sh" && grep -q "_sandy_overlay_detect_dirs" "$1/snap.sh" && grep -q "_sandy_session_end_report " "$1/cleanupfn.sh" && grep -q "_SANDY_PI_CACHE=1" "$1/end.sh" && grep -q "_sandy_overlay_detect_dirs" "$1/endfn.sh" && grep -q "Protected paths appeared" "$1/endfn.sh"' _ "$_S245_D"
 
 # A: absent at launch, a slash command written in-session -> reported.
 _S245_L="$(_s245_run A launch)"
@@ -33720,6 +33724,227 @@ pkill -f 'sleep 47\.548' 2>/dev/null || true
 unset -f _s255_count _s255_run _s255_bg _s255_join _s255_e1 _s255_e2 _s255_f _s255_f3 _s255_f4 _s255_client _s255_a2 _s255_k _s255_watch
 rm -rf "$_S255_D"
 unset _S255_D _S255_SLEEP _S255_A _S255_K _S255_L _S255_E3 _S255_D_ARGS _S255_G _S255_I _S255_SCAN
+
+# ============================================================
+section "§256: a stubbed launch and exit in a small git workspace creates at most 350 processes (370 on the macOS path, locks included); the count is the launch's own, so a check run beside other sections cannot flake (row 38)"
+# ============================================================
+_fx_a6
+# One stubbed launch (codex, the A6 stubs) in a small git workspace with
+# protected paths used to create 788 processes, against 272 in v2.8.0, almost
+# all of them in loops that started one to three processes for each watched
+# path (a command substitution per call, an ls|awk per inode, an od|tr per
+# hex string). The loops now return through variables; this budget keeps
+# them from creeping back.
+#
+# What is counted: every process of the launch's own tree that is a bash
+# (its shells and every subshell, command substitution and pipeline element:
+# a DEBUG trap from BASH_ENV, inherited by functions and subshells with
+# set -T, records $BASHPID the first time it runs in each), and every command
+# looked up on PATH (a shim per command name records its pid, then execs the
+# real one, so the pid is the command's). The records are unique pids, so a
+# command substitution that execs its command is counted once. Nothing else
+# on the machine runs the trap or a shim with A6_COUNT_LOG set, so other
+# sections forking at the same moment (suite_runner --jobs N) add nothing: a
+# global pid counter would. Not counted: a pipeline element that is a single
+# builtin (the printf of `printf x | od`: bash runs the DEBUG trap for it
+# before the fork), and what a non-bash program forks without a PATH lookup
+# (an absolute path, git's own helpers). Measured on Linux against ptrace,
+# the count is about 5 below the real one. It also moves by a process or two
+# from run to run: the symlink scan's "still scanning" timer subshell is
+# sometimes gone before it forks its sleep.
+#
+# Budget: about 315 counted here at row 38 (about 310 outside the suite,
+# ptrace about 315; a plain workspace about 257), plus about 10 % for
+# unrelated growth. One more process per watched path (about 49 of them)
+# takes it over, which (p2) checks. The macOS path, (e), has its own budget.
+_S256_BUDGET=350
+_S256_BUDGET_MAC=370
+_S256_D="$_A6_DIR/s256"
+mkdir -p "$_S256_D/shim"
+cat > "$_S256_D/count.sh" <<'S256EOF'
+set -T
+_s256_last=
+trap '[[ $BASHPID == "$_s256_last" ]] || { _s256_last=$BASHPID; printf "%s\n" "$BASHPID" >> "${A6_COUNT_LOG:-/dev/null}"; } 2>/dev/null || :' DEBUG
+S256EOF
+# A shim for every command name on PATH, the A6 stubs first, the first match
+# winning as a lookup would.
+_s256_shims() {
+    local d f n q
+    local -a ds
+    IFS=: read -r -a ds <<< "$_A6_DIR/bin:$PATH"
+    for d in "${ds[@]}"; do
+        case "$d" in /*) ;; *) continue ;; esac
+        [ -d "$d" ] || continue
+        for f in "$d"/*; do
+            n="${f##*/}"
+            [ ! -e "$_S256_D/shim/$n" ] && [ -f "$f" ] && [ -x "$f" ] || continue
+            q="'${f//\'/\'\\\'\'}'"
+            printf '#!/bin/sh\nprintf "%%s\\n" "$$" >> "${A6_COUNT_LOG:-/dev/null}"\nexec %s "$@"\n' "$q" > "$_S256_D/shim/$n"
+        done
+    done
+    chmod +x "$_S256_D/shim"/*
+}
+_s256_shims
+# _s256_count CASE [VAR=value ...]: one counted launch of CASE -> _S256_N
+_S256_PRE=""
+# With _S256_PRE set, that directory is first on PATH (the macOS stubs of (e)).
+_s256_count() {
+    local c="$1"; shift
+    : > "$_S256_D/log"
+    _a6_launch "$c" "$@" PATH="${_S256_PRE:+$_S256_PRE:}$_S256_D/shim:$_A6_DIR/bin:$PATH" BASH_ENV="$_S256_D/count.sh" A6_COUNT_LOG="$_S256_D/log"
+    _S256_N="$(awk '!s[$0]++ { n++ } END { print n + 0 }' "$_S256_D/log")"
+}
+# The reference workspace: git, a few protected paths (as mac-launch-probe.sh
+# in the optimization-pass notes builds it).
+mkdir -p "$_A6_DIR/s256/ws"
+( cd "$_A6_DIR/s256/ws" && git init -q . && git config user.email probe@example.invalid && git config user.name probe \
+    && mkdir -p .claude .github/workflows .vscode src && echo '{}' > .claude/settings.json && echo 'x' > .envrc \
+    && echo 'name: ci' > .github/workflows/ci.yml && echo '{}' > .vscode/settings.json && echo hi > src/a.txt \
+    && git add -A && git commit -q -m init ) >/dev/null 2>&1
+
+# (p1) The counter counts what it claims, exactly: the root shell, five
+# command substitutions, three commands run directly, two command
+# substitutions that exec theirs (one process each), a subshell, and a
+# pipeline of a function and a command -- 14 -- and not the two elements of
+# `: | :` (the blind spot above; ptrace counts 16). A counter that lost
+# $BASHPID (bash 3.2), set -T, its shims or its dedupe gets another number.
+cat > "$_S256_D/known.sh" <<'S256EOF'
+for _i in 1 2 3 4 5; do _x="$(:)"; done
+ls / >/dev/null; ls / >/dev/null; ls / >/dev/null
+_x="$(exec ls /)"; _x="$(exec ls /)"
+( : )
+_s256_f() { :; }; _s256_f | cat
+: | :
+S256EOF
+: > "$_S256_D/log"
+env PATH="$_S256_D/shim:$_A6_DIR/bin:$PATH" BASH_ENV="$_S256_D/count.sh" A6_COUNT_LOG="$_S256_D/log" \
+    bash "$_S256_D/known.sh" </dev/null >/dev/null 2>&1 || true
+_S256_K="$(awk '!s[$0]++ { n++ } END { print n + 0 }' "$_S256_D/log")"
+check "§256(p1) the counter counts a script of known shape exactly: 14 processes (got $_S256_K; mutations: the trap without set -T, the shims off PATH, counting lines instead of pids)" \
+    test "$_S256_K" = 14
+
+# Three launches, as the reference measures the third; the second is not
+# counted, so (b) can compare what counting changes.
+_a6_launch s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_a6_launch s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_S256_RC2="$_A6_RC"; cp "$_A6_DIR/s256/out" "$_S256_D/out2"
+awk '{ print $1, $2, $3 }' "$_A6_DIR/s256/events.log" > "$_S256_D/events2"
+_s256_count s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_S256_RC3="$_A6_RC"
+awk '{ print $1, $2, $3 }' "$_A6_DIR/s256/events.log" > "$_S256_D/events3"
+[ "$_S256_RC3" = 0 ] || _a6_diag "§256(a) counted launch" s256
+check "§256(a) the reference launch (codex, small git workspace, third launch) creates at most $_S256_BUDGET processes (counted: $_S256_N, rc $_S256_RC3; about 315 at row 38, about 780 before it; mutation: (p2))" \
+    bash -c '[ "$1" = 0 ] && [ "$2" -gt 100 ] && [ "$2" -le "$3" ]' _ "$_S256_RC3" "$_S256_N" "$_S256_BUDGET"
+# (The "Scanning workspace for symlinks" notice is left out: it is printed
+# only when the scan outlives a 2 s timer, which a loaded host can make
+# happen in one run and not the other.)
+check "§256(b) counting does not change the launch: the counted run prints what the uncounted run before it printed, with the same rc, and makes the same calls (each call's first words: names and ids carry the launcher's pid)" \
+    bash -c '[ "$1" = "$2" ] && cmp <(grep -v "Scanning workspace for symlinks" "$3/out2") <(grep -v "Scanning workspace for symlinks" "$4/out") && cmp "$3/events2" "$3/events3"' _ "$_S256_RC2" "$_S256_RC3" "$_S256_D" "$_A6_DIR/s256"
+# (d) ...and the other half of what the session-end report's directory cache
+# must not cost: a session that changes nothing is reported as having changed
+# nothing (no REPLACED, appeared, CHANGED, .env or git admin block).
+_S256_TAMPER="$(grep -E "REPLACED during this session|Protected paths appeared|CHANGED during this session|\.env files CREATED|git worktree or submodule gitdir was created" "$_S256_D/out2" || true)"
+check "§256(d) a launch whose session changes nothing reports no protected-path change at all (rc $_S256_RC2; got: ${_S256_TAMPER:-nothing}; mutation: the report's cache filled with other values after its prefill lists every watched path as REPLACED)" \
+    bash -c '[ "$1" = 0 ] && [ -z "$2" ] && grep -q "Reusing sandbox" "$3"' _ "$_S256_RC2" "$_S256_TAMPER" "$_S256_D/out2"
+
+# (p2) The budget sees a per-path process: a copy of sandy with one command
+# substitution added to the launch's watched-path loop (once per watched
+# path, as the loops cost before row 38) goes over it.
+_S256_ANCHOR='    if _sandy_path_symlink_component "$WORK_DIR" "$WORK_DIR/$_pd" _lnk_snap; then'
+_S256_M="$_S256_D/sandy-mutant"
+awk -v a="$_S256_ANCHOR" '$0 == a { print "    : \"$(printf x)\""; n++ } { print } END { exit n == 1 ? 0 : 1 }' "$SANDY_SCRIPT" > "$_S256_M" \
+    && _S256_MOK=1 || _S256_MOK=0
+_S256_SAVED="$_A6_SCRIPT"; _A6_SCRIPT="$_S256_M"
+_s256_count s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
+_A6_SCRIPT="$_S256_SAVED"
+check "§256(p2) one more process per watched path takes the reference launch over the budget (mutant counted: $_S256_N, rc $_A6_RC, anchor found: $_S256_MOK; budget $_S256_BUDGET)" \
+    bash -c '[ "$1" = 1 ] && [ "$2" = 0 ] && [ "$3" -gt "$4" ]' _ "$_S256_MOK" "$_A6_RC" "$_S256_N" "$_S256_BUDGET"
+
+# (c) What the diet must not cost: the launch snapshot and the session-end
+# report each measure every directory once (a cache), and in a foreground
+# launch both run in one process, so a cache the report inherited from the
+# launch would compare the end with the launch's own numbers and never see a
+# change. A session that renames .claude aside and recreates it is still
+# reported as having REPLACED it, in the same real launch.
+_fx_s248
+_a6_launch s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe PATH="$_S248_PATH" \
+    S248_RUN='mv .claude .claude-x && mkdir .claude && echo "{}" > .claude/settings.json'
+_S256_REP="$(awk '/Protected paths REPLACED during this session/ { on = 1; next } on && /^\[sandy\]   / { print; next } on { exit }' "$_A6_DIR/s256/out" | sed 's/\x1b\[[0-9;]*m//g')"
+check "§256(c) a session that renames .claude aside and recreates it is reported as having REPLACED .claude/settings.json, measured afresh at session end (rc $_A6_RC; mutation: the report uses the launch snapshot's directory cache: its own local cache removed and the launch loop no longer unsetting it)" \
+    bash -c '[ "$1" = 0 ] && printf "%s\n" "$2" | grep -qF "/.claude/settings.json (a different object now sits at this path)"' _ "$_A6_RC" "$_S256_REP"
+
+# (e) The macOS path: `uname -s` says Darwin, so the launch locks the files
+# _sandy_uchg_files names with chflags uchg and cleanup unlocks them, which
+# the Linux launches above never run. chflags and stat are stubs here that
+# fork nothing (bash builtins over a flag list; a ctime is the real stat,
+# exec'd), so each costs one process, as the real command does on a Mac.
+# Budget: about 340 counted here at row 38 (about 336 outside the suite),
+# plus about 10 %. Four locked files are four more of each lock step, so a
+# per-file process added there stays under it; (a) and (p2) guard the loops
+# both paths share.
+mkdir -p "$_S256_D/mac" "$_A6_DIR/s256d"
+cp -R "$_A6_DIR/s256/ws" "$_A6_DIR/s256d/ws"
+rm -rf "$_A6_DIR/s256d/ws/.claude-x"
+cat > "$_S256_D/mac/chflags" <<'S256EOF'
+#!/usr/bin/env bash
+f="$A6_LOG/flags"; [ "$1" != -h ] || shift
+op="$1"; p="$2"; out=""; have=""
+if [ -f "$f" ]; then
+    while IFS= read -r l; do
+        if [ "$l" = "$p" ]; then have=1; [ "$op" != nouchg ] || continue; fi
+        out="$out$l"$'\n'
+    done < "$f"
+fi
+case "$op" in uchg) [ -n "$have" ] || out="$out$p"$'\n' ;; nouchg) ;; *) exit 1 ;; esac
+printf '%s' "$out" > "$f"
+S256EOF
+if stat -c %Z / >/dev/null 2>&1; then _S256_CT='-c %Z'; else _S256_CT='-f %c'; fi
+{ printf '#!/usr/bin/env bash\n'
+  printf 'if [ "$1" = -f ] && [ "$2" = %%Sf ]; then\n'
+  printf '    if [ -f "$A6_LOG/flags" ]; then while IFS= read -r l; do [ "$l" != "$3" ] || { echo uchg; exit 0; }; done < "$A6_LOG/flags"; fi\n'
+  printf '    echo -; exit 0\nfi\n'
+  printf 'if [ "$1" = -f ] && [ "$2" = %%c ]; then exec %q %s "$3"; fi\n' "$(command -v stat)" "$_S256_CT"
+  printf 'exec %q "$@"\n' "$(command -v stat)"; } > "$_S256_D/mac/stat"
+chmod +x "$_S256_D/mac/chflags" "$_S256_D/mac/stat"
+_a6_launch s256d SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe A6_OS=Darwin PATH="$_S256_D/mac:$_A6_DIR/bin:$PATH"
+_a6_launch s256d SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe A6_OS=Darwin PATH="$_S256_D/mac:$_A6_DIR/bin:$PATH"
+_S256_PRE="$_S256_D/mac"
+_s256_count s256d SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe A6_OS=Darwin
+_S256_PRE=""
+_S256_LOCKED="$(grep -c "Locked until this session ends (macOS chflags uchg): .claude/settings.json .envrc .git/config .git/commondir" "$_A6_DIR/s256d/out" || true)"
+[ "$_A6_RC" = 0 ] || _a6_diag "§256(e) counted macOS-path launch" s256d
+check "§256(e) the same launch on the macOS path (four files locked with chflags uchg, and unlocked at the end) creates at most $_S256_BUDGET_MAC processes (counted: $_S256_N, rc $_A6_RC, lock notice: $_S256_LOCKED, flags left: $(wc -l < "$_A6_DIR/s256d/flags" 2>/dev/null | tr -d ' '); about 340 at row 38)" \
+    bash -c '[ "$1" = 0 ] && [ "$2" = 1 ] && [ ! -s "$3" ] && [ "$4" -gt 100 ] && [ "$4" -le "$5" ]' _ "$_A6_RC" "$_S256_LOCKED" "$_A6_DIR/s256d/flags" "$_S256_N" "$_S256_BUDGET_MAC"
+
+# (f) The snapshot lookup reads at most 200 lines in bash and asks grep/awk
+# about the rest (a session can grow the snapshot with one #envfile line per
+# .env it writes). Both halves answer as grep -qFx and the awk lookup do:
+# keys on lines 5, 199, 200 and 201, one on line 250 recorded twice (the
+# first wins), and one absent, in a 320-line snapshot.
+_S256_SNAP="$_S256_D/long.snap"
+for _s256_i in $(seq 1 320); do
+    case "$_s256_i" in
+        5)   printf '#id\tk5\tv5\n' ;;
+        199) printf '#id\tk199\tv199\nk199\n' ;;
+        200) printf '#id\tk200\tv200\n' ;;
+        201) printf '#id\tk201\tv201\nk201\n' ;;
+        250) printf '#id\tk250\tfirst\n#id\tk250\tsecond\nk250\n' ;;
+        *)   printf '#envfile\t%040x\tsha256:x\n' "$_s256_i" ;;
+    esac
+done > "$_S256_SNAP"
+_S256_SCAN="$(sed -n '/^_sandy_snap_scan() {/,/^}$/p' "$SANDY_SCRIPT")"
+check "§256(f) the snapshot lookup answers as grep -qFx and the awk lookup do, for keys before, at and past its 200-line bash limit, a key recorded twice, and an absent one (mutation: a bash read with no limit is equivalent but slow; one that stops at the limit without asking the command misses k201 and k250)" \
+    bash -c 'eval "$2"; f="$1"; [ -n "$(declare -F _sandy_snap_scan)" ] || exit 1
+             for k in k5 k199 k200 k201 k250 nope; do
+                 o="$(awk -F "\t" -v p="$k" "\$1 == \"#id\" && \$2 == p { print \"x\" \$3; exit }" "$f")"
+                 _sandy_snap_scan "$f" "#id" "$k" v; [ "$o" = "$v" ] || { echo "#id $k: [$o] [$v]"; exit 1; }
+                 a=0; grep -qFx "$k" "$f" || a=1; b=0; _sandy_snap_scan "$f" = "$k" || b=1
+                 [ "$a" = "$b" ] || { echo "= $k: $a $b"; exit 1; }
+             done' _ "$_S256_SNAP" "$_S256_SCAN"
+_a6_done
+unset -f _s256_shims _s256_count
+unset _S256_SNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
+echo ""
 
 # BEGIN SUMMARY
 # ============================================================
