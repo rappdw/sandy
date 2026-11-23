@@ -33811,7 +33811,7 @@ S256EOF
 env PATH="$_S256_D/shim:$_A6_DIR/bin:$PATH" BASH_ENV="$_S256_D/count.sh" A6_COUNT_LOG="$_S256_D/log" \
     bash "$_S256_D/known.sh" </dev/null >/dev/null 2>&1 || true
 _S256_K="$(awk '!s[$0]++ { n++ } END { print n + 0 }' "$_S256_D/log")"
-check "§256(p1) the counter counts a script of known shape exactly: 14 processes (got $_S256_K; mutations: the trap without set -T, a shim that forks instead of exec, counting lines instead of pids)" \
+check "§256(p1) the counter counts a script of known shape exactly: 14 processes (got $_S256_K; mutations: the trap without set -T, the shims off PATH, counting lines instead of pids)" \
     test "$_S256_K" = 14
 
 # Three launches, as the reference measures the third; the second is not
@@ -33841,9 +33841,22 @@ _s256_count s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe
 _A6_SCRIPT="$_S256_SAVED"
 check "§256(p2) one more process per watched path takes the reference launch over the budget (mutant counted: $_S256_N, rc $_A6_RC, anchor found: $_S256_MOK; budget $_S256_BUDGET)" \
     bash -c '[ "$1" = 1 ] && [ "$2" = 0 ] && [ "$3" -gt "$4" ]' _ "$_S256_MOK" "$_A6_RC" "$_S256_N" "$_S256_BUDGET"
+
+# (c) What the diet must not cost: the launch snapshot and the session-end
+# report each measure every directory once (a cache), and in a foreground
+# launch both run in one process, so a cache the report inherited from the
+# launch would compare the end with the launch's own numbers and never see a
+# change. A session that renames .claude aside and recreates it is still
+# reported as having REPLACED it, in the same real launch.
+_fx_s248
+_a6_launch s256 SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-probe PATH="$_S248_PATH" \
+    S248_RUN='mv .claude .claude-x && mkdir .claude && echo "{}" > .claude/settings.json'
+_S256_REP="$(awk '/Protected paths REPLACED during this session/ { on = 1; next } on && /^\[sandy\]   / { print; next } on { exit }' "$_A6_DIR/s256/out" | sed 's/\x1b\[[0-9;]*m//g')"
+check "§256(c) a session that renames .claude aside and recreates it is reported as having REPLACED .claude/settings.json, measured afresh at session end (rc $_A6_RC; mutation: the launch snapshot's directory cache left set for the session-end report)" \
+    bash -c '[ "$1" = 0 ] && printf "%s\n" "$2" | grep -qF "/.claude/settings.json (a different object now sits at this path)"' _ "$_A6_RC" "$_S256_REP"
 _a6_done
 unset -f _s256_shims _s256_count
-unset _S256_BUDGET _S256_D _S256_K _S256_N _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED
+unset _S256_BUDGET _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED
 echo ""
 
 # BEGIN SUMMARY

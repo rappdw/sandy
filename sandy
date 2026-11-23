@@ -3301,7 +3301,7 @@ _sandy_commondir_unseed() {   # $1 = sandbox
     return 0
 }
 _sandy_uchg_is_set() {
-    case ",$(stat -f '%Sf' "$1" 2>/dev/null)," in *,uchg,*) return 0 ;; esac
+    case ",$(exec stat -f '%Sf' "$1" 2>/dev/null)," in *,uchg,*) return 0 ;; esac
     return 1
 }
 # With $2 (a variable name) the inode goes into that variable, as a command
@@ -3318,17 +3318,28 @@ _sandy_file_inode() {
 # Status-change time (seconds): chflags moves it, and an immutable file's
 # contents, mode and owner cannot change, so a ctime other than the one sandy
 # recorded after setting the flag means its flags were changed since.
-_sandy_file_ctime() { stat -f '%c' "$1" 2>/dev/null || true; }
+_sandy_file_ctime() {   # $1 = path [$2 = variable to set, as a command substitution would hold it]
+    local _fc_o
+    if [ -z "${2:-}" ]; then stat -f '%c' "$1" 2>/dev/null || true; return 0; fi
+    _fc_o="$(exec stat -f '%c' "$1" 2>/dev/null)" || true
+    printf -v "$2" '%s' "$_fc_o"
+}
 # A path as shown to the user: workspace-relative when inside $WORK_DIR.
-_sandy_uchg_show() {
-    case "$1" in "${WORK_DIR:-/nonexistent}"/*) printf '%s' "${1#"$WORK_DIR"/}" ;; *) printf '%s' "$1" ;; esac
+_sandy_uchg_show() {   # $1 = path [$2 = variable to set instead of printing]
+    local _us_o="$1" _us_nl=$'\n'
+    case "$1" in "${WORK_DIR:-/nonexistent}"/*) _us_o="${1#"$WORK_DIR"/}" ;; esac
+    if [ -z "${2:-}" ]; then printf '%s' "$_us_o"; return 0; fi
+    while [ "${_us_o%"$_us_nl"}" != "$_us_o" ]; do _us_o="${_us_o%"$_us_nl"}"; done
+    printf -v "$2" '%s' "$_us_o"
 }
 # The record of what sandy locked lives in the sandbox, outside the workspace:
 # "locked<TAB><absolute path, hex><TAB><inode><TAB><ctime>" for a flag sandy
 # set (ctime "-" until the flag is set), "preset<TAB><path, hex>" for one that
 # was already set. Written before any flag is set, so a launch that dies
 # part-way leaves a record of every file it may have locked.
-_sandy_uchg_record() { printf '%s/.uchg-locked' "$1"; }
+_sandy_uchg_record() {   # $1 = sandbox [$2 = variable to set instead of printing]
+    if [ -n "${2:-}" ]; then printf -v "$2" '%s/.uchg-locked' "$1"; else printf '%s/.uchg-locked' "$1"; fi
+}
 _sandy_uchg_write_record() {   # $1 = record  $2 = content (lines)
     local _t
     if [ -z "$2" ]; then rm -f "$1"; return 0; fi
@@ -3340,10 +3351,10 @@ _sandy_uchg_write_record() {   # $1 = record  $2 = content (lines)
 # inode is read again afterwards: a file swapped in between is unlocked again
 # and named, not left locked.
 _sandy_uchg_lock() {
-    local _rec _a _f _hx _ino _ino2 _ct _lines="" _lines2="" _kept="" _k _h _x _y _failed=""
+    local _rec _a _f _hx _ino _ino2 _ct _lines="" _lines2="" _kept="" _k _h _x _y _failed="" _sh
     _SANDY_UCHG_LOCKED=""
     _sandy_uchg_supported || return 0
-    _rec="$(_sandy_uchg_record "$1")"
+    _sandy_uchg_record "$1" _rec
     # A record an earlier unlock could not finish stays authoritative: those
     # files are still sandy's, though their flag is set.
     if [ -f "$_rec" ]; then
@@ -3351,11 +3362,12 @@ _sandy_uchg_lock() {
             [ "$_k" = locked ] || continue
             # One whose flag is no longer set is set again, on the same inode
             # only, and its ctime refreshed (the unlock compares it).
-            _f="$(_sandy_unhex "$_h" 2>/dev/null)" || _f=""
-            if [ -n "$_f" ] && [ -f "$_f" ] && [ ! -L "$_f" ] && [ "$(_sandy_file_inode "$_f")" = "$_x" ] \
+            _sandy_unhex "$_h" _f 2>/dev/null || _f=""
+            if [ -n "$_f" ] && [ -f "$_f" ] && [ ! -L "$_f" ] && { _sandy_file_inode "$_f" _ino || true; [ "$_ino" = "$_x" ]; } \
                && ! _sandy_uchg_is_set "$_f" && chflags -h uchg "$_f" 2>/dev/null; then
-                _y="$(_sandy_file_ctime "$_f")"; _y="${_y:--}"
-                _SANDY_UCHG_LOCKED="$_SANDY_UCHG_LOCKED $(_sandy_uchg_show "$_f")"
+                _sandy_file_ctime "$_f" _y; _y="${_y:--}"
+                _sandy_uchg_show "$_f" _sh
+                _SANDY_UCHG_LOCKED="$_SANDY_UCHG_LOCKED $_sh"
             fi
             _kept="$_kept$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
         done < "$_rec"
@@ -3365,13 +3377,13 @@ _sandy_uchg_lock() {
         [ -n "$_f" ] || continue
         [ -f "$_f" ] && [ ! -L "$_f" ] || continue
         if _sandy_path_symlink_component "$_a" "$_f" >/dev/null; then continue; fi
-        _hx="$(_sandy_hex "$_f")"
+        _sandy_hex "$_f" _hx
         case "$_kept$_lines" in *$'\t'"$_hx"$'\t'*|*$'\t'"$_hx"$'\n'*) continue ;; esac
         if _sandy_uchg_is_set "$_f"; then
             _lines="${_lines}preset"$'\t'"$_hx"$'\n'
             continue
         fi
-        _ino="$(_sandy_file_inode "$_f")"
+        _sandy_file_inode "$_f" _ino
         [ -n "$_ino" ] || continue
         _lines="${_lines}locked"$'\t'"$_hx"$'\t'"$_ino"$'\t'-$'\n'
     done < <(_sandy_uchg_targets "$2")
@@ -3380,20 +3392,21 @@ _sandy_uchg_lock() {
     while IFS=$'\t' read -r _k _h _x _y; do
         [ -n "$_k" ] || continue
         if [ "$_k" = locked ]; then
-            _f="$(_sandy_unhex "$_h")" || continue
+            _sandy_unhex "$_h" _f || continue
+            _sandy_uchg_show "$_f" _sh
             if ! chflags -h uchg "$_f" 2>/dev/null; then
-                _failed="$_failed $(_sandy_uchg_show "$_f")"
+                _failed="$_failed $_sh"
                 continue
             fi
-            _ino2="$(_sandy_file_inode "$_f")"
+            _sandy_file_inode "$_f" _ino2
             if [ "$_ino2" != "$_x" ] || [ -L "$_f" ]; then
                 chflags -h nouchg "$_f" 2>/dev/null || true
-                warn "Not locking $(_sandy_uchg_show "$_f"): it was replaced while sandy locked it (cleared again)."
+                warn "Not locking $_sh: it was replaced while sandy locked it (cleared again)."
                 continue
             fi
-            _ct="$(_sandy_file_ctime "$_f")"
+            _sandy_file_ctime "$_f" _ct
             _y="${_ct:--}"
-            _SANDY_UCHG_LOCKED="$_SANDY_UCHG_LOCKED $(_sandy_uchg_show "$_f")"
+            _SANDY_UCHG_LOCKED="$_SANDY_UCHG_LOCKED $_sh"
         fi
         _lines2="$_lines2$_k"$'\t'"$_h"${_x:+$'\t'"$_x"}${_y:+$'\t'"$_y"}$'\n'
     done <<< "$_lines"
@@ -3407,8 +3420,8 @@ _sandy_uchg_lock() {
 # through no link. Returns 0 when no lock of sandy's is left, 1 otherwise
 # (each named).
 _sandy_uchg_unlock() {
-    local _rec _k _h _x _y _f _s _lnk _keep="" _rc=0
-    _rec="$(_sandy_uchg_record "$1")"
+    local _rec _k _h _x _y _f _s _lnk _keep="" _rc=0 _ul_i _ul_c
+    _sandy_uchg_record "$1" _rec
     [ -f "$_rec" ] || return 0
     if ! command -v chflags >/dev/null 2>&1; then
         warn "Files sandy locked on this workspace are listed in $_rec, but chflags is not available to unlock them."
@@ -3416,7 +3429,7 @@ _sandy_uchg_unlock() {
     fi
     while IFS=$'\t' read -r _k _h _x _y; do
         [ "$_k" = locked ] || continue
-        if ! _f="$(_sandy_unhex "$_h")" || [ -z "$_f" ]; then
+        if ! _sandy_unhex "$_h" _f || [ -z "$_f" ]; then
             # An earlier format: "locked<TAB><workspace-relative path><TAB><inode>".
             case "$_h" in
                 ''|/*|*..*) _f="" ;;
@@ -3427,22 +3440,23 @@ _sandy_uchg_unlock() {
                 _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
                 continue
             fi
-            _h="$(_sandy_hex "$_f")"
+            _sandy_hex "$_f" _h
         fi
-        _s="$(_sandy_uchg_show "$_f")"
+        _sandy_uchg_show "$_f" _s
         { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
         if [ -L "$_f" ] || { case "$_f" in "$2"/*) true ;; *) false ;; esac \
-                && _lnk="$(_sandy_path_symlink_component "$2" "$_f")"; }; then
+                && _sandy_path_symlink_component "$2" "$_f" _lnk; }; then
             warn "Not unlocking $_s: ${_lnk:-it} is now a symbolic link. The file sandy locked is no longer at this path; find it and run: chflags nouchg <file>"
             _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_x"$'\t'"$_y"$'\n'
             _lnk=""
             continue
         fi
-        if [ "$(_sandy_file_inode "$_f")" != "$_x" ]; then
+        _sandy_file_inode "$_f" _ul_i || true
+        if [ "$_ul_i" != "$_x" ]; then
             warn "Not unlocking $_s: it is not the file sandy locked (a different file now sits there)."
             continue
         fi
-        if [ -n "$_y" ] && [ "$_y" != - ] && [ "$(_sandy_file_ctime "$_f")" != "$_y" ]; then
+        if [ -n "$_y" ] && [ "$_y" != - ] && { _sandy_file_ctime "$_f" _ul_c; [ "$_ul_c" != "$_y" ]; }; then
             warn "Not unlocking $_s: its flags changed after sandy set them, so they are left as they are."
             continue
         fi
@@ -26554,6 +26568,7 @@ fi
 # exists for.
 _sandy_pin_clean_rel() {
     local _rest="$1" _seg _out="" _pc_nl=$'\n'
+    [ -z "${2:-}" ] || printf -v "$2" '%s' ""
     while [ -n "$_rest" ]; do
         _seg="${_rest%%/*}"
         case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
