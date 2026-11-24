@@ -35094,7 +35094,7 @@ _fx_a6; _fx_s248
 _S261_B="$_A6_DIR/s261bin"; mkdir -p "$_S261_B"
 { printf '#!/bin/sh\n'
   printf 'case "$*" in "inspect -f {{.Id}} "*)\n'
-  printf '    n="${*##* }"\n'
+  printf '    for n do :; done\n'   # the last argument ("${*##* }" strips each word under bash, as macOS /bin/sh is)
   printf '    if [ -n "${S261_UNKNOWN:-}" ] && grep -qxF "$n" "$S261_UNKNOWN" 2>/dev/null; then echo "failed to connect to the docker API at unix:///var/run/docker.sock: connect: no such file or directory" >&2; exit 1; fi\n'
   printf '    if [ -n "${S261_PRESENT:-}" ] && grep -qxF "$n" "$S261_PRESENT" 2>/dev/null; then echo deadbeef; fi\n'
   printf '    exit 0 ;;\nesac\n'
@@ -35949,7 +35949,7 @@ _s264_ctr() {   # $1 = workspace -> its container name
 # NAME listed in CASE/present (a session still running), gone otherwise.
 _S264_B="$_A6_DIR/s264bin"; mkdir -p "$_S264_B"
 { printf '#!/bin/sh\n'
-  printf 'case "$*" in "inspect -f {{.Id}} "*) n="${*##* }"; if grep -qxF "$n" "$A6_LOG/present" 2>/dev/null; then echo deadbeef; fi; exit 0 ;; esac\n'
+  printf 'case "$*" in "inspect -f {{.Id}} "*) for n do :; done; if grep -qxF "$n" "$A6_LOG/present" 2>/dev/null; then echo deadbeef; fi; exit 0 ;; esac\n'
   printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S264_B/docker"
 chmod +x "$_S264_B/docker"
 _S264_PATH="$_S264_B:$_S248_PATH"
