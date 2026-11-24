@@ -34197,6 +34197,235 @@ unset -f _s257_hex _s257_unhex _s257_grab _s257_paths _s257_repo
 unset _S257_ODS _S257_RUN _S257_CASES _S257_C _S257_W _S257_OS _S257_D _S257_O _S257_S _S257_R _S257_F _S257_L _S257_HEX _S257_UNHEX _S257_LOCS _S257_N
 echo ""
 
+# ============================================================
+section "§258: cleanup() removes the agent container before the session-end report, and undoes what depends on it (stub dirs, the snapshot, the macOS locks, the seeded commondir files) only once the container is known gone; otherwise the report is provisional and judged again later (#584)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. Until 2.11.0 a session's cleanup() ran the session-end protected-path
+# report first and force-removed the agent container afterwards, so a write the
+# agent made between the two (a planted hook, a rewritten .envrc) was never
+# reported. --stop's direct teardown of a supervisor-less daemon already
+# removed the container first (#573). Now cleanup() does too: container
+# removed, report, then the locks and seeds released, as the 2.9.0 fix
+# (GHSA-wjw9-4x75-x5vx) requires, only once the container is known gone.
+# Known gone means inspect said "no such container/object"; a daemon that
+# cannot be reached also says "no such" (`connect: no such file or
+# directory`, `no such host`) and is NOT gone. While the container may still
+# exist: the empty stub dirs stay (removing one detaches a surviving
+# container's mount on Linux), the report is provisional and the launch
+# snapshot is kept, and the next launch (or --stop) judges the workspace
+# against it again once the container is gone.
+#
+# The stub in front of the §248 ones plays an agent that writes until it is
+# removed: at the `docker rm -f sandy-ws-...` that follows the agent's run it
+# creates .idea/late.xml in the workspace (S258_LATE=1; .idea is a protected
+# dir absent at launch, so not one sandy locks: a locked file the stub
+# rewrote would get a new ctime, which the unlock reads as the user's own
+# flag change), and records which files are
+# still locked (CASE/flags-at-rm), whether the seeded .git/commondir is still
+# there (CASE/seed-at-rm) and whether the .claude/commands stub dir is
+# (CASE/stub-at-rm). With S258_INSPECT_ERR its `inspect -f {{.Id}}` fails
+# with that message, as a docker CLI that cannot reach its daemon does. An rm
+# before the run (none is made today) finds no flags-during-run and does
+# nothing.
+_S258_B="$_A6_DIR/s258bin"; mkdir -p "$_S258_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "rm -f sandy-ws-"*)\n'
+  printf '    if [ -e "$A6_LOG/flags-during-run" ]; then\n'
+  printf '        cp "$A6_LOG/flags" "$A6_LOG/flags-at-rm" 2>/dev/null || : > "$A6_LOG/flags-at-rm"\n'
+  printf '        if [ -f "$A6_WS/.git/commondir" ]; then echo present; else echo gone; fi > "$A6_LOG/seed-at-rm"\n'
+  printf '        if [ -d "$A6_WS/.claude/commands" ]; then echo present; else echo gone; fi > "$A6_LOG/stub-at-rm"\n'
+  printf '        if [ -n "${S258_LATE:-}" ]; then mkdir -p "$A6_WS/.idea"; printf "late\\n" > "$A6_WS/.idea/late.xml"; fi\n'
+  printf '    fi ;;\n'
+  printf '"inspect -f {{.Id}} "*) if [ -n "${S258_INSPECT_ERR:-}" ]; then printf "%%s\\n" "$S258_INSPECT_ERR" >&2; exit 1; fi ;;\n'
+  printf 'esac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S258_B/docker"
+chmod +x "$_S258_B/docker"
+_S258_PATH="$_S258_B:$_S248_PATH"
+_s258_repo() {   # $1 = workspace: a git dir and an .envrc
+    mkdir -p "$1/.git/objects" "$1/.git/refs"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+    printf 'export S258=1\n' > "$1/.envrc"
+}
+_S258_SOCK='failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory'
+_S258_HOST='error during connect: Get "http://remote:2375/v1.47/containers/x/json": dial tcp: lookup remote: no such host'
+# (a) a write the agent makes until it is removed is reported; the locks and
+# the seed were still held when it was removed, and are released after.
+_S258_C=s258-late; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_LATE=1 PATH="$_S258_PATH"
+# (c) the container may still exist after its removal: the report still runs
+# (and sees the late write), but is provisional and keeps the snapshot; the
+# locks and the seed are kept, and said so.
+_S258_C=s258-surv; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_LATE=1 S248_SURVIVE=1 PATH="$_S258_PATH"
+# (d) the empty stub dir a session's overlay mount created is removed after
+# the container, and only once it is gone.
+for _S258_C in s258-stub s258-stubk; do
+    _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"; mkdir -p "$(_a6_sandbox "$_S258_C")/workspace-commands"
+done
+_a6_bg s258-stub _a6_launch s258-stub SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_MOUNTPOINTS=.claude/commands PATH="$_S258_PATH"
+_a6_bg s258-stubk _a6_launch s258-stubk SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_MOUNTPOINTS=.claude/commands S248_SURVIVE=1 PATH="$_S258_PATH"
+# (e2) the daemon unreachable at teardown (its socket missing): not gone.
+_S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_INSPECT_ERR="$_S258_SOCK" PATH="$_S258_PATH"
+_S258_C=s258-late; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"
+_S258_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S258_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_A6_DIR/$_S258_C/seed-at-rm" ] || echo "the probe did not run (no rm -f of the agent container after its run)"
+    [ -f "$_S258_W/.idea/late.xml" ] || echo "the late write was not made"
+    awk '/Protected paths appeared during this session/ { on = 1 } on' "$_S258_O" | grep -qF "$_S258_W/.idea/" || echo "the late .idea/ is not reported as appeared"
+    if grep -qF "provisional" "$_S258_O"; then echo "called provisional with the container gone"; fi
+    [ ! -e "$(_a6_sandbox "$_S258_C")/.protected-existed-at-launch" ] || echo "the snapshot was kept with the container gone"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(a)" "$_S258_C"
+check "§258(a) a write the agent makes until its container is removed (here at the docker rm -f itself) is in the session-end report, which is final (snapshot removed) once the container is gone (mutation: the report before the removal, the 2.11.0 order, misses it; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_S258_R="$( { [ "$(cat "$_A6_DIR/$_S258_C/seed-at-rm" 2>/dev/null)" = present ] || echo "the seed was gone when the container was removed"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null || echo "not locked when the container was removed: [$(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null)]"
+    grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null || echo ".git/config not locked when the container was removed"
+    [ ! -s "$_A6_DIR/$_S258_C/flags" ] || echo "still locked after the session: $(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags")"
+    [ ! -e "$_S258_W/.git/commondir" ] || echo "the seed was not removed after the session"; } 2>&1)" || true
+check "§258(b) ...the macOS locks and the seeded commondir were still in place when the container was removed, and are released after it (mutation: the release before the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_S258_C=s258-surv; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"; _S258_S="$(_a6_sandbox "$_S258_C")"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_A6_DIR/$_S258_C/seed-at-rm" ] || echo "the probe did not run"
+    awk '/Protected paths appeared during this session/ { on = 1 } on' "$_S258_O" | grep -qF "$_S258_W/.idea/" || echo "the late .idea/ is not reported as appeared"
+    grep -qF "may still exist, so this session-end report is provisional: writes it makes from here are not in it" "$_S258_O" || echo "not said to be provisional"
+    grep -qF "judged against it again once the container is gone: docker rm -f sandy-ws-" "$_S258_O" || echo "the advice is not docker rm -f for a terminal session's container"
+    if grep -qF "sandy --stop" "$_S258_O"; then echo "advises --stop for a terminal session"; fi
+    _S258_P="$(ls "$_S258_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+    [ -n "$_S258_P" ] && grep -qx '#gitdirs-recorded' "$_S258_P" || echo "the launch snapshot was not kept in .protected-provisional/"
+    grep -q "^container	sandy-ws-" "${_S258_P%.snap}.info" 2>/dev/null || echo "no .info naming the container beside it"
+    [ ! -e "$_S258_S/.protected-existed-at-launch" ] || echo "the live snapshot name is still taken"
+    [ "$(cat "$_S258_W/.git/commondir" 2>/dev/null)" = . ] || echo "the seed was removed"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked under a surviving container"
+    grep -qF "may still exist, so the macOS file locks and the seeded commondir files are kept" "$_S258_O" || echo "no warning"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c)" "$_S258_C"
+check "§258(c) when the container may still exist after its removal, the report still runs (and names the late write) but says it is provisional, since writes after it go unreported, and keeps the launch snapshot; the locks and the seed are kept, and said so (mutation: the snapshot removed by the report regardless; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c2) the surviving container writes after that report (here: the test
+# creates .vscode/tasks.json); the next launch, which removes that container,
+# judges the workspace against the kept snapshot and reports it.
+mkdir -p "$_S258_W/.vscode"; printf '{"tasks":[]}\n' > "$_S258_W/.vscode/tasks.json"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S258_PATH"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qF "An EARLIER session's end report (it was provisional" "$_S258_O" || echo "no re-judgement, or not labelled as the earlier session's"
+    awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_S258_O" | grep -qF "$_S258_W/.vscode/" || echo "the write after the provisional report is not reported in the labelled block"
+    grep -qF "==== An earlier session, " "$_S258_S/.session-end-report" 2>/dev/null || echo "the re-judgement is not recorded"
+    grep -qF "$_S258_W/.vscode/" "$_S258_S/.session-end-report" 2>/dev/null || echo "the record does not name the write"
+    [ ! -e "$_S258_S/.protected-provisional" ] || echo "the kept snapshot was left: $(ls -A "$_S258_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c2)" "$_S258_C"
+check "§258(c2) ...and the next launch, once it has removed that container, judges the workspace against the kept snapshot: a write made after the provisional report (.vscode/tasks.json) is reported, labelled as the earlier session's, recorded until --ack-report, and the kept snapshot is gone (mutations: the snapshot removed by the provisional report; the re-judgement only printed; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c3) the same under --start: the re-judgement runs in the supervisor, whose
+# output is a log, so it must be recorded (the next --start, --attach, --stop
+# or terminal launch shows it until --ack-report).
+_S258_C=s258-start; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"; _S258_S="$(_a6_sandbox "$_S258_C")"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+mkdir -p "$_S258_W/.vscode"; printf '{"tasks":[]}\n' > "$_S258_W/.vscode/tasks.json"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 A6_TERM_ON_DETACH=1 PATH="$_S258_PATH" -- --start --workspace "$_S258_W"
+_S258_R="$( { [ -n "$(_a6_agent_args "$_S258_C")" ] || echo "no supervisor docker run (rc $_A6_RC)"
+    grep -qF "==== An earlier session, " "$_S258_S/.session-end-report" 2>/dev/null || echo "the supervisor's re-judgement is not recorded"
+    awk '/==== An earlier session, / { on = 1 } /==== Daemon session ended/ { on = 0 } on' "$_S258_S/.session-end-report" 2>/dev/null | grep -qF "$_S258_W/.vscode/" || echo "the record does not name the write"
+    [ ! -e "$_S258_S/.protected-provisional" ] || echo "the kept snapshot was left"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c3)" "$_S258_C"
+check "§258(c3) under --start the supervisor judges the kept snapshot once it has removed the earlier container, and RECORDS that report, so --start, --attach, --stop and a terminal launch show it until --ack-report (mutation: the re-judgement only printed, into the supervisor's log; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c4) two provisional sessions in a row each keep their own snapshot, tied to
+# their launch by name; the second launch, its predecessor's container still
+# there, says once that that report is still provisional and how to clear
+# it; the third judges both, and nothing else: a snapshot a killed session
+# left at the live name is not a kept one.
+_S258_C=s258-multi; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"; _S258_S="$(_a6_sandbox "$_S258_C")"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_S258_R="$( { [ "$(ls "$_S258_S/.protected-provisional/"*.snap 2>/dev/null | wc -l | tr -d ' ')" = 2 ] || echo "kept snapshots: $(ls -A "$_S258_S/.protected-provisional" 2>/dev/null | tr '\n' ' ')"
+    grep -qF "An earlier session-end report of this workspace is still provisional (its container may still exist); it is judged once the container is gone: docker rm -f sandy-ws-" "$_A6_DIR/$_S258_C/out" || echo "no still-provisional line"; } 2>&1)" || true
+printf '%s\n' '#gitdirs-recorded' > "$_S258_S/.protected-existed-at-launch"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S258_PATH"
+_S258_R="$_S258_R$( { [ "$(grep -cF "An EARLIER session's end report" "$_A6_DIR/$_S258_C/out" || true)" = 2 ] || echo "re-judgements: $(grep -cF "An EARLIER session's end report" "$_A6_DIR/$_S258_C/out" || true), want 2"
+    [ ! -e "$_S258_S/.protected-provisional" ] || echo "left: $(ls -A "$_S258_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c4)" "$_S258_C"
+check "§258(c4) two provisional sessions keep two snapshots, each tied to its launch by name (not one marker any snapshot could pair with); while the first one's container is still there the next launch says that report is still provisional and how to clear it; then both are judged, and a stray snapshot at the live name is not (mutations: one shared kept snapshot overwritten; the not-yet-judged case silent; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_a6_join s258-stub; _S258_W="$_A6_DIR/s258-stub/ws"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qx "mountpoint .claude/commands" "$_A6_DIR/s258-stub/events.log" || echo "fixture: no overlay mount point created"
+    [ "$(cat "$_A6_DIR/s258-stub/stub-at-rm" 2>/dev/null)" = present ] || echo "the stub dir was removed before the container (at-rm: $(cat "$_A6_DIR/s258-stub/stub-at-rm" 2>/dev/null || echo none))"
+    [ ! -e "$_S258_W/.claude/commands" ] || echo "the stub dir was not removed after the session"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(d)" s258-stub
+check "§258(d) the empty stub dir an overlay mount created (.claude/commands) is still there when the container is removed, and removed after it (mutation: the stub sweep before the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_a6_join s258-stubk; _S258_W="$_A6_DIR/s258-stubk/ws"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qx "mountpoint .claude/commands" "$_A6_DIR/s258-stubk/events.log" || echo "fixture: no overlay mount point created"
+    [ -d "$_S258_W/.claude/commands" ] || echo "the stub dir was removed under a surviving container"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(d2)" s258-stubk
+check "§258(d2) ...and it stays when the container may still exist (mutation: the stub sweep regardless of the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (e) the predicate itself: no such container / object (Docker, podman) is
+# gone, an empty id is gone, an id is not, and a daemon that cannot be
+# reached (a missing socket, a DOCKER_HOST that does not resolve) is not.
+_S258_FN="$(sed -n '/^_sandy_container_gone() {/,/^}$/p' "$SANDY_SCRIPT")"
+check "§258(e) _sandy_container_gone: \"No such container\", \"No such object\" and podman's \"no such container\" are gone; an empty id is gone; an id, a missing daemon socket (connect: no such file or directory) and an unresolvable DOCKER_HOST (no such host) are not (mutation: matching any \"no such\")" \
+    bash -c 'eval "$1"; [ -n "$(declare -F _sandy_container_gone)" ] || exit 1
+             docker() { if [ -n "$D_ERR" ]; then printf "%s\n" "$D_ERR" >&2; return 1; fi; printf "%s" "$D_OUT"; }
+             t() { D_ERR="$2" D_OUT="$3"; if _sandy_container_gone x; then r=gone; else r=present; fi; [ "$r" = "$1" ] || { echo "[$2|$3] -> $r, want $1"; exit 1; }; }
+             t gone "Error response from daemon: No such container: x" ""
+             t gone "Error: No such object: x" ""
+             t gone "Error: no such container x" ""
+             t gone "" ""
+             t present "" "4f3c2b1a"
+             t present "$2" ""
+             t present "$3" ""
+             echo probed' _ "$_S258_FN" "$_S258_SOCK" "$_S258_HOST"
+_S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ "$(cat "$_S258_W/.git/commondir" 2>/dev/null)" = . ] || echo "the seed was removed with the daemon unreachable"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked with the daemon unreachable"
+    grep -qF "provisional" "$_S258_O" || echo "the report was not called provisional"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(e2)" "$_S258_C"
+check "§258(e2) a launch whose teardown cannot reach the docker daemon (inspect: connect: no such file or directory) keeps the macOS locks and the seed and calls its report provisional (mutation: matching any \"no such\" as gone; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c5) the re-judgement walks the gitdir a .git FILE named in that session
+# (recorded beside the kept snapshot): a worktree admin dir created there
+# after the provisional report is reported.
+_S258_C=s258-gitf; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_G="$_A6_DIR/$_S258_C/realgit"
+mkdir -p "$_S258_W" "$_S258_G/objects" "$_S258_G/refs"; printf 'ref: refs/heads/main\n' > "$_S258_G/HEAD"; printf '[core]\n' > "$_S258_G/config"
+printf 'gitdir: ../realgit\n' > "$_S258_W/.git"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_S258_R="$( { grep -q "^gitdir	[0-9a-f]" "$(ls "$(_a6_sandbox "$_S258_C")/.protected-provisional/"*.info 2>/dev/null | head -n 1)" 2>/dev/null || echo "the gitdir was not recorded beside the kept snapshot (rc $_A6_RC)"; } 2>&1)" || true
+mkdir -p "$_S258_G/worktrees/new"; printf 'ref: refs/heads/new\n' > "$_S258_G/worktrees/new/HEAD"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S258_PATH"
+_S258_R="$_S258_R$( { awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_A6_DIR/$_S258_C/out" | grep -qF "$_S258_G/worktrees/new" || echo "the admin dir created in the .git file's gitdir is not in the re-judgement"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c5)" "$_S258_C"
+check "§258(c5) the re-judgement walks the gitdir the earlier session's .git file named (recorded with the kept snapshot): a worktree admin dir created there after the provisional report is reported (mutation: the re-judgement without that gitdir; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (e3) --unlock refuses while the workspace's container may still exist (here:
+# Docker still unreachable), naming it and how to remove it; once it is gone
+# it unlocks.
+_S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_O="$_A6_DIR/$_S258_C/out"
+_a6_launch "$_S258_C" A6_OS=Darwin S258_INSPECT_ERR="$_S258_SOCK" PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
+_S258_R="$( { [ "$_A6_RC" = 1 ] || echo "--unlock rc $_A6_RC, want 1"
+    grep -qF "may still exist (a session that outlived its teardown, or Docker could not be reached), so its locks stay" "$_S258_O" || echo "no refusal naming the container"
+    grep -qF "docker rm -f sandy-ws-" "$_S258_O" || echo "no docker rm -f advice"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked anyway"; } 2>&1)" || true
+_a6_launch "$_S258_C" A6_OS=Darwin PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
+_S258_R="$_S258_R$( { [ "$_A6_RC" = 0 ] || echo "--unlock rc $_A6_RC once the container is gone"
+    [ ! -s "$_A6_DIR/$_S258_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags")"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(e3)" "$_S258_C"
+check "§258(e3) --unlock refuses while the workspace's container (a terminal session's, no daemon label) may still exist, naming it and docker rm -f, and unlocks once it is gone (mutation: --unlock checking daemon containers only; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (f) --reset-sandbox says when it drops a pending session-end judgement.
+_S258_C=s258-reset; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_a6_launch "$_S258_C" PATH="$_S258_PATH" -- --reset-sandbox --workspace "$_S258_W" --keep-history --dry-run
+check "§258(f) --reset-sandbox names a pending session-end judgement (a kept provisional snapshot) it would drop (rc $_A6_RC; mutation: the line removed)" \
+    bash -c '[ "$1" = 0 ] && grep -qF "Drops a pending session-end judgement" "$2" && [ -n "$(ls -A "$3/.protected-provisional" 2>/dev/null)" ]' _ "$_A6_RC" "$_A6_DIR/$_S258_C/out" "$(_a6_sandbox "$_S258_C")"
+_a6_done
+unset -f _s258_repo
+unset _S258_B _S258_PATH _S258_C _S258_W _S258_O _S258_R _S258_S _S258_FN _S258_SOCK _S258_HOST _S258_P _S258_G
+echo ""
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

@@ -3488,9 +3488,12 @@ _sandy_uchg_unlock() {
 }
 
 # True when container $1 (a name or id; empty = none was ever created) is
-# known to be gone: inspect reports no such object, or prints no id. An error
-# of any other kind (the daemon unreachable mid-teardown) is "maybe still
-# there", which keeps what depends on it.
+# known to be gone: inspect reports no such container or object (Docker's
+# `No such container` / `No such object`, podman's lowercase forms), or prints
+# no id. An error of any other kind is "maybe still there", which keeps what
+# depends on it: in particular the daemon unreachable mid-teardown, whose
+# messages also hold "no such" (`connect: no such file or directory` for a
+# missing socket, `no such host` for a DOCKER_HOST that does not resolve).
 _sandy_container_gone() {
     local _o _rc=0
     [ -n "$1" ] || return 0
@@ -3499,7 +3502,9 @@ _sandy_container_gone() {
         if [ -z "$_o" ]; then return 0; fi
         return 1
     fi
-    case "$_o" in *"No such"*|*"no such"*) return 0 ;; esac
+    case "$_o" in
+        *"No such container"*|*"No such object"*|*"no such container"*|*"no such object"*) return 0 ;;
+    esac
     return 1
 }
 # A `commondir` that is an EMPTY directory (Docker created it for a missing -v
@@ -3918,7 +3923,9 @@ _sandy_session_end_protected_report() {
         if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = '#gitdirs-recorded'; then
             _sandy_git_admin_report "$SANDBOX_DIR/.protected-existed-at-launch"
         fi
-        rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
+        # Kept while the container may still write (cleanup(), #584): the
+        # workspace is judged against it again once the container is gone.
+        [ "${_SANDY_SNAP_KEEP:-}" = 1 ] || rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
     return 0
 }
@@ -3941,6 +3948,7 @@ _sandy_session_report_add() {
     _rec="$(_sandy_session_report_path "$1")"
     case "$3" in
         stop) _what="torn down by --stop; its supervisor was gone" ;;
+        rejudge|rejudge-stop) _what="judged again once its container was gone: its own report was provisional" ;;
         *)    _what="reported by its supervisor's cleanup" ;;
     esac
     _um="$(umask)"; umask 077
@@ -3948,8 +3956,12 @@ _sandy_session_report_add() {
     umask "$_um"
     if [ -n "$_n" ] && {
             if [ -f "$_rec" ] && [ ! -L "$_rec" ]; then cat "$_rec"; fi
-            printf '[sandy] ==== Daemon session ended %s (%s) ====\n' \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" "$_what"
+            case "$3" in
+                rejudge|rejudge-stop) printf '[sandy] ==== An earlier session, %s (%s) ====\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" "$_what" ;;
+                *) printf '[sandy] ==== Daemon session ended %s (%s) ====\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" "$_what" ;;
+            esac
             sed $'s/\033\\[[0-9;]*m//g' "$2" | LC_ALL=C tr -d '\000-\010\013-\037\177'
         } > "$_n" && mv -f "$_n" "$_rec"; then
         return 0
@@ -3982,7 +3994,7 @@ _sandy_session_end_report() {
     fi
     "$_fn" "$_sb" "$_wd" 2>"$_t" || true
     if [ -s "$_t" ]; then
-        if ! _sandy_session_report_add "$_sb" "$_t" "$_by" || [ "$_by" = supervisor ]; then
+        if ! _sandy_session_report_add "$_sb" "$_t" "$_by" || [ "$_by" = supervisor ] || [ "$_by" = rejudge ]; then
             cat "$_t" >&2
         fi
     fi
@@ -3994,7 +4006,7 @@ _sandy_session_end_report() {
 _sandy_session_end_content_report() {
     local WORK_DIR="$2"
     _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$1/.protected-existed-at-launch")" "$1/.protected-copies"
-    rm -f "$1/.protected-existed-at-launch"
+    [ "${_SANDY_SNAP_KEEP:-}" = 1 ] || rm -f "$1/.protected-existed-at-launch"
     return 0
 }
 # --stop's direct teardown of a supervisor-less daemon, once its container is
@@ -4020,6 +4032,108 @@ _sandy_unsupervised_stop_report() {
         _sandy_session_end_report "$1" "$WORK_DIR" stop _sandy_session_end_content_report
     fi
     rm -f "$_snap"
+    return 0
+}
+# --- Provisional session-end reports (#584) ---------------------------------
+# cleanup() removes the agent container before the session-end report. When
+# it cannot confirm the container is gone (_sandy_container_gone), the
+# container may still be writing, so that report is provisional: cleanup
+# keeps the launch snapshot for a later judgement, in
+# $SANDBOX_DIR/.protected-provisional/ (0700, never in any container), as
+# <id>.snap beside <id>.info, <id> being that launch's id. The pair is tied by
+# its name, so no other snapshot can be judged in its place, and a later
+# provisional session adds its own pair beside it. <id>.info holds, one
+# "<key><TAB><value>" line each: container (its name), daemon (1 for a
+# --start session), gitdir (the gitdir a .git file named, hex, or empty) and
+# ended (UTC). Each pair is judged once its container is known gone: by the
+# next launch of the workspace, right after it force-removes the container
+# of that name, or by --stop's direct teardown of a supervisor-less daemon.
+_sandy_provisional_dir() { printf '%s/.protected-provisional' "$1"; }
+# cleanup(): keep this launch's snapshot ($SANDBOX_DIR) for a later judgement.
+_sandy_provisional_keep() {
+    local _d _id _t _hx="" _snap="$SANDBOX_DIR/.protected-existed-at-launch"
+    [ -f "$_snap" ] && [ ! -L "$_snap" ] || return 0
+    _d="$(_sandy_provisional_dir "$SANDBOX_DIR")"
+    if [ -L "$_d" ] || { [ -e "$_d" ] && [ ! -d "$_d" ]; }; then rm -f "$_d" 2>/dev/null || true; fi
+    [ -d "$_d" ] || mkdir -m 700 "$_d" 2>/dev/null || true
+    [ -d "$_d" ] && [ ! -L "$_d" ] || return 0
+    _id="${_sandy_launch_id:-}"
+    case "$_id" in ''|*[!A-Za-z0-9]*) _id="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null)p$$" ;; esac
+    [ -z "${GITDIR_HOST:-}" ] || _sandy_hex "$GITDIR_HOST" _hx
+    _t="$(mktemp "$_d/.info.XXXXXX" 2>/dev/null)" || return 0
+    printf 'container\t%s\ndaemon\t%s\ngitdir\t%s\nended\t%s\n' "${CONTAINER_NAME:-}" \
+        "$([ "${SANDY_DAEMON_SUPERVISOR:-0}" = 1 ] && echo 1 || echo 0)" "$_hx" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" > "$_t" \
+        && mv -f "$_t" "$_d/$_id.info" && mv -f "$_snap" "$_d/$_id.snap" || rm -f "$_t" 2>/dev/null || true
+    return 0
+}
+# What to do about a container that may still exist, for the session $1 ran
+# in (1 = a --start daemon, else a terminal session): --stop finds only a
+# daemon's container; a terminal session's is removed with docker rm -f.
+_sandy_provisional_advice() {   # $1 = daemon flag  $2 = container
+    if [ "$1" = 1 ]; then
+        printf 'sandy --stop --workspace %s (or the next launch)' "$(printf '%q' "${WORK_DIR:-}")"
+    else
+        printf 'docker rm -f %s, then the next launch of this workspace' "$(printf '%q' "$2")"
+    fi
+}
+# Judge every kept pair of sandbox $1 (workspace $WORK_DIR) whose container is
+# known gone, oldest first; $2 = launch | stop. Each is reported as the
+# whole session-end report against its own launch snapshot, with that
+# session's gitdir, and RECORDED (as a daemon session's report is: shown by
+# --start, --attach, --stop and a terminal launch until sandy --ack-report),
+# so a --start supervisor, whose output is a log, does not lose it; a launch
+# also prints it (--stop prints the record at its end). A pair whose
+# container is still not known gone stays, and is named in one line.
+_sandy_provisional_rejudge() {   # $1 = sandbox  $2 = launch|stop
+    local _sb="$1" _d _f _id _k _v _c _dm _g _gh _left="" _by=rejudge _n=0
+    _d="$(_sandy_provisional_dir "$_sb")"
+    [ -d "$_d" ] && [ ! -L "$_d" ] || return 0
+    [ "${2:-}" != stop ] || _by=rejudge-stop
+    for _f in $(cd "$_d" 2>/dev/null && ls -tr -- *.snap 2>/dev/null); do
+        _id="${_f%.snap}"
+        case "$_id" in ''|*[!A-Za-z0-9]*) continue ;; esac
+        [ -f "$_d/$_id.snap" ] && [ ! -L "$_d/$_id.snap" ] || continue
+        _c=""; _dm=0; _g=""
+        if [ -f "$_d/$_id.info" ] && [ ! -L "$_d/$_id.info" ]; then
+            while IFS=$'\t' read -r _k _v; do
+                case "$_k" in container) _c="$_v" ;; daemon) _dm="$_v" ;; gitdir) _g="$_v" ;; esac
+            done < "$_d/$_id.info"
+        fi
+        if [ -z "$_c" ] || ! _sandy_container_gone "$_c"; then
+            _left="$_left${_left:+; }$(_sandy_provisional_advice "$_dm" "${_c:-?}")"
+            continue
+        fi
+        # The live snapshot name is free here: a launch has not written its
+        # own yet, and --stop's own report has removed the one it judged.
+        if [ -e "$_sb/.protected-existed-at-launch" ] || [ -L "$_sb/.protected-existed-at-launch" ]; then
+            _left="$_left${_left:+; }the next launch"; continue
+        fi
+        mv -f "$_d/$_id.snap" "$_sb/.protected-existed-at-launch" 2>/dev/null || continue
+        _gh=""
+        if [ -n "$_g" ] && _sandy_unhex "$_g" _gh && [ -n "$_gh" ]; then
+            case "$_gh" in /*) [ -d "$_gh" ] && [ ! -L "$_gh" ] || _gh="" ;; *) _gh="" ;; esac
+        fi
+        if [ "$_by" = rejudge ]; then
+            printf "\n${YELLOW:-}[sandy]${NC:-} ==== An EARLIER session's end report (it was provisional: its container %s may have outlived it) ====\n" "$_c" >&2
+            printf "${YELLOW:-}[sandy]${NC:-} The container is gone now; the workspace, judged against THAT session's launch snapshot (not this launch's):\n" >&2
+        fi
+        ( GITDIR_HOST="$_gh"
+          SANDY_ALLOW_WORKFLOW_EDIT=0
+          if _sandy_snap_scan "$_sb/.protected-existed-at-launch" = '#workflow-edit-allowed'; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
+          if _sandy_snap_scan "$_sb/.protected-existed-at-launch" = '#gitdirs-recorded'; then
+              _sandy_session_end_report "$_sb" "$WORK_DIR" "$_by"
+          else
+              _sandy_session_end_report "$_sb" "$WORK_DIR" "$_by" _sandy_session_end_content_report
+          fi ) || true
+        [ "$_by" != rejudge ] || printf "${YELLOW:-}[sandy]${NC:-} ==== End of the earlier session's report (recorded; sandy --ack-report --workspace %s acknowledges it) ====\n\n" "$(printf '%q' "$WORK_DIR")" >&2
+        rm -f "$_sb/.protected-existed-at-launch" "$_d/$_id.info"
+        _n=$((_n + 1))
+    done
+    if [ -n "$_left" ]; then
+        printf "${YELLOW:-}[sandy]${NC:-} An earlier session-end report of this workspace is still provisional (its container may still exist); it is judged once the container is gone: %s.\n" "$_left" >&2
+    fi
+    rmdir "$_d" 2>/dev/null || true
     return 0
 }
 # Print the record of sandbox $1 (workspace $2), if there is one, on stderr.
@@ -5044,7 +5158,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
-    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .gemini/.env, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--unlock"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"macOS: clear the user-immutable flags (chflags uchg) a launch set on the workspace protected files that matter most (.claude/settings.json, .claude/settings.local.json, .gemini/settings.json, .gemini/.env, .mcp.json, .envrc, .gitmodules, .git/config) when its session ended without clearing them. Clears only what the sandbox record says sandy set, on the same file; a flag the user set is never touched. Refuses while a session of the workspace runs, or while its container may still exist. Exit 0 when no lock of sandy is left (including none to begin with), 1 otherwise. Sub-options: --workspace PATH, --dry-run."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--ack-report"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Acknowledge the session-end report a daemon session of the workspace recorded in its sandbox (protected paths that appeared, changed or were replaced while nobody was reading the supervisor log; #554): prints it once more and removes it, so --start, --attach, --stop and terminal launches stop showing it. Filesystem-only. Exit 0 when no report is pending afterwards (including none to begin with), 1 otherwise. Sub-options: --workspace PATH."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME. When the destination has no workspace there, the workspace itself is copied first, whole (.git, untracked and ignored files, symlinks as links), as a new directory (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist. --exclude PATTERN (repeatable, rsync syntax, relative to the workspace root) keeps paths out of the workspace copy; across a CPU architecture change its .venv/ and node_modules/ are skipped too. Credential-bearing files, in the sandbox and in a copied workspace, are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync-from"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"The reverse of --rsync (#409): PULL a sandbox from another host into this one, over outbound ssh + rsync from here only (the source is never modified). The copy is named for THIS host workspace path and gets the same rewrites as --rsync: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json. The source workspace defaults to the same path relative to $HOME on the remote. A local workspace named with --workspace that does not exist yet is pulled too, whole, as a new directory, and moves into place with the sandbox (#509); one that exists is never written to, and --no-workspace keeps the old requirement that it already exist (--exclude PATTERN as for --rsync). Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. It lands in a hidden staging directory and is renamed into place only once every step succeeds, so a failed pull installs nothing. Refuses while a live session holds the source on the remote and never overwrites a sandbox already here. Takes the source host as its argument. Sub-options: --workspace PATH, --src-workspace PATH, --src-sandy-home PATH, --no-workspace, --exclude PATTERN, --dry-run, --yes."'; printf '}'
@@ -8158,6 +8272,10 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         printf '  - %-30s %s\n' "$_rs_bn" "$_rs_sz"
         _rs_n=$((_rs_n + 1))
     done
+    if [ -n "$(ls -A "$_rs_dir/.protected-provisional" 2>/dev/null)" ]; then
+        printf 'Drops a pending session-end judgement: an earlier session'"'"'s report was provisional (its container may have\n'
+        printf '  outlived it), and .protected-provisional/ holds the launch snapshot it is to be judged against.\n'
+    fi
     printf 'Preserved: WORKSPACE.json (lineage)%s%s%s%s\n\n' \
         "$(_rs_keep_claude_child "$_rs_dir/claude/.claude.json" && printf ', claude/.claude.json (Claude Code config, including any operator MCP server block)')$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', AND DESTROYS relay-bin/relay (the slot was removed in 2.2.0; it would block the next launch)')" \
         "$(set -- "$_rs_dir"/agent-args.*; [ -e "$1" ] && printf ', agent-args.* (per-agent launch args)')" \
@@ -8359,7 +8477,7 @@ _sandy_rsy_path_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9._/@+-]+$'; }
 # Everything regenerated per launch or per process; never copied either way.
 _SANDY_RSY_NEVER=(sandy-session.json gemini-system-settings.json relay-state/ feature-state/
                   agent-args-composed/ launch/ proxy.log .protected-existed-at-launch claude/sessions/
-                  .protected-copies/ .uchg-locked .commondir-seeded)
+                  .protected-copies/ .uchg-locked .commondir-seeded .protected-provisional/)
 _SANDY_RSY_ARCH_DIRS=(cargo go npm-global pip uv venv)
 # Non-interactive transport for every --rsync / --rsync-from transfer. -T on the
 # command line overrides a host's `RequestTTY yes` in ssh_config, which would
@@ -9393,6 +9511,16 @@ if [[ "${1:-}" == "--unlock" ]]; then
     _ulk_ctr="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR" 2>/dev/null | head -1)" || _ulk_ctr=""
     if [ -n "$_ulk_ctr" ]; then
         error "--unlock: a daemon container of this workspace is running (${_ulk_ctr:0:12}), with or without its supervisor; stop it first: sandy --stop --workspace $(printf '%q' "$WORK_DIR")"
+        exit 1
+    fi
+    # #584: a terminal session's container that outlived its teardown has no
+    # daemon label, and it still has the files' read-write workspace mount.
+    # Refused while it is not known gone (a Docker that cannot be reached
+    # counts as "may still exist"); with no docker command at all there is
+    # no container.
+    if command -v docker >/dev/null 2>&1 && ! _sandy_container_gone "sandy-${_ulk_base}-${_ulk_hash}"; then
+        error "--unlock: the container sandy-${_ulk_base}-${_ulk_hash} of this workspace may still exist (a session that outlived its teardown, or Docker could not be reached), so its locks stay."
+        error "  Remove it first: docker rm -f sandy-${_ulk_base}-${_ulk_hash}, then run sandy --unlock again."
         exit 1
     fi
     info "Files sandy locked in $WORK_DIR:"
@@ -16350,8 +16478,10 @@ if [ "$SANDY_STOP" = "true" ]; then
             sleep 1
             _sandy_stop_waited=$((_sandy_stop_waited + 1))
         done
-        # The supervisor's cleanup records its report before it removes the
-        # container, so by now the record holds it (#554).
+        # The supervisor's cleanup records its report once it has removed the
+        # container (#584), and the wait above is for the supervisor to exit
+        # too (#498), so by now the record holds it (#554), unless the wait
+        # ran out with the supervisor still finishing its teardown.
         _sandy_session_report_show "$_sandy_stop_sb" "$WORK_DIR"
         if [ -n "$_sandy_stop_still" ]; then
             error "Daemon session did not stop within ${_sandy_stop_timeout_s}s (supervisor pid $_sandy_stop_pid)."
@@ -16388,6 +16518,8 @@ if [ "$SANDY_STOP" = "true" ]; then
         # snapshot stays for the next --stop to judge against.
         if [ -n "$_SANDY_UNSUP_STOP_SB" ] && [ "$_sandy_stop_ok" = true ]; then
             _sandy_unsupervised_stop_report "$_SANDY_UNSUP_STOP_SB"
+            # And any earlier provisional report of this workspace (#584).
+            _sandy_provisional_rejudge "$_SANDY_UNSUP_STOP_SB" stop
         fi
         # Best-effort: reaps this session's now-orphaned sandy_{net,sidecar,egress}_*
         # networks (their owning pid — the dead supervisor's — is gone, so
@@ -22852,12 +22984,52 @@ cleanup() {
     [ -n "${_SANDY_CLEANED:-}" ] && return 0
     _SANDY_CLEANED=1
 
+    # HF-incident Issue 6: point the user at the tool-use audit trail if one was
+    # written this session (SANDY_TOOL_AUDIT=1 seeds the PreToolUse hook).
+    if [ "${SANDY_TOOL_AUDIT:-0}" = "1" ] && [ -n "${SANDBOX_DIR:-}" ] \
+            && [ -s "$SANDBOX_DIR/claude/tool-audit.jsonl" ]; then
+        printf "\n${GREEN}[sandy]${NC} Tool-use audit trail: %s (%s call(s))\n" \
+            "$SANDBOX_DIR/claude/tool-audit.jsonl" \
+            "$(grep -c . "$SANDBOX_DIR/claude/tool-audit.jsonl" 2>/dev/null || echo '?')" >&2
+    fi
+    # Force-remove the agent container FIRST: before the session-end report
+    # below, so a write the agent makes until it is gone cannot land after the
+    # report has looked (#584, as --stop's direct teardown has done since
+    # #573), and before the proxy and networks, so it can never outlive them.
+    # The agent runs `docker run --rm` in the foreground (below), so on a
+    # normal exit the container is already gone and this is a harmless no-op.
+    # But the container's lifetime belongs to the daemon, not the `docker run`
+    # *client*: if that client is killed without the container stopping
+    # (closed terminal, killed session, dropped SSH, SIGHUP), the daemon keeps
+    # the agent running -- and the rest of this trap then tears down its proxy
+    # (docker rm -f below) and egress route, stranding the agent on a
+    # routeless --internal sidecar where every request fails with
+    # FailedToOpenSocket until the next launch. Removing it here makes agent +
+    # proxy teardown atomic, and lets the sidecar `network rm` below actually
+    # succeed instead of failing on a still-attached orphan (which leaks the
+    # subnet). The order is: container removed, report, then the macOS locks
+    # and seeded commondir files released, and those only once the container
+    # is known gone (below); when the removal failed the report still runs,
+    # and the locks and seeds are kept. Guarded with :- because the trap is
+    # armed before CONTAINER_NAME is assigned; at that point the agent doesn't
+    # exist yet, so this is a no-op.
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    # Whether it is known gone decides what may be undone below: the stub
+    # dirs, the session-end snapshot, the macOS locks and the seeded commondir
+    # files are released only then (_sandy_container_gone: anything but "no
+    # such container" counts as maybe still there).
+    local _sandy_cl_gone=0
+    if _sandy_container_gone "${CONTAINER_NAME:-}"; then _sandy_cl_gone=1; fi
     # Remove empty stub dirs sandy created this session via Docker's
-    # bind-mount target auto-creation. Run this FIRST so nothing else in
-    # cleanup() can short-circuit it if an earlier command fails.
+    # bind-mount target auto-creation. Only once the agent container is known
+    # gone: on Linux, removing an empty stub that a surviving container has
+    # mounted detaches that mount there. When it may still exist the stubs
+    # stay (the next launch removes empty protected-dir stubs by name).
     # rmdir no-ops on populated dirs, so this is safe even if the agent
     # wrote into a stub during the session.
-    if [ -n "${SANDBOX_DIR:-}" ] && [ -f "$SANDBOX_DIR/.session-created-stubs" ]; then
+    if [ "$_sandy_cl_gone" = 1 ] && [ -n "${SANDBOX_DIR:-}" ] && [ -f "$SANDBOX_DIR/.session-created-stubs" ]; then
         _stub_failures=()
         _stub_count=0
         while IFS= read -r _stub; do
@@ -22903,27 +23075,31 @@ cleanup() {
         fi
         [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ] && \
             echo "sandy: [debug] processed $_stub_count recorded stub(s)" >&2
-    elif [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ]; then
+    elif [ "$_sandy_cl_gone" = 1 ] && [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ]; then
         echo "sandy: [debug] no .session-created-stubs file at \"${SANDBOX_DIR:-<unset>}/.session-created-stubs\"" >&2
-    fi
-    # HF-incident Issue 6: point the user at the tool-use audit trail if one was
-    # written this session (SANDY_TOOL_AUDIT=1 seeds the PreToolUse hook).
-    if [ "${SANDY_TOOL_AUDIT:-0}" = "1" ] && [ -n "${SANDBOX_DIR:-}" ] \
-            && [ -s "$SANDBOX_DIR/claude/tool-audit.jsonl" ]; then
-        printf "\n${GREEN}[sandy]${NC} Tool-use audit trail: %s (%s call(s))\n" \
-            "$SANDBOX_DIR/claude/tool-audit.jsonl" \
-            "$(grep -c . "$SANDBOX_DIR/claude/tool-audit.jsonl" 2>/dev/null || echo '?')" >&2
     fi
     # Detect protected-path appearances: the session-end report
     # (_sandy_session_end_protected_report). A daemon supervisor also records
     # it in the sandbox (#554): its stderr is a log nobody reads, so the next
     # --start, --attach, --stop or terminal launch of the workspace prints it
     # until `sandy --ack-report`.
+    # When the container may still exist, it may still write: the report is
+    # provisional, and the launch snapshot is kept so the workspace is judged
+    # against it again once the container is gone (_sandy_provisional_keep,
+    # _sandy_provisional_rejudge).
+    if [ "$_sandy_cl_gone" != 1 ] && [ -n "${SANDBOX_DIR:-}" ] && [ -f "$SANDBOX_DIR/.protected-existed-at-launch" ]; then
+        _SANDY_SNAP_KEEP=1
+        printf "${YELLOW:-}[sandy]${NC:-} The container %s may still exist, so this session-end report is provisional: writes it makes from here are not in it.\n" "${CONTAINER_NAME:-}" >&2
+        printf "${YELLOW:-}[sandy]${NC:-}   The launch snapshot is kept; the workspace is judged against it again once the container is gone: %s.\n" \
+            "$(_sandy_provisional_advice "${SANDY_DAEMON_SUPERVISOR:-0}" "${CONTAINER_NAME:-}")" >&2
+    fi
     if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
         _sandy_session_end_report "${SANDBOX_DIR:-}" "${WORK_DIR:-}" supervisor
     else
         _sandy_session_end_report "${SANDBOX_DIR:-}" "${WORK_DIR:-}"
     fi
+    if [ "${_SANDY_SNAP_KEEP:-}" = 1 ]; then _sandy_provisional_keep; fi
+    _SANDY_SNAP_KEEP=""
     # #80: .git/HEAD is rw in-container, so `git switch` works — but a switch that
     # left HEAD on a different (or detached) branch means a host git/IDE now sees a
     # checkout the user didn't choose. Surface it. Informational, NOT a security
@@ -23013,23 +23189,8 @@ cleanup() {
             ;;
     esac
     cleanup_network_isolation
-    # Force-remove the agent container FIRST, so it can never outlive this
-    # session's proxy + networks. The agent runs `docker run --rm` in the
-    # foreground (below), so on a normal exit the container is already gone and
-    # this is a harmless no-op. But the container's lifetime belongs to the
-    # daemon, not the `docker run` *client*: if that client is killed without the
-    # container stopping (closed terminal, killed session, dropped SSH, SIGHUP),
-    # the daemon keeps the agent running — and the rest of this trap then tears
-    # down its proxy (docker rm -f below) and egress route, stranding the agent on
-    # a routeless --internal sidecar where every request fails with
-    # FailedToOpenSocket until the next launch. Removing it here makes agent +
-    # proxy teardown atomic, and lets the sidecar `network rm` below actually
-    # succeed instead of failing on a still-attached orphan (which leaks the
-    # subnet). Guarded with :- because the trap is armed before CONTAINER_NAME is
-    # assigned; at that point the agent doesn't exist yet, so this is a no-op.
-    if [ -n "${CONTAINER_NAME:-}" ]; then
-        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    fi
+    # (The agent container was force-removed above, before the session-end
+    # report: #584.)
     # The macOS file locks and the seeded commondir files, only once the
     # container is known to be gone (_sandy_container_gone). Unlocking under a
     # container that survived reopens what the locks close, and a seed removed
@@ -23039,7 +23200,7 @@ cleanup() {
     # container may still exist, both are kept, and said so.
     if [ -n "${SANDBOX_DIR:-}" ] && [ -n "${WORK_DIR:-}" ] \
        && { [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ] || [ -f "$(_sandy_commondir_record "$SANDBOX_DIR")" ]; }; then
-        if _sandy_container_gone "${CONTAINER_NAME:-}"; then
+        if [ "$_sandy_cl_gone" = 1 ]; then
             if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ]; then
                 _sandy_uchg_unlock "$SANDBOX_DIR" "$WORK_DIR" \
                     || warn "Some files sandy locked for this session are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
@@ -23047,7 +23208,7 @@ cleanup() {
             _sandy_commondir_unseed "$SANDBOX_DIR"
         else
             warn "The container ${CONTAINER_NAME} may still exist, so the macOS file locks and the seeded commondir files are kept."
-            warn "  Once it is gone: sandy --stop --workspace $(printf '%q' "$WORK_DIR") (or the next launch) clears them."
+            warn "  Once it is gone, $(_sandy_provisional_advice "${SANDY_DAEMON_SUPERVISOR:-0}" "${CONTAINER_NAME:-}") clears them (or sandy --unlock)."
         fi
     fi
     # Egress-proxy teardown: stop the sidecar container and remove both the
@@ -23175,6 +23336,9 @@ fi
 # we exit in the gap, cleanup's existence-guarded blocks skip (no false
 # "protected paths appeared" warnings). SANDBOX_DIR is set (line 3594); the agent
 # does not start until docker run (well after 5906), so nothing is missed.
+# (A snapshot an earlier session kept because its container may have outlived
+# it is not here: it is in .protected-provisional/, judged once this launch has
+# removed that container, #584.)
 rm -f "$SANDBOX_DIR/.session-created-stubs" "$SANDBOX_DIR/.protected-existed-at-launch" "$SANDBOX_DIR/.head-at-launch" "$SANDBOX_DIR/.claude-perm-mode-at-launch" 2>/dev/null || true
 
 # Create the per-instance network(s) now that the cleanup trap is armed — in
@@ -24136,6 +24300,7 @@ fi
 # handles normal exits; a SIGKILL leaves the container behind).
 CONTAINER_NAME="sandy-${SANDBOX_NAME}"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+if [ -d "$SANDBOX_DIR/.protected-provisional" ]; then _sandy_provisional_rejudge "$SANDBOX_DIR" launch; fi
 
 # Stale Claude Code session registry (#407). Claude Code records each live
 # session in ~/.claude/sessions/<pid>.json (beside its messaging key,
