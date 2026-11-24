@@ -29,7 +29,7 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.git/hooks/` | Blocks git hook injection (pre-commit, post-checkout, etc.) |
 | `.git/info/` | Blocks `.git/info/attributes` filter-driver injection |
 | `.git/modules/<sub>/{config,hooks,info,commondir,config.worktree}` | Same, for every submodule gitdir (found at any depth) |
-| `.git/worktrees/<name>/{commondir,config.worktree}` | Same, for each linked worktree's admin directory: git run in that worktree reads them (2.9.0). One created during the session is reported at session end, as is a new submodule gitdir |
+| `.git/worktrees/<name>/` | Each linked worktree's whole admin directory is read-only (2.12.0): git in the session takes every linked worktree for gone (its `gitdir` file names a host path), so a `git worktree prune` or `git gc` there would delete them all. `worktrees/` itself stays writable, so `git worktree add` works; one removed anyway is reported at session end, and the container's git never prunes worktrees in `gc` (`gc.worktreePruneExpire=never`). Its `commondir` and `config.worktree` are protected as before: git run in that worktree reads them (2.9.0). One created during the session is reported at session end, as is a new submodule gitdir |
 | `.vscode/`, `.idea/` | Blocks IDE task/launch config injection |
 | `.github/workflows/` | Blocks CI pipeline escape (opt-out via `SANDY_ALLOW_WORKFLOW_EDIT=1`) |
 | `.circleci/`, `.devcontainer/` | Blocks CircleCI and devcontainer escape |

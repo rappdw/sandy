@@ -520,6 +520,9 @@ fi
 sandy_log "Configuring git"
 # Trust all directories (host UID differs from container UID; container is sandboxed)
 git config --global --add safe.directory "*"
+# #597: every linked worktree of the host looks gone from in here (its
+# gitdir file names a host path), so a git gc must never prune worktrees.
+git config --global gc.worktreePruneExpire never
 
 # Set git identity from host
 if [ -n "${GIT_USER_NAME:-}" ]; then

@@ -3023,6 +3023,33 @@ _sandy_git_admin_report() {
         printf "${YELLOW:-}[sandy]${NC:-} Sandy did not protect it (it did not exist at launch). Its commondir, config and\n" >&2
         printf "${YELLOW:-}[sandy]${NC:-} hooks steer git run in that worktree or submodule: review them before running git there.\n\n" >&2
     fi
+    # #597: and every one the launch recorded (#gitdir lines) that is gone
+    # now, or is now a link: a `git worktree prune` or `git gc` in the session
+    # deletes the admin dirs of linked worktrees it takes for gone. Builtins
+    # only (no process per recorded dir).
+    local _rk _rh _rw="" _rs=""
+    while IFS=$'\t' read -r _rk _rh; do
+        [ "$_rk" = "#gitdir" ] || continue
+        _sandy_unhex "$_rh" _d || continue
+        [ -n "$_d" ] || continue
+        if [ -d "$_d" ] && [ ! -L "$_d" ]; then continue; fi
+        _sandy_uchg_show "$_d" _t
+        case "${_d%/*}" in
+            */worktrees) _rw="$_rw$_t"$'\n' ;;
+            *) _rs="$_rs$_t"$'\n' ;;
+        esac
+    done 2>/dev/null < "$1"
+    if [ -n "$_rw" ]; then
+        printf "\n${YELLOW:-}[sandy]${NC:-} Linked worktree admin dir removed during this session:\n" >&2
+        while IFS= read -r _t; do [ -z "$_t" ] || printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$_t" >&2; done <<< "$_rw"
+        printf "${YELLOW:-}[sandy]${NC:-} The linked worktree that used it now fails on the host (fatal: not a git repository):\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} restore the directory from a backup, or move that worktree aside and add it again (git worktree add).\n\n" >&2
+    fi
+    if [ -n "$_rs" ]; then
+        printf "\n${YELLOW:-}[sandy]${NC:-} Submodule git dir removed during this session:\n" >&2
+        while IFS= read -r _t; do [ -z "$_t" ] || printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$_t" >&2; done <<< "$_rs"
+        printf "${YELLOW:-}[sandy]${NC:-} Its submodule checkout now fails on the host until it is restored (git submodule update --init).\n\n" >&2
+    fi
     return 0
 }
 
@@ -14396,6 +14423,9 @@ fi
 sandy_log "Configuring git"
 # Trust all directories (host UID differs from container UID; container is sandboxed)
 git config --global --add safe.directory "*"
+# #597: every linked worktree of the host looks gone from in here (its
+# gitdir file names a host path), so a git gc must never prune worktrees.
+git config --global gc.worktreePruneExpire never
 
 # Set git identity from host
 if [ -n "${GIT_USER_NAME:-}" ]; then
@@ -26038,12 +26068,28 @@ _protect_submodule_gitdirs() {
 }
 # The linked-worktree admin directories of gitdir $1 (container path $2):
 # commondir and config.worktree of each, :ro when present (2.9.0). A
-# repository with many worktrees gets two mounts at most per worktree, plus
-# the ancestor pins (_sandy_pin_mount_ancestors) of each admin directory.
+# repository with many worktrees gets three mounts at most per worktree (the
+# admin dir itself, below, is a mount destination, so it gets no ancestor pin).
+#
+# #597: and each admin dir itself :ro, but for the one this session's own
+# worktree uses (_SANDY_OWN_WT_ADMIN, which git writes: HEAD, index, logs).
+# Each <name>/gitdir names a host path that does not exist under the
+# container's $HOME mapping, so git in the session sees every linked worktree
+# as gone: `git worktree prune` (and `git gc`, for one idle three months)
+# deleted their admin dirs, and on the host those worktrees then fail with
+# `fatal: not a git repository`. A read-only admin dir cannot be emptied, and
+# as a mount point it cannot be removed or renamed. worktrees/ itself stays
+# writable, so `git worktree add` works. The commondir and config.worktree
+# file mounts stay too, inside it: they are what the content check hashes.
+# No process per worktree (the walker's find is the only one).
+_SANDY_OWN_WT_ADMIN=""   # #582 hook: a linked-worktree session sets its own admin dir here
 _protect_worktree_admin_dirs() {
     local _w _n
     while IFS= read -r -d '' _w; do
         _n="${_w##*/}"
+        if [ "$_w" != "${_SANDY_OWN_WT_ADMIN:-}" ]; then
+            RUN_FLAGS+=(-v "$_w:$2/worktrees/$_n:ro")
+        fi
         [ -f "$_w/commondir" ] && RUN_FLAGS+=(-v "$_w/commondir:$2/worktrees/$_n/commondir:ro")
         [ -f "$_w/config.worktree" ] && RUN_FLAGS+=(-v "$_w/config.worktree:$2/worktrees/$_n/config.worktree:ro")
     done < <(_sandy_worktree_admin_dirs "$1")

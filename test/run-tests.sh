@@ -28729,12 +28729,14 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
     for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
         grep -qxF "$_S248_W/.git/worktrees/$_S248_F:/home/sandy/ws/.git/worktrees/$_S248_F:ro" "$_S248_A" || echo "not :ro: $_S248_F"
     done
-    for _S248_F in .git/worktrees .git/worktrees/wt1 .git/worktrees/wt2; do
-        grep -qxF "$_S248_W/$_S248_F:/home/sandy/ws/$_S248_F" "$_S248_A" || echo "not pinned: $_S248_F"
+    grep -qxF "$_S248_W/.git/worktrees:/home/sandy/ws/.git/worktrees" "$_S248_A" || echo "not pinned: .git/worktrees"
+    # 2.12.0 (#597): each admin dir is itself mounted :ro, which also pins it.
+    for _S248_F in .git/worktrees/wt1 .git/worktrees/wt2; do
+        grep -qxF "$_S248_W/$_S248_F:/home/sandy/ws/$_S248_F:ro" "$_S248_A" || echo "neither pinned nor :ro: $_S248_F"
     done
     [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .git/worktrees/wt1/commondir ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"; } 2>&1)" || true
 if [ -n "$_S248_R" ]; then _a6_diag "§248(m1)" "$_S248_C"; fi
-check "§248(m1) each linked-worktree admin dir's commondir and config.worktree is :ro, its ancestors are pinned, and a rewrite is reported (mutation: no _protect_worktree_admin_dirs call; ${_S248_R:-ok})" \
+check "§248(m1) each linked-worktree admin dir's commondir and config.worktree is :ro, worktrees/ is pinned and each admin dir mounted :ro (#597), and a rewrite is reported (mutation: no _protect_worktree_admin_dirs call; ${_S248_R:-ok})" \
     test -z "$_S248_R"
 _S248_C=s248-wtamac; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$( { for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
@@ -28946,7 +28948,8 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
             split("modules modules/sub worktrees worktrees/w", R, " ")
             for (k = 1; k <= 4; k++) {
                 r = R[k]; pin = g "/" r ":" c "/" r; pi = 0
-                for (i = 1; i <= n; i++) if (v[i] == pin) pi = i
+                # 2.12.0 (#597): a worktree admin dir is mounted :ro, which pins it.
+                for (i = 1; i <= n; i++) if (v[i] == pin || (r ~ /^worktrees\// && v[i] == pin ":ro")) pi = i
                 if (!pi) { print "not pinned: " r; continue }
                 if (pi < gm) print "pin " r " before the gitdir mount"
                 for (i = 1; i <= n; i++) { d = v[i]; sub(/^[^:]*:/, "", d); sub(/:ro$/, "", d)
@@ -35301,6 +35304,105 @@ fi
 _a6_done
 unset -f _s261_gd _s261_fix _s261_ctr _s261_run _s261_holds _s261_both _s261_599
 unset _S261_B _S261_PATH _S261_C _S261_W _S261_G _S261_R _S261_RC1 _S261_RC2 _S261_S _S261_DB _S261_P
+echo ""
+
+# ============================================================
+section "§262: a session of a main checkout cannot delete its linked worktrees' admin dirs: each is mounted :ro, a removal is reported at session end (the provisional re-judgement and --stop's teardown included), and git gc in the container never prunes worktrees (#597)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. Every .git/worktrees/<name>/gitdir names a host path, which does not
+# exist under the container's $HOME mapping, so git in a session of the main
+# checkout sees every linked worktree as gone: `git worktree prune` deleted
+# all their admin dirs, and `git gc` the ones idle for three months. On the
+# host those worktrees then failed with `fatal: not a git repository`, and
+# the session-end sweep, which reported only admin dirs CREATED in-session,
+# said nothing. Now (1) each admin dir is mounted :ro (worktrees/ stays
+# writable, for git worktree add), (2) one recorded at launch and gone at
+# session end is reported, and (3) the container's git has
+# gc.worktreePruneExpire=never.
+_s262_git() { git -c user.name=s262 -c user.email=s262@example.invalid -c init.defaultBranch=main -c core.hooksPath= "$@"; }
+_s262_fix() {   # $1 = CASE: CASE/ws a repository with linked worktrees CASE/wt1, CASE/wt2
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h"
+    _s262_git init -q "$h/ws" && _s262_git -C "$h/ws" commit -q --allow-empty -m init \
+        && _s262_git -C "$h/ws" worktree add -q "$h/wt1" -b wt1 >/dev/null 2>&1 \
+        && _s262_git -C "$h/ws" worktree add -q "$h/wt2" -b wt2 >/dev/null 2>&1
+}
+# (a)+(c) a plain launch of the main checkout.
+_S262_C=s262-ro; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S262_A="$(_a6_agent_args "$_S262_C")"
+_S262_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S262_A" ] || echo "launch rc $_A6_RC"
+    [ -f "$_S262_W/.git/worktrees/wt1/gitdir" ] && [ -f "$_S262_W/.git/worktrees/wt2/gitdir" ] || echo "fixture: no linked worktrees"
+    for _S262_N in wt1 wt2; do
+        _a6_pair "$_S262_A" -v "$_S262_W/.git/worktrees/$_S262_N:/home/sandy/ws/.git/worktrees/$_S262_N:ro" || echo "no :ro mount of the $_S262_N admin dir"
+        _a6_pair "$_S262_A" -v "$_S262_W/.git/worktrees/$_S262_N/commondir:/home/sandy/ws/.git/worktrees/$_S262_N/commondir:ro" || echo "the $_S262_N commondir mount went"
+    done
+    # (worktrees/ itself is pinned onto itself, read-write: an ancestor pin)
+    if grep -qxF -- "$_S262_W/.git/worktrees:/home/sandy/ws/.git/worktrees:ro" "$_S262_A"; then echo "worktrees/ itself is mounted :ro (it must stay writable)"; fi
+    _S262_D="$(awk 'p=="-v" { n=split($0,a,":"); print a[2] } {p=$0}' "$_S262_A" | LC_ALL=C sort | uniq -d)"
+    [ -z "$_S262_D" ] || echo "duplicate mount destinations: $(printf '%s' "$_S262_D" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(a)" "$_S262_C"
+check "§262(a) a launch of a main checkout with two linked worktrees mounts each worktree's admin dir .git/worktrees/<name> :ro (its commondir mount kept inside it), leaves worktrees/ writable, and repeats no mount destination (mutation: no admin-dir mount; ${_S262_R:-ok})" \
+    test -z "$_S262_R"
+check "§262(c) the container's generated git setup sets gc.worktreePruneExpire=never, beside safe.directory (mutation: the line dropped)" \
+    bash -c 'grep -qxF "git config --global gc.worktreePruneExpire never" "$1" && grep -qF "safe.directory" "$1"' _ "$_A6_DIR/$_S262_C/sh/user-setup.sh"
+# (b) the "container" removes an admin dir during the session (a git worktree
+# prune that the :ro mount would refuse; here the stub plays it on the host):
+# the session-end report names it.
+_S262_C=s262-rm; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='rm -rf .git/worktrees/wt2' PATH="$_S248_PATH"
+_S262_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S262_W/.git/worktrees/wt2" ] || echo "fixture: wt2 was not removed"
+    awk '/Linked worktree admin dir removed during this session/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt2" || echo "the removal is not reported"
+    if awk '/Linked worktree admin dir removed during this session/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt1"; then echo "wt1, still there, is reported"; fi; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(b)" "$_S262_C"
+check "§262(b) a linked worktree admin dir removed during the session is reported at its end, by name, and one still there is not (mutation: no check of the recorded admin dirs; ${_S262_R:-ok})" \
+    test -z "$_S262_R"
+# (d) the provisional re-judgement: the container outlives its session, then
+# removes an admin dir; the next launch's judgement of the kept snapshot names
+# it.
+_S262_C=s262-prov; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+rm -rf "$_S262_W/.git/worktrees/wt1"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S262_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_A6_DIR/$_S262_C/out" \
+        | awk '/Linked worktree admin dir removed during this session/ { on = 1 } on' | grep -qF ".git/worktrees/wt1" || echo "the re-judgement does not name the removed admin dir"; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(d)" "$_S262_C"
+check "§262(d) ...and an admin dir removed after a provisional session-end report is named by the re-judgement of its kept snapshot (${_S262_R:-ok})" \
+    test -z "$_S262_R"
+# (e) --stop's direct teardown of a supervisor-less daemon reports it too.
+_S262_DB="$_A6_DIR/s262dbin"; mkdir -p "$_S262_DB"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in\n'
+  printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
+  printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
+  printf '    *sandy.session*) if [ -n "${S248_GONE:-}" ] && [ -e "$S248_GONE" ]; then echo "Error: No such object" >&2; exit 1; fi; echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
+  printf '    *State.Running*) echo true; exit 0 ;;\n'
+  printf '    "rm -f c0ffee"*) if [ -n "${S248_GONE:-}" ]; then : > "$S248_GONE"; fi; exit 0 ;;\n'
+  printf '    exec*|stop*) exit 0 ;;\n'
+  printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S262_DB/docker"
+chmod +x "$_S262_DB/docker"
+_S262_C=s262-stop; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"; _S262_S="$(_a6_sandbox "$_S262_C")"
+# The daemon's launch snapshot, as its launch left it (taken here by a plain
+# launch whose cleanup is told to keep it: its container "survives").
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+_S262_P="$(ls "$_S262_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+[ -z "$_S262_P" ] || mv "$_S262_P" "$_S262_S/.protected-existed-at-launch"
+rm -rf "$_S262_S/.protected-provisional"; rm -rf "$_S262_W/.git/worktrees/wt2"; : > "$_A6_DIR/$_S262_C/mounts"
+_a6_launch "$_S262_C" S248_DPID=2147480000 S248_SESS="$(basename "$_S262_S")" S248_MOUNTS="$_A6_DIR/$_S262_C/mounts" \
+    S248_GONE="$_A6_DIR/$_S262_C/gone" PATH="$_S262_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S262_W"
+_S262_R="$( { [ -n "$_S262_P" ] || echo "fixture: no snapshot"
+    grep -qF "Linked worktree admin dir removed during this session" "$_S262_S/.session-end-report" 2>/dev/null || echo "the --stop report does not name a removal"
+    grep -qF ".git/worktrees/wt2" "$_S262_S/.session-end-report" 2>/dev/null || echo "the removed admin dir is not named"; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(e)" "$_S262_C"
+check "§262(e) ...and --stop's direct teardown of a supervisor-less daemon records the removal in its report (rc ${_A6_RC:-none}; ${_S262_R:-ok})" \
+    test -z "$_S262_R"
+_a6_done
+unset -f _s262_git _s262_fix
+unset _S262_C _S262_W _S262_A _S262_R _S262_N _S262_D _S262_DB _S262_S _S262_P
 echo ""
 
 # BEGIN SUMMARY
