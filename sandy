@@ -6948,8 +6948,24 @@ _sandy_validate_config() {
     local errors=() warnings=() unknown=() privileged_keys=() env_only_keys=()
     local fatal=0
 
-    if [ ! -f "$abs_path" ]; then
+    # The file's KEY=VALUE lines, read once (#583): grep's 1 means none,
+    # which is a valid config (no keys, no findings); its 2 means the file
+    # could not be read, which is an error, never "no keys".
+    local _vc_lines="" _vc_rc=0
+    if [ -d "$abs_path" ]; then
+        errors+=("path is a directory, not a config file: $abs_path")
+        fatal=1
+    elif [ ! -e "$abs_path" ]; then
         errors+=("file does not exist: $abs_path")
+        fatal=1
+    elif [ ! -f "$abs_path" ]; then
+        errors+=("not a regular file: $abs_path")
+        fatal=1
+    elif [ ! -r "$abs_path" ]; then
+        errors+=("file is not readable: $abs_path")
+        fatal=1
+    elif _vc_lines="$(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)" || _vc_rc=$?; [ "$_vc_rc" -gt 1 ]; then
+        errors+=("file could not be read: $abs_path")
         fatal=1
     else
         local key value
@@ -6976,7 +6992,7 @@ _sandy_validate_config() {
             else
                 unknown+=("$key")
             fi
-        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
+        done < <(if [ -n "$_vc_lines" ]; then printf '%s\n' "$_vc_lines"; fi)
     fi
 
     # For passive sources with privileged keys, compute the same approval
@@ -6992,7 +7008,7 @@ _sandy_validate_config() {
                || _sandy_passive_value_privileged "$key" "$value" "$(_sandy_privileged_baseline "$key")"; then
                 kv_set+="$key=$value"$'\n'
             fi
-        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
+        done < <(if [ -n "$_vc_lines" ]; then printf '%s\n' "$_vc_lines"; fi)
         sorted="$(printf '%s' "$kv_set" | sort -u)"
         if command -v sha256sum >/dev/null 2>&1; then
             set_hash="$(printf '%s' "$sorted" | sha256sum | awk '{print $1}')"

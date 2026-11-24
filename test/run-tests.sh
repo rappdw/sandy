@@ -7118,6 +7118,73 @@ PY
 check "§92(f) --validate-config missing-file errors[] is non-empty" \
     python3 "$_S92_ERRORS_PY" "$_s92f_out"
 
+# --- (f2) #583: a file with no KEY=VALUE line (empty, comments only, blank
+# lines only, or only lines that are not keys: `lower=1`, `KEY=`) is valid:
+# exit 0, stderr 0 bytes, one JSON document with no errors, warnings or keys. Before, the key reader's grep found no line and
+# exited 1 under the handler's ERR trap, which printed "introspection handler
+# failed" on stderr (the JSON and the exit code were right).
+_S92_EMPTY_PY="$(mktemp)"
+cat > "$_S92_EMPTY_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for k in ("errors", "warnings", "unknown_keys", "privileged_keys_requiring_approval"):
+    assert d.get(k) == [], "%s: %r" % (k, d.get(k))
+assert d.get("approval_status") == "none_required", d.get("approval_status")
+PY
+mkdir -p "$_S92_TMP/ws92e/.sandy"
+for _s92f2 in empty comments blank invalid; do
+    case "$_s92f2" in
+        empty) : > "$_S92_TMP/ws92e/.sandy/config" ;;
+        comments) printf '# SANDY_MODEL=x is commented out\n# nothing else\n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+        blank) printf '\n\n   \n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+        invalid) printf 'lower=1\nKEY=\n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+    esac
+    _s92f2_out="$_S92_TMP/f2-$_s92f2.out"; _s92f2_err="$_S92_TMP/f2-$_s92f2.err"; _s92f2_rc=0
+    env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+        bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92e/.sandy/config" >"$_s92f2_out" 2>"$_s92f2_err" </dev/null || _s92f2_rc=$?
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) exits 0 (#583)" test "$_s92f2_rc" -eq 0
+    _s92_diag "$_s92f2_err" "§92(f2) --validate-config ($_s92f2)"
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) writes 0 bytes to stderr (got: $(_s92_pv "$_s92f2_err"); mutation: the key reader's grep run unguarded under the ERR trap)" \
+        bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f2_err"
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) prints one JSON document with no errors, warnings or keys (mutation: grep's no-match status read as a read failure)" \
+        bash -c 'python3 "$1" "$2" && python3 "$3" "$2"' -- "$_S92_PURITY_PY" "$_s92f2_out" "$_S92_EMPTY_PY"
+done
+rm -f "$_S92_EMPTY_PY"
+unset _s92f2 _s92f2_out _s92f2_err _s92f2_rc _S92_EMPTY_PY
+# --- (f3) a path that cannot be read as a config file is an error, not "no
+# keys": exit 1, stderr 0 bytes, one JSON document whose errors[] says why.
+# Before, `|| true` on the key reader made an unreadable file (grep's exit 2)
+# valid with errors: [], and a directory was reported as "file does not exist".
+_S92_REASON_PY="$(mktemp)"
+cat > "$_S92_REASON_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+errs = d.get("errors") or []
+assert len(errs) == 1 and errs[0].startswith(sys.argv[2]), "errors: %r, want one starting %r" % (errs, sys.argv[2])
+PY
+mkdir -p "$_S92_TMP/ws92u/.sandy" "$_S92_TMP/ws92d/.sandy/config"
+printf 'SANDY_MODEL=x\n' > "$_S92_TMP/ws92u/.sandy/config"; chmod 000 "$_S92_TMP/ws92u/.sandy/config"
+for _s92f3 in unreadable directory; do
+    case "$_s92f3" in
+        unreadable) _s92f3_p="$_S92_TMP/ws92u/.sandy/config"; _s92f3_why="file is not readable: " ;;
+        directory) _s92f3_p="$_S92_TMP/ws92d/.sandy/config"; _s92f3_why="path is a directory, not a config file: " ;;
+    esac
+    if [ "$_s92f3" = unreadable ] && [ -r "$_s92f3_p" ]; then
+        skip "§92(f3) --validate-config on an unreadable file: this user can read a mode-000 file (root), so the case cannot be made"
+        continue
+    fi
+    _s92f3_out="$_S92_TMP/f3-$_s92f3.out"; _s92f3_err="$_S92_TMP/f3-$_s92f3.err"; _s92f3_rc=0
+    env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+        bash "$_S92_SANDY" --validate-config "$_s92f3_p" >"$_s92f3_out" 2>"$_s92f3_err" </dev/null || _s92f3_rc=$?
+    _s92_diag "$_s92f3_err" "§92(f3) --validate-config ($_s92f3)"
+    check "§92(f3) --validate-config on a $_s92f3 path exits 1, writes 0 bytes to stderr, and prints one JSON document whose errors[] says ${_s92f3_why% } (rc $_s92f3_rc; mutation: the key reader ending in || true, or the directory reported as missing)" \
+        bash -c '[ "$1" = 1 ] && [ "$(( $(wc -c < "$2") ))" -eq 0 ] && python3 "$3" "$4" && python3 "$5" "$4" "$6"' -- \
+        "$_s92f3_rc" "$_s92f3_err" "$_S92_PURITY_PY" "$_s92f3_out" "$_S92_REASON_PY" "$_s92f3_why"
+done
+chmod 600 "$_S92_TMP/ws92u/.sandy/config" 2>/dev/null || true
+rm -f "$_S92_REASON_PY"
+unset _s92f3 _s92f3_p _s92f3_why _s92f3_out _s92f3_err _s92f3_rc _S92_REASON_PY
+
 # --- (g) --validate-config with NO argument -> exit 1, stdout 0 bytes, stderr has ERROR ---
 _s92g_out="$_S92_TMP/g.out"; _s92g_err="$_S92_TMP/g.err"; _s92g_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
