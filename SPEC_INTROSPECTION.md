@@ -86,13 +86,13 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 ### `--print-schema`
 
-Abridged from the real output of `sandy --print-schema` (2.11.0): every field shown is one the command emits, with the values it emits, but each list keeps only a few of its entries, `protected_paths.files` is cut at `"..."`, and long `description` strings end in ` ...`. Run the command for the full document.
+Abridged from the real output of `sandy --print-schema` (2.11.1): every field shown is one the command emits, with the values it emits, but each list keeps only a few of its entries, `protected_paths.files` is cut at `"..."`, and long `description` strings end in ` ...`. Run the command for the full document.
 
 ```json
 {
   "schema_version": 4,
   "sandy": {
-    "version": "2.11.0",
+    "version": "2.11.1",
     "commit": "2f4bb20",
     "sandbox_min_compat": "2.0.0"
   },
