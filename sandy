@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# When this process started (epoch seconds; never exported): where no
-# /proc/<pid>/stat is (macOS), the start a hold lock or holder entry records
-# for this pid (_sandy_self_start).
+# When this script started (epoch seconds; never exported): where no
+# /proc/<pid>/stat is (macOS) and ps cannot answer either, the start a hold
+# lock or holder entry records for this pid (_sandy_self_start).
 _SANDY_PROC_T0="${EPOCHSECONDS:-}"
 
 # =============================================================================
@@ -4003,12 +4003,23 @@ _sandy_pid_start() {   # $1 = pid  $2 = variable
 # This process's start, as _sandy_pid_start reads it for another process:
 # /proc where there is one, else the epoch seconds sandy recorded when it
 # started (_SANDY_PROC_T0). "" when neither is known.
+# Without /proc it is read the way another session will read it, `ps -o
+# etime=` of $$ (which counts from the process's creation, kept across an
+# exec: `sandy --login` re-execs itself, a wrapper may set up and then exec
+# sandy, so the time this script started can be well after it): once per
+# process, on first need (a lock taken, a holder entry or claim written), then
+# cached. Only when ps cannot answer does it fall back to _SANDY_PROC_T0.
 _sandy_self_start() {   # $1 = variable
     if [ -z "${_SANDY_PROC_FORCE_PS:-}" ] && [ -r "/proc/$$/stat" ]; then
         _sandy_pid_start "$$" "$1" || printf -v "$1" '%s' ""
         return 0
     fi
-    if [ -n "${_SANDY_PROC_T0:-}" ]; then printf -v "$1" 'e%s' "$_SANDY_PROC_T0"; else printf -v "$1" '%s' ""; fi
+    if [ "${_SANDY_SELF_START_PID:-}" != "$$" ]; then
+        _SANDY_SELF_START_PID="$$"
+        _sandy_pid_start "$$" _SANDY_SELF_START || _SANDY_SELF_START=""
+        if [ -z "$_SANDY_SELF_START" ] && [ -n "${_SANDY_PROC_T0:-}" ]; then _SANDY_SELF_START="e$_SANDY_PROC_T0"; fi
+    fi
+    printf -v "$1" '%s' "$_SANDY_SELF_START"
 }
 # True when process $1, recorded with start $2, is still that process: it
 # exists (kill -0 succeeds, or is refused for permission), and its start is the
