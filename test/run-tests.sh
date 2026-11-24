@@ -35671,8 +35671,37 @@ case "$(_s263_probe modules/real/../lnk/hooks)" in "refused "*"a '..' component"
 check "§263(c) a -v source under the gitdir reached through a linked directory, or holding a .. component, is refused, and a plain one passes (mutation: only the last component judged; ${_S263_R:-ok})" \
     test -z "$_S263_R"
 rm -rf "$_S263_D"
+# (d) V3: a gitdir reached through an APPROVED workspace link: vendor ->
+# CASE/other (approved, as a "y" writes it), .git = `gitdir: vendor/.git`,
+# and CASE/other/.git/config a link to a key. The approval named
+# CASE/other, never the key: refused headless, the inner link named.
+# (e) the same with no inner link launches, mounting vendor/.git's config :ro.
+_fx_s236
+_s263_via() {   # $1 = CASE  $2 = "link" to make other/.git/config a link
+    local c="$_A6_DIR/$1"
+    mkdir -p "$c/ws" "$c/keys"; printf 'PRIVATE KEY\n' > "$c/keys/id_rsa"; _s263_gd "$c/other/.git"
+    if [ "${2:-}" = link ]; then rm -f "$c/other/.git/config"; ln -s "$c/keys/id_rsa" "$c/other/.git/config"; fi
+    ln -s "$c/other" "$c/ws/vendor"; printf 'gitdir: vendor/.git\n' > "$c/ws/.git"
+    _s236_seed "$1" "vendor -> $c/other"
+}
+_s263_via s263-via link; _a6_bg s263-via _a6_launch s263-via "${_S263_K[@]}"
+_s263_via s263-viaok; _a6_bg s263-viaok _a6_launch s263-viaok "${_S263_K[@]}"
+_a6_join s263-via; _S263_C="$_A6_DIR/s263-via"
+_S263_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s263-via)" ] && grep -qF -- "$_S263_MSG" "$_S263_C/out" \
+  && grep -qF -- "$_S263_C/ws/vendor/.git/config -> $_S263_C/keys/id_rsa" "$_S263_C/out" && ! grep -qF "[y/N]" "$_S263_C/out" \
+  && ! grep -rqsF -- "vendor/.git/config" "$_S263_C/runs"; } || _S263_OK=$?
+[ "$_S263_OK" = 0 ] || _a6_diag "§263(d)" s263-via
+check "§263(d) a gitdir reached through an approved workspace link (vendor -> other, gitdir: vendor/.git) whose config is a link to a key is refused headless, the inner link named, nothing of it mounted (mutation: the via-link gitdir not walked; rc ${_A6_RC:-none})" \
+    test "$_S263_OK" = 0
+_a6_join s263-viaok; _S263_C="$_A6_DIR/s263-viaok"
+_S263_R="$(_s236_unmet s263-viaok "$_S263_C" "vendor -> $_S263_C/other" "")"
+if [ -z "$_S263_R" ] && ! _a6_pair "$(_a6_agent_args s263-viaok)" -v "$_S263_C/ws/vendor/.git/config:/home/sandy/ws/vendor/.git/config:ro"; then _S263_R="no :ro mount of vendor/.git/config"; fi
+[ -z "$_S263_R" ] || _a6_diag "§263(e)" s263-viaok
+check "§263(e) ...and the same approved link with no link inside the git directory launches (rc 0, the list unchanged) and mounts its config :ro (mutation: every via-link source refused; ${_S263_R:-ok})" \
+    test -z "$_S263_R"
 _a6_done
-unset -f _s263_gd _s263_git _s263_e13 _s263_plant _s263_probe
+unset -f _s263_gd _s263_git _s263_e13 _s263_plant _s263_probe _s263_via
 unset _S263_K _S263_MSG _S263_N _S263_C _S263_L _S263_OK _S263_A _S263_O _S263_W _S263_RUN _S263_G _S263_R _S263_D
 echo ""
 

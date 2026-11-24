@@ -20443,8 +20443,14 @@ _sandy_symlink_path_unjudged() {
 # or above it (or a `.`/`..` component) refuses the launch: no approval,
 # because the repository chose the target. Derived from the assembled argv,
 # like _sandy_symlink_check_mounts, so a new mount site there is covered.
+# The same for a gitdir spelled in the workspace that lies outside it
+# through a workspace link (_SANDY_GD_VIA_LINK; GITDIR_HOST is then the
+# spelled path): the approved link is above GITDIR_HOST and not judged here,
+# every link below it is. A gitdir that lies in the workspace is not walked:
+# a link there is a workspace path, judged and approvable at the gate.
 _sandy_gitdir_check_mounts() {
-    [ -n "${_SANDY_GD_PHYS:-}" ] && [ -n "${GITDIR_HOST:-}" ] || return 0
+    [ -n "${GITDIR_HOST:-}" ] || return 0
+    [ -n "${_SANDY_GD_PHYS:-}" ] || [ -n "${_SANDY_GD_VIA_LINK:-}" ] || return 0
     local _i=0 _n=${#RUN_FLAGS[@]} _src _rest _seg _cur _bad="" _seen=$'\n' _l
     while [ "$_i" -lt "$_n" ]; do
         if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
@@ -25933,6 +25939,16 @@ if [ -f "$WORK_DIR/.git" ]; then
         # the gate and docker run cannot mount another one. (The container
         # path stays the spelled one: the .git file resolves to it there.)
         [ -z "$_SANDY_GD_PHYS" ] || GITDIR_HOST="$_SANDY_GD_PHYS"
+        # Spelled in the workspace but lying outside it, through a link the
+        # dangerous-symlink gate judges (`vendor -> ~/other`, `gitdir:
+        # vendor/.git`): the approval names the link's target, never what
+        # the links INSIDE that git directory name, so the paths mounted from
+        # it get the same no-link check (_sandy_gitdir_check_mounts).
+        _SANDY_GD_VIA_LINK=""
+        if [ "$_SANDY_GD_VERDICT" = inside ] && _sandy_phys_dir "$GITDIR_HOST" _gd_p && _sandy_phys_dir "$WORK_DIR" _gd_w; then
+            case "$_gd_p/" in "${_gd_w%/}"/*) ;; *) _SANDY_GD_VIA_LINK=1 ;; esac
+        fi
+        unset _gd_p _gd_w
         _sandy_commondir_seed "$WORK_DIR" "$SANDBOX_DIR"
         RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_CONTAINER")
         # R5b: the gitdir is mounted RW because git must write it (index, refs,
