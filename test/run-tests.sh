@@ -35227,6 +35227,151 @@ _S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
 [ -z "$_S261_R" ] || _a6_diag "§261(i)" "$_S261_C"
 check "§261(i) a link planted at \$SANDY_HOME/gitdir-holds is replaced by sandy's own directory, never written through (mutation: the registry created with mkdir -p; ${_S261_R:-ok})" \
     test -z "$_S261_R"
+# --- The registry under contention (security review of #596) ---------------
+# The registry functions extracted from sandy, run in processes of their own
+# (each with its own $$, as two sandy sessions have).
+_S261_U="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_hex _sandy_unhex _sandy_awk_f1 _sandy_file_inode _sandy_hold_mkdir _sandy_hold_key _sandy_hold_lock \
+          _sandy_hold_take_stale _sandy_hold_unlock _sandy_hold_add _sandy_hold_holder_alive _sandy_hold_list \
+          _sandy_hold_release _sandy_hold_skipset _sandy_hold_lists _sandy_hold_sync _sandy_commondir_record \
+          _sandy_commondir_unseed _sandy_commondir_is_ours _sandy_path_symlink_component _sandy_uchg_write_record; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S261_U/fns.sh"
+done
+unset _f
+printf '%s\n' 'sha256() { shasum -a 256 2>/dev/null || sha256sum; }' 'warn() { printf "WARN %s\n" "$*"; }' 'info() { :; }' >> "$_S261_U/fns.sh"
+# (j) the reviewer's e10 interleaving, made deterministic: holder C crashed
+# (its pid gone), A is ending as the last holder and asks Docker about C's
+# container, which takes 9 s (well past the old 5 s wait); B registers
+# meanwhile. B must wait for A's mutex, not register without it: then A's
+# removal of the hold cannot take B's entry along, and B registers in a hold
+# that exists.
+_S261_J="$_S261_U/j"; mkdir -p "$_S261_J/sh" "$_S261_J/g/.git" "$_S261_J/sbA" "$_S261_J/sbB" "$_S261_J/sbC"
+cat > "$_S261_J/run.sh" <<'S261J'
+. "$1/fns.sh"; J="$2"; who="$3"
+SANDY_HOME="$J/sh"; SANDBOX_DIR="$J/sb$who"; CONTAINER_NAME="sandy-$who"; WORK_DIR="$J/w$who"
+_sandy_container_gone() { if [ "$1" = sandy-C ]; then sleep 9; fi; return 0; }
+_sandy_uchg_unlock() { echo "$who released the hold's locks" >> "$J/log"; }
+_sandy_commondir_unseed() { echo "$who released the hold's seeds" >> "$J/log"; rm -f "$1/.commondir-seeded"; }
+case "$4" in
+    add) _sandy_hold_add "$J/g/.git" ;;
+    release) _sandy_hold_release "$SANDBOX_DIR" "$WORK_DIR" "$CONTAINER_NAME" ;;
+esac
+S261J
+bash "$_S261_J/run.sh" "$_S261_U" "$_S261_J" C add </dev/null >/dev/null 2>&1 || true
+bash "$_S261_J/run.sh" "$_S261_U" "$_S261_J" A add </dev/null >/dev/null 2>&1 || true
+_S261_K="$(ls "$_S261_J/sh/gitdir-holds" 2>/dev/null | head -n 1)"; _S261_H="$_S261_J/sh/gitdir-holds/$_S261_K"
+printf 'seeded\tx\t1\n' > "$_S261_H/.commondir-seeded" 2>/dev/null || true
+bash "$_S261_J/run.sh" "$_S261_U" "$_S261_J" A release </dev/null >/dev/null 2>&1 &
+_S261_PA=$!
+sleep 0.5
+bash "$_S261_J/run.sh" "$_S261_U" "$_S261_J" B add </dev/null >/dev/null 2>&1 || true
+wait "$_S261_PA" 2>/dev/null || true
+_S261_R="$( { [ -n "$_S261_K" ] && [ -f "$_S261_J/sbA/.gitdir-holds" ] || echo "fixture: A did not register"
+    grep -qF "A released the hold's seeds" "$_S261_J/log" 2>/dev/null || echo "A did not release as the last holder (the race did not happen)"
+    _S261_KB="$(cut -f1 "$_S261_J/sbB/.gitdir-holds" 2>/dev/null | head -n 1)"
+    [ -n "$_S261_KB" ] || echo "B did not register at all"
+    [ -f "$_S261_J/sh/gitdir-holds/$_S261_KB/holder.sandy-B" ] || echo "B's .gitdir-holds names a hold without its entry: [$(ls "$_S261_J/sh/gitdir-holds/$_S261_KB" 2>/dev/null | tr '\n' ' ')]"; } 2>&1)" || true
+check "§261(j) a session registering while the last holder releases the hold (the release slowed to 9 s by a Docker question) waits for the mutex, and ends up registered in a hold that exists (on 646025d it registered without the lock and the release removed its entry; mutations: registering without the lock after a timeout; rm -rf of the hold; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (k) the takeover of a dead pid's lock renames it aside and keeps it only
+# if it is the very lock seen stale: when another session took that stale
+# lock first and made a fresh one, the late taker puts the fresh one back.
+_S261_KD="$_S261_U/k"; mkdir -p "$_S261_KD"
+sleep 30 </dev/null >/dev/null 2>&1 &
+_S261_PL=$!
+printf '%s\n' 2147480001 > "$_S261_KD/old"; _S261_I0="$(ls -di "$_S261_KD/old" | awk '{print $1}')"
+printf '%s\n' "$_S261_PL" > "$_S261_KD/lock"
+_S261_R="$(bash -c '. "$1/fns.sh"; _sandy_hold_take_stale "$2" "$3"
+    [ "$(cat "$2/lock" 2>/dev/null)" = "$4" ] || echo "the fresh lock of a live session was taken: [$(cat "$2/lock" 2>/dev/null)]"
+    [ -z "$(ls "$2" | grep take || true)" ] || echo "a takeover file was left"
+    rm -f "$2/lock"; printf "%s\n" 2147480001 > "$2/lock"; i="$(ls -di "$2/lock" | awk "{print \$1}")"
+    _sandy_hold_take_stale "$2" "$i"; [ ! -e "$2/lock" ] || echo "the stale lock seen was not taken over"' _ "$_S261_U" "$_S261_KD" "$_S261_I0" "$_S261_PL" </dev/null 2>&1)" || true
+kill "$_S261_PL" 2>/dev/null || true; wait "$_S261_PL" 2>/dev/null || true
+check "§261(k) a takeover of a dead pid's lock leaves a fresh lock alone that another session made meanwhile (it is not the file seen stale), and takes over the stale one it saw (mutation: read-then-rm takeover; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (l) a session's own unseed skips a line in a held dir only when the hold
+# lists it, and releases any other one itself.
+_S261_L="$_S261_U/l"; mkdir -p "$_S261_L/sh/gitdir-holds/xa" "$_S261_L/sh/gitdir-holds/xb" "$_S261_L/sb" "$_S261_L/ga" "$_S261_L/gb"
+printf '.\n' > "$_S261_L/ga/commondir"; printf '.\n' > "$_S261_L/gb/commondir"
+_S261_R="$(bash -c '. "$1/fns.sh"; L="$2"; SANDY_HOME="$L/sh"
+    ha="$(_sandy_hex "$L/ga/commondir")"; hb="$(_sandy_hex "$L/gb/commondir")"
+    ia="$(ls -di "$L/ga/commondir" | awk "{print \$1}")"; ib="$(ls -di "$L/gb/commondir" | awk "{print \$1}")"
+    printf "xa\t%s\nxb\t%s\n" "$(_sandy_hex "$L/ga")" "$(_sandy_hex "$L/gb")" > "$L/sb/.gitdir-holds"
+    printf "seeded\t%s\t%s\nseeded\t%s\t%s\n" "$ha" "$ia" "$hb" "$ib" > "$L/sb/.commondir-seeded"
+    printf "seeded\t%s\t%s\n" "$ha" "$ia" > "$L/sh/gitdir-holds/xa/.commondir-seeded"
+    : > "$L/sh/gitdir-holds/xb/.commondir-seeded"
+    _sandy_commondir_unseed "$L/sb"
+    [ -e "$L/ga/commondir" ] || echo "a seed the hold lists was released by the session"
+    [ ! -e "$L/gb/commondir" ] || echo "a seed in a held dir that the hold does not list was left (stranded)"' _ "$_S261_U" "$_S261_L" </dev/null 2>&1)" || true
+check "§261(l) a session's own unseed leaves a seed in a held dir to the hold only when the hold lists it, and removes one the hold does not list itself (mutation: skipping every line in a held dir; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (p) a flag is copied to the hold before it is set: a record line with
+# ctime `-` (written before chflags) reaches the hold.
+_S261_P="$_S261_U/p"; mkdir -p "$_S261_P/sh/gitdir-holds/xg" "$_S261_P/sb" "$_S261_P/g"; printf '[core]\n' > "$_S261_P/g/config"
+_S261_R="$(bash -c '. "$1/fns.sh"; P="$2"; SANDY_HOME="$P/sh"
+    h="$(_sandy_hex "$P/g/config")"; i="$(ls -di "$P/g/config" | awk "{print \$1}")"
+    printf "xg\t%s\n" "$(_sandy_hex "$P/g")" > "$P/sb/.gitdir-holds"
+    printf "locked\t%s\t%s\t-\n" "$h" "$i" > "$P/sb/.uchg-locked"
+    _sandy_hold_sync "$P/sb"
+    grep -qxF "$(printf "locked\t%s\t%s\t-" "$h" "$i")" "$P/sh/gitdir-holds/xg/.uchg-locked" 2>/dev/null || echo "a flag recorded before it was set (ctime -) did not reach the hold"
+    printf "locked\t%s\t%s\t1234\n" "$h" "$i" > "$P/sb/.uchg-locked"; _sandy_hold_sync "$P/sb"
+    [ "$(grep -c . "$P/sh/gitdir-holds/xg/.uchg-locked")" = 1 ] || echo "the same flag listed twice"' _ "$_S261_U" "$_S261_P" </dev/null 2>&1)" || true
+check "§261(p) a flag's record line with ctime - (written before chflags runs) is copied to the hold, once, so a crash between the two strands nothing (mutation: sync skipping - lines; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+rm -rf "$_S261_U"
+# (p2) and in a launch it is in the hold before chflags sets it: the chflags
+# stub in front of §248's notes, for each flag it sets in the shared
+# submodule gitdir, whether the hold already lists that file.
+_S261_C=s261-pre; _s261_fix "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+mkdir -p "$_A6_DIR/$_S261_C/cfbin"
+{ printf '#!/bin/sh\n'
+  printf 'case "$3" in */.git/*) held=1 ;; *) held="" ;; esac\nif [ "$1" = -h ] && [ "$2" = uchg ] && [ -n "$held" ]; then\n'
+  printf '    h="$(printf "%%s" "$3" | od -An -v -tx1 | tr -d " \\n")"\n'
+  printf '    if grep -qF "$h" %q/sh/gitdir-holds/*/.uchg-locked 2>/dev/null; then echo "listed $3"; else echo "unlisted $3"; fi >> %q\n' "$_A6_DIR/$_S261_C" "$_A6_DIR/$_S261_C/cflog"
+  printf 'fi\nexec %q "$@"\n' "$_S248_B/chflags"; } > "$_A6_DIR/$_S261_C/cfbin/chflags"
+chmod +x "$_A6_DIR/$_S261_C/cfbin/chflags"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" \
+    S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_A6_DIR/$_S261_C/cfbin:$_S261_PATH"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    grep -qxF "listed $_S261_G/config" "$_A6_DIR/$_S261_C/cflog" 2>/dev/null || echo "the submodule gitdir's config was not in its hold when its flag was set: $(tr '\n' ' ' < "$_A6_DIR/$_S261_C/cflog" 2>/dev/null)"
+    if grep -q '^unlisted ' "$_A6_DIR/$_S261_C/cflog" 2>/dev/null; then echo "a flag in a held dir was set before the hold listed it: $(grep '^unlisted ' "$_A6_DIR/$_S261_C/cflog" | tr '\n' ' ')"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(p2)" "$_S261_C"
+check "§261(p2) in a launch every flag set in a held git dir is listed in that dir's hold before chflags sets it (mutation: the hold synced only after the flags; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (m) --unlock reaches a hold no sandbox lists any more: the superproject
+# session ended while the submodule session ran (its lines left to the hold,
+# its list gone); then the submodule session crashed. --unlock of the
+# superproject finds the hold for its .git/modules/sub in the registry,
+# prunes the crashed holder and releases.
+_S261_C=s261-orph; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_s261_run "$_S261_C" "$_S261_W"
+: > "$_A6_DIR/$_S261_C/present"
+_S261_R="$( { grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "fixture: the shared config is not locked"
+    [ ! -e "$(_a6_sandbox "$_S261_C")/.gitdir-holds" ] || echo "fixture: the superproject still lists holds"; } 2>&1)" || true
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --unlock --workspace "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "--unlock rc $_A6_RC"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the shared config stayed locked (--unlock found nothing)"; fi
+    [ ! -e "$_S261_G/commondir" ] || echo "the shared seed stayed"
+    [ "$(_s261_holds "$_S261_C")" = 0 ] || echo "holds left: $(ls "$_A6_DIR/$_S261_C/sh/gitdir-holds" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(m)" "$_S261_C"
+check "§261(m) --unlock of a workspace finds a hold for its git dirs that no sandbox lists any more (its session gave up its entry while another held it, and that one crashed), prunes the dead holder and releases the seed and lock (mutation: --unlock reading only its own list; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (n) #599: a claim whose judge died mid-judgement (<id>.judging.<dead pid>)
+# goes back to <id>.snap and is judged by the next launch.
+_S261_C=s261-claim; _S261_W="$_A6_DIR/$_S261_C/ws"; mkdir -p "$_S261_W/.git/objects" "$_S261_W/.git/refs"
+printf 'ref: refs/heads/main\n' > "$_S261_W/.git/HEAD"; printf '[core]\n' > "$_S261_W/.git/config"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+_S261_S="$(_a6_sandbox "$_S261_C")"; _S261_P="$(ls "$_S261_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.2147480002"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S261_R="$( { [ -n "$_S261_P" ] || echo "fixture: no kept snapshot"
+    grep -qF "An EARLIER session's end report" "$_A6_DIR/$_S261_C/out" || echo "the stranded claim was not judged"
+    [ -z "$(ls -A "$_S261_S/.protected-provisional" 2>/dev/null)" ] || echo "left: $(ls -A "$_S261_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(n)" "$_S261_C"
+check "§261(n) a provisional snapshot claimed by a judge that died mid-judgement is given back and judged by the next launch (mutation: claims left as they are; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+check "§261(o) a sandbox's .gitdir-holds is never copied by --rsync and is named as regenerable by --reset-sandbox (mutation: dropped from either list)" \
+    bash -c 'grep -A3 "^_SANDY_RSY_NEVER=(" "$1" | grep -qF ".gitdir-holds" && grep -F "_rs_regen() {" "$1" | grep -qF "|.gitdir-holds|"' _ "$SANDY_SCRIPT"
 # (g) #599: a kept provisional snapshot is judged from its own path. --stop's
 # direct teardown of a supervisor-less daemon judges the pairs a provisional
 # session kept, and takes no workspace lock, so a launch of the workspace can
@@ -35303,7 +35448,7 @@ if :; then
 fi
 _a6_done
 unset -f _s261_gd _s261_fix _s261_ctr _s261_run _s261_holds _s261_both _s261_599
-unset _S261_B _S261_PATH _S261_C _S261_W _S261_G _S261_R _S261_RC1 _S261_RC2 _S261_S _S261_DB _S261_P
+unset _S261_B _S261_PATH _S261_C _S261_W _S261_G _S261_R _S261_RC1 _S261_RC2 _S261_S _S261_DB _S261_P _S261_U _S261_J _S261_K _S261_H _S261_PA _S261_KB _S261_KD _S261_PL _S261_I0 _S261_L
 echo ""
 
 # ============================================================

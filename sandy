@@ -3747,8 +3747,9 @@ _sandy_commondir_unseed() {   # $1 = sandbox (or a hold dir)
     _sandy_hold_skipset "$1" _skip
     while IFS=$'\t' read -r _k _h _i; do
         [ "$_k" = seeded ] || continue
-        if [ -n "$_skip" ] && _sandy_unhex "$_h" _f; then
-            case "$_skip" in *$'\n'"${_f%/*}"$'\n'*) continue ;; esac
+        if [ -n "$_skip" ] && _sandy_unhex "$_h" _f \
+           && _sandy_hold_lists "$_skip" "$_f" "$_k" "$_h" "$_i" .commondir-seeded; then
+            continue
         fi
         if _sandy_commondir_is_ours "$_h" "$_i"; then
             _sandy_unhex "$_h" _f && rm -f "$_f"
@@ -3773,13 +3774,19 @@ _sandy_commondir_unseed() {   # $1 = sandbox (or a hold dir)
 #   .commondir-seeded  the commondir files sandy created in it (the record
 #   .uchg-locked       format) and the macOS flags sandy set there, whichever
 #                      session did: what the last holder releases
-#   lock               a short mutex (noclobber create; a dead pid's is taken)
+#   lock               the mutex: created with noclobber, holding its pid; a
+#                      live holder's is waited for, however long; a dead
+#                      one's is taken over by renaming it aside and checking
+#                      it is the very file seen (its inode), never read-then-rm
 # A session registers (_sandy_hold_add) every git dir _sandy_commondir_seed and
-# _sandy_uchg_lock act on before it seeds or locks anything there, and lists
-# them in $SANDBOX_DIR/.gitdir-holds (<key><TAB><dir as spelled, hex>). Its
-# own records keep their lines, but its own unlock and unseed skip any line in
-# a held dir: the hold releases those (_sandy_hold_release), and only when no
-# other holder remains. Another holder counts as alive while its launcher pid
+# _sandy_uchg_lock act on before it seeds or locks anything there, always under
+# the mutex, and lists it in $SANDBOX_DIR/.gitdir-holds (<key><TAB><dir as
+# spelled, hex>) once its entry is written. Its own records keep their lines;
+# its own unlock and unseed skip a line in a held dir only when that dir's
+# hold lists it (the hold releases those, _sandy_hold_release, and only when
+# no other holder remains), and release any other line themselves. A flag is
+# listed in the hold before it is set (ctime `-`, as in the session's own
+# record, and left so), so a crash between the two strands nothing. Another holder counts as alive while its launcher pid
 # runs or its container is not known gone (_sandy_container_gone: Docker not
 # reachable counts as there); one that is neither is pruned. A crashed
 # session's entry only keeps the protections longer.
@@ -3805,11 +3812,13 @@ _sandy_hold_key() {   # $1 = dir  $2 $3 = variables
     fi
     printf -v "$2" '%s' "$_hk_p"; printf -v "$3" '%s' "$_hk_x"
 }
-# Take / drop the mutex of hold dir $1. Taking it waits up to about 5 s for a
-# live holder; one whose pid is gone is taken over. Returns 1 when it could not
-# be taken (the caller then keeps what it would have released).
+# Take / drop the mutex of hold dir $1. Taking it waits for as long as the
+# pid in the lock runs (after about 5 s it says once whom it waits for); a
+# lock whose pid is gone, or that stays empty that long, is taken over
+# (_sandy_hold_take_stale). Returns 1 only when the hold dir is gone (a last
+# holder removed it: the caller creates it afresh) or is not a directory.
 _sandy_hold_lock() {   # $1 = hold dir
-    local _hl_n=0 _hl_p _hl_c=""
+    local _hl_n=0 _hl_p _hl_c="" _hl_i _hl_said=""
     case $- in *C*) _hl_c=1 ;; esac
     while :; do
         [ -d "$1" ] && [ ! -L "$1" ] || return 1
@@ -3819,21 +3828,46 @@ _sandy_hold_lock() {   # $1 = hold dir
             return 0
         fi
         [ -n "$_hl_c" ] || set +C
+        # The inode first, then its pid: the takeover renames only that file.
+        _hl_i=""; _sandy_file_inode "$1/lock" _hl_i || continue
+        [ -n "$_hl_i" ] || continue
         _hl_p=""
         { IFS= read -r _hl_p < "$1/lock"; } 2>/dev/null || true
-        case "$_hl_p" in ''|*[!0-9]*) ;; *)
-            if ! kill -0 "$_hl_p" 2>/dev/null; then rm -f "$1/lock" 2>/dev/null || true; continue; fi ;;
-        esac
         _hl_n=$((_hl_n + 1))
-        [ "$_hl_n" -lt 100 ] || return 1
+        case "$_hl_p" in
+            ''|*[!0-9]*) if [ "$_hl_n" -ge 100 ]; then _sandy_hold_take_stale "$1" "$_hl_i"; _hl_n=0; continue; fi ;;
+            *) if ! kill -0 "$_hl_p" 2>/dev/null; then _sandy_hold_take_stale "$1" "$_hl_i"; continue; fi
+               if [ "$_hl_n" -ge 100 ] && [ -z "$_hl_said" ]; then
+                   _hl_said=1
+                   printf "${YELLOW:-}[sandy]${NC:-} Waiting for sandy (pid %s) to finish with the git dir hold %s...\n" "$_hl_p" "${1##*/}" >&2
+               fi ;;
+        esac
         sleep 0.05
     done
 }
-_sandy_hold_unlock() { rm -f "$1/lock" 2>/dev/null || true; }
+# Take over the lock of hold dir $1 seen with inode $2 and a pid that is gone:
+# renamed aside (one rename wins), then removed only if it is that very file.
+# If it is not (another session took the stale lock first and made a fresh
+# one, which this rename moved), it is linked back in place: ln never
+# replaces a lock that exists.
+_sandy_hold_take_stale() {   # $1 = hold dir  $2 = the inode seen
+    local _ht_t="$1/lock.take.$$" _ht_i=""
+    mv "$1/lock" "$_ht_t" 2>/dev/null || return 0
+    _sandy_file_inode "$_ht_t" _ht_i || true
+    if [ "$_ht_i" != "$2" ]; then ln "$_ht_t" "$1/lock" 2>/dev/null || true; fi
+    rm -f "$_ht_t" 2>/dev/null || true
+    return 0
+}
+# Drop the mutex of hold dir $1: only a lock that holds this process's pid.
+_sandy_hold_unlock() {
+    local _hu_p=""
+    { IFS= read -r _hu_p < "$1/lock"; } 2>/dev/null || true
+    if [ "$_hu_p" = "$$" ]; then rm -f "$1/lock" 2>/dev/null || true; fi
+}
 # Register this session (sandbox $SANDBOX_DIR, container $CONTAINER_NAME,
 # workspace $WORK_DIR) as a holder of git dir $1. Once per dir per launch.
 _sandy_hold_add() {   # $1 = git dir, as spelled
-    local _ha_p _ha_k _ha_r _ha_d _ha_x _ha_s _ha_t
+    local _ha_p _ha_k _ha_r _ha_d _ha_x _ha_s _ha_t _ha_ok
     [ -n "${CONTAINER_NAME:-}" ] && [ -n "${SANDBOX_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] || return 0
     case $'\n'"${_SANDY_HOLD_ADDED:-}" in *$'\n'"$1"$'\n'*) return 0 ;; esac
     _SANDY_HOLD_ADDED="${_SANDY_HOLD_ADDED:-}$1"$'\n'
@@ -3842,22 +3876,24 @@ _sandy_hold_add() {   # $1 = git dir, as spelled
     _sandy_hold_mkdir "$_ha_r" || { warn "Could not use $_ha_r: a git dir this session shares may lose its protections early."; return 0; }
     _ha_d="$_ha_r/$_ha_k"
     _sandy_hex "$_ha_p" _ha_x; _sandy_hex "$WORK_DIR" _ha_s
-    # A last holder may remove the hold while this waits for its lock: then
-    # it is created afresh (three tries).
+    # Only ever under the mutex. A last holder may remove the hold while this
+    # waits for it: then it is created afresh (three tries).
+    _ha_ok=""
     for _ha_t in 1 2 3; do
-        _sandy_hold_mkdir "$_ha_d" || return 0
+        _sandy_hold_mkdir "$_ha_d" || break
         if _sandy_hold_lock "$_ha_d"; then
             [ -f "$_ha_d/path" ] || printf '%s\n' "$_ha_x" > "$_ha_d/path"
-            printf 'pid\t%s\nws\t%s\n' "$$" "$_ha_s" > "$_ha_d/holder.$CONTAINER_NAME"
+            if printf 'pid\t%s\nws\t%s\n' "$$" "$_ha_s" > "$_ha_d/holder.$CONTAINER_NAME"; then _ha_ok=1; fi
             _sandy_hold_unlock "$_ha_d"
             break
         fi
-        [ -d "$_ha_d" ] || continue
-        # A lock that stays busy: registered without it (holding only ever
-        # keeps protections longer).
-        printf 'pid\t%s\nws\t%s\n' "$$" "$_ha_s" > "$_ha_d/holder.$CONTAINER_NAME" 2>/dev/null || true
-        break
     done
+    if [ -z "$_ha_ok" ]; then
+        # Not a holder: this session's own records keep (and release) what it
+        # sets there, as before #596.
+        warn "Could not register this session as a holder of $_ha_p: if another session shares it, its seed and locks may be released by whichever ends first."
+        return 0
+    fi
     _sandy_hex "$1" _ha_x
     printf '%s\t%s\n' "$_ha_k" "$_ha_x" >> "$SANDBOX_DIR/.gitdir-holds"
     return 0
@@ -3870,20 +3906,38 @@ _sandy_hold_holder_alive() {   # $1 = holder file  $2 = container
     case "$_hh_p" in ''|*[!0-9]*) ;; *) if kill -0 "$_hh_p" 2>/dev/null; then return 0; fi ;; esac
     ! _sandy_container_gone "$2"
 }
-# The spelled dirs sandbox $1 holds, newline-separated, into variable $2.
+# The dirs sandbox $1 holds, as "<dir as spelled><TAB><key>" lines (newline
+# first and last), into variable $2.
 _sandy_hold_skipset() {   # $1 = sandbox  $2 = variable
     local _hs_k _hs_x _hs_d _hs_o=$'\n'
     if [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ]; then
         while IFS=$'\t' read -r _hs_k _hs_x; do
-            _sandy_unhex "$_hs_x" _hs_d && [ -n "$_hs_d" ] && _hs_o="$_hs_o$_hs_d"$'\n'
+            _sandy_unhex "$_hs_x" _hs_d && [ -n "$_hs_d" ] && _hs_o="$_hs_o$_hs_d"$'\t'"$_hs_k"$'\n'
         done < "$1/.gitdir-holds"
     fi
     [ "$_hs_o" != $'\n' ] || _hs_o=""
     printf -v "$2" '%s' "$_hs_o"
 }
+# True when record line "$3<TAB>$4<TAB>$5..." (kind, path hex, inode) of file
+# $2 lies in a dir of skipset $1 whose hold lists it in its own copy of record
+# $6 (.uchg-locked | .commondir-seeded): that line is the hold's to release.
+_sandy_hold_lists() {   # $1 = skipset  $2 = file  $3 = kind  $4 = hex  $5 = inode  $6 = record name
+    local _hl_rest _hl_k _hl_f _hl_l
+    [ -n "$1" ] || return 1
+    case "$1" in *$'\n'"${2%/*}"$'\t'*) ;; *) return 1 ;; esac
+    _hl_rest="${1#*$'\n'"${2%/*}"$'\t'}"; _hl_k="${_hl_rest%%$'\n'*}"
+    _hl_f="$SANDY_HOME/gitdir-holds/$_hl_k/$6"
+    [ -f "$_hl_f" ] && [ ! -L "$_hl_f" ] || return 1
+    while IFS= read -r _hl_l; do
+        case "$_hl_l" in "$3"$'\t'"$4"$'\t'"$5"|"$3"$'\t'"$4"$'\t'"$5"$'\t'*) return 0 ;; esac
+    done < "$_hl_f"
+    return 1
+}
 # Copy the seeds and the flags sandbox $1's records hold for a held dir into
 # that dir's hold, so the last holder releases them whichever session made
-# them (a flag only once it is set: ctime recorded).
+# them. A flag is copied before it is set, with ctime `-` (so a crash between
+# the two strands nothing), and stays so: the hold's unlock judges such a line
+# by its inode and the flag, as for any `-` line.
 _sandy_hold_sync() {   # $1 = sandbox
     local _sy_hf="$1/.gitdir-holds" _sy_r _sy_k _sy_h _sy_x _sy_y _sy_f _sy_d _sy_hk _sy_hx _sy_hd _sy_t _sy_l _sy_root
     [ -f "$_sy_hf" ] && [ ! -L "$_sy_hf" ] || return 0
@@ -3893,8 +3947,7 @@ _sandy_hold_sync() {   # $1 = sandbox
         while IFS=$'\t' read -r _sy_k _sy_h _sy_x _sy_y; do
             case "$_sy_r:$_sy_k" in
                 .commondir-seeded:seeded) _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x" ;;
-                .uchg-locked:locked) [ -n "$_sy_y" ] && [ "$_sy_y" != - ] || continue
-                                     _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'"$_sy_y" ;;
+                .uchg-locked:locked) _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'"${_sy_y:--}" ;;
                 *) continue ;;
             esac
             _sandy_unhex "$_sy_h" _sy_f || continue
@@ -3911,8 +3964,49 @@ _sandy_hold_sync() {   # $1 = sandbox
                 done < "$_sy_hd/$_sy_r"
                 [ "$_sy_t" != HIT ] || continue
             fi
+            # Appended only (O_APPEND, no lock needed): never rewritten.
             printf '%s\n' "$_sy_l" >> "$_sy_hd/$_sy_r"
         done < "$1/$_sy_r"
+    done
+    return 0
+}
+# The holds of sandbox $1: its .gitdir-holds lines, then _SANDY_HOLD_EXTRA
+# (holds --unlock found in the registry for its workspace), into variable $2.
+_sandy_hold_list() {   # $1 = sandbox  $2 = variable
+    local _hli_l _hli_o=""
+    if [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ]; then
+        while IFS= read -r _hli_l; do [ -z "$_hli_l" ] || _hli_o="$_hli_o$_hli_l"$'\n'; done < "$1/.gitdir-holds"
+    fi
+    printf -v "$2" '%s' "$_hli_o${_SANDY_HOLD_EXTRA:-}"
+}
+# The holds in the registry for the git dirs of workspace $1 that sandbox $2
+# does not list: its .git, and the gitdir a .git file names, or a dir below
+# either (a submodule gitdir, a worktree admin dir). A session that ended
+# while another holder was alive gave up its entry and its list; when that
+# other holder then ends without a cleanup (a crash), only these lead back to
+# what sandy set there. "<key><TAB><path, hex>" lines on stdout. Read-only.
+_sandy_hold_orphans() {   # $1 = workspace  $2 = sandbox
+    local _hor_r="$SANDY_HOME/gitdir-holds" _hor_g _hor_roots="" _hor_d _hor_x _hor_p _hor_k _hor_own=""
+    [ -d "$_hor_r" ] && [ ! -L "$_hor_r" ] || return 0
+    for _hor_g in "$1/.git" "$(WORK_DIR="$1" _sandy_gitdir_host "$(WORK_DIR="$1" _sandy_gitdir_rel)")"; do
+        [ -n "$_hor_g" ] && [ -d "$_hor_g" ] && [ ! -L "$_hor_g" ] || continue
+        _hor_p="$(CDPATH='' cd -P -- "$_hor_g" 2>/dev/null && pwd -P)" || continue
+        [ -n "$_hor_p" ] && _hor_roots="$_hor_roots$_hor_p"$'\n'
+    done
+    [ -n "$_hor_roots" ] || return 0
+    if [ -f "$2/.gitdir-holds" ]; then
+        while IFS=$'\t' read -r _hor_k _hor_x; do _hor_own="$_hor_own$_hor_k"$'\n'; done < "$2/.gitdir-holds"
+    fi
+    for _hor_d in "$_hor_r"/*/; do
+        _hor_d="${_hor_d%/}"; _hor_k="${_hor_d##*/}"
+        [ -d "$_hor_d" ] && [ ! -L "$_hor_d" ] && [ -f "$_hor_d/path" ] || continue
+        case $'\n'"$_hor_own" in *$'\n'"$_hor_k"$'\n'*) continue ;; esac
+        _hor_x=""; { IFS= read -r _hor_x < "$_hor_d/path"; } 2>/dev/null || true
+        _sandy_unhex "$_hor_x" _hor_p || continue
+        while IFS= read -r _hor_g; do
+            [ -n "$_hor_g" ] || continue
+            case "$_hor_p" in "$_hor_g"|"$_hor_g"/*) printf '%s\t%s\n' "$_hor_k" "$_hor_x"; break ;; esac
+        done <<< "$_hor_roots"
     done
     return 0
 }
@@ -3921,10 +4015,12 @@ _sandy_hold_sync() {   # $1 = sandbox
 # each, on stdout. Read-only. With $3 = nodocker no container is asked about:
 # every other holder counts (--reset-sandbox asks no Docker).
 _sandy_hold_others() {   # $1 = sandbox  $2 = container  [$3 = nodocker]
-    local _ho_k _ho_x _ho_d _ho_e _ho_n _ho_kk _ho_v _ho_w _ho_root
-    [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ] || return 0
+    local _ho_k _ho_x _ho_d _ho_e _ho_n _ho_kk _ho_v _ho_w _ho_root _ho_list
+    _sandy_hold_list "$1" _ho_list
+    [ -n "$_ho_list" ] || return 0
     _ho_root="$SANDY_HOME/gitdir-holds"
     while IFS=$'\t' read -r _ho_k _ho_x; do
+        [ -n "$_ho_k" ] || continue
         _ho_d="$_ho_root/$_ho_k"
         [ -d "$_ho_d" ] && [ ! -L "$_ho_d" ] || continue
         for _ho_e in "$_ho_d"/holder.*; do
@@ -3938,7 +4034,7 @@ _sandy_hold_others() {   # $1 = sandbox  $2 = container  [$3 = nodocker]
             printf '%s\t%s\t%s\n' "$_ho_x" "$_ho_n" "$_ho_w"
             break
         done
-    done < "$1/.gitdir-holds"
+    done <<< "$_ho_list"
     return 0
 }
 # Session end, for sandbox $1 (workspace $2) whose container $3 is known gone:
@@ -3948,11 +4044,13 @@ _sandy_hold_others() {   # $1 = sandbox  $2 = container  [$3 = nodocker]
 # hold. Where another holder remains, nothing is released; each such dir is
 # named in _SANDY_HOLD_KEPT ("<dir> (held by <container>)" lines).
 _sandy_hold_release() {   # $1 = sandbox  $2 = workspace  $3 = container
-    local _hr_k _hr_x _hr_d _hr_e _hr_n _hr_o _hr_root _hr_p _hr_dead
+    local _hr_k _hr_x _hr_d _hr_e _hr_n _hr_o _hr_root _hr_p _hr_dead _hr_late _hr_list
     _SANDY_HOLD_KEPT=""
-    [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ] || return 0
+    _sandy_hold_list "$1" _hr_list
+    [ -n "$_hr_list" ] || return 0
     _hr_root="$SANDY_HOME/gitdir-holds"
     while IFS=$'\t' read -r _hr_k _hr_x; do
+        [ -n "$_hr_k" ] || continue
         _hr_d="$_hr_root/$_hr_k"
         [ -d "$_hr_d" ] && [ ! -L "$_hr_d" ] || continue
         _sandy_unhex "$_hr_x" _hr_p || _hr_p="$_hr_k"
@@ -3970,7 +4068,7 @@ _sandy_hold_release() {   # $1 = sandbox  $2 = workspace  $3 = container
         done
         if [ -n "$_hr_o" ]; then
             _SANDY_HOLD_KEPT="$_SANDY_HOLD_KEPT$_hr_p (held by $_hr_o)"$'\n'
-            # Stale ones pruned, this one dropped, the lock released: one rm.
+            # Stale ones pruned, this one dropped, the lock (ours) released: one rm.
             local -a _hr_rm=("$_hr_d/holder.$3" "$_hr_d/lock")
             while IFS= read -r _hr_e; do [ -z "$_hr_e" ] || _hr_rm+=("$_hr_e"); done <<< "$_hr_dead"
             rm -f "${_hr_rm[@]}" 2>/dev/null || true
@@ -3979,16 +4077,28 @@ _sandy_hold_release() {   # $1 = sandbox  $2 = workspace  $3 = container
         # The last holder: what sandy set in this git dir, by any session.
         if [ -f "$_hr_d/.uchg-locked" ]; then _sandy_uchg_unlock "$_hr_d" "$2" || true; fi
         if [ -f "$_hr_d/.commondir-seeded" ]; then _sandy_commondir_unseed "$_hr_d"; fi
-        if [ -f "$_hr_d/.uchg-locked" ]; then
-            # A flag the unlock could not clear stays listed (sandy --unlock).
-            rm -f "$_hr_d/holder.$3" "$_hr_d/lock" 2>/dev/null || true
+        # Only the files known here go, and the dir only with rmdir: an entry
+        # that appeared meanwhile (it never should, under the mutex) keeps
+        # the hold, and so does a flag the unlock could not clear.
+        local -a _hr_rm=("$_hr_d/holder.$3")
+        while IFS= read -r _hr_e; do [ -z "$_hr_e" ] || _hr_rm+=("$_hr_e"); done <<< "$_hr_dead"
+        _hr_late=""
+        for _hr_e in "$_hr_d"/holder.*; do
+            [ -f "$_hr_e" ] || continue
+            [ "${_hr_e##*/holder.}" != "$3" ] || continue
+            case $'\n'"$_hr_dead" in *$'\n'"$_hr_e"$'\n'*) continue ;; esac
+            _hr_late=1
+        done
+        if [ -z "$_hr_late" ] && [ ! -f "$_hr_d/.uchg-locked" ]; then
+            # Nothing left: its known files (the lock, ours, last), then rmdir.
+            _hr_rm+=("$_hr_d/path" "$_hr_d/lock")
+            rm -f "${_hr_rm[@]}" 2>/dev/null || true
+            rmdir "$_hr_d" 2>/dev/null || true
         else
-            # Nothing left to release and no holder: the hold goes, its lock
-            # with it (a session adding itself now waits on that lock, then
-            # finds no directory and creates a fresh one).
-            rm -rf "$_hr_d" 2>/dev/null || _sandy_hold_unlock "$_hr_d"
+            _hr_rm+=("$_hr_d/lock")
+            rm -f "${_hr_rm[@]}" 2>/dev/null || true
         fi
-    done < "$1/.gitdir-holds"
+    done <<< "$_hr_list"
     return 0
 }
 # Every release path of a session's protections (cleanup, --stop's direct
@@ -4100,6 +4210,8 @@ _sandy_uchg_lock() {
     done < <(_sandy_uchg_targets "$2")
     [ -n "$_lines" ] || { _sandy_hold_sync "$1"; return 0; }
     _sandy_uchg_write_record "$_rec" "$_kept$_lines" || { warn "Could not record the macOS file locks; not locking."; return 0; }
+    # #596: listed in the holds before any flag is set, as in the record.
+    _sandy_hold_sync "$1"
     while IFS=$'\t' read -r _k _h _x _y; do
         [ -n "$_k" ] || continue
         if [ "$_k" = locked ]; then
@@ -4156,8 +4268,8 @@ _sandy_uchg_unlock() {
             fi
             _sandy_hex "$_f" _h
         fi
-        if [ -n "$_skip" ]; then
-            case "$_skip" in *$'\n'"${_f%/*}"$'\n'*) continue ;; esac
+        if [ -n "$_skip" ] && _sandy_hold_lists "$_skip" "$_f" "$_k" "$_h" "$_x" .uchg-locked; then
+            continue
         fi
         _sandy_uchg_show "$_f" _s
         { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
@@ -4853,6 +4965,16 @@ _sandy_provisional_rejudge() {   # $1 = sandbox  $2 = launch|stop
     _d="$(_sandy_provisional_dir "$_sb")"
     [ -d "$_d" ] && [ ! -L "$_d" ] || return 0
     [ "${2:-}" != stop ] || _by=rejudge-stop
+    # A claim (<id>.judging.<pid>) whose judge died mid-judgement goes back to
+    # <id>.snap, to be judged now.
+    for _f in "$_d"/*.judging.*; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+        _id="${_f##*.judging.}"
+        case "$_id" in ''|*[!0-9]*) continue ;; esac
+        ! kill -0 "$_id" 2>/dev/null || continue
+        _cl="${_f%.judging.*}.snap"
+        [ -e "$_cl" ] || mv "$_f" "$_cl" 2>/dev/null || true
+    done
     for _f in $(cd "$_d" 2>/dev/null && ls -tr -- *.snap 2>/dev/null); do
         _id="${_f%.snap}"
         case "$_id" in ''|*[!A-Za-z0-9]*) continue ;; esac
@@ -8979,7 +9101,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # destroyed entry that is not one of those is named. That keeps sandy
     # uncoupled from consumers (the reason option 1 on #333 was declined) while
     # still naming a directory nobody here has heard of.
-    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|launch|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list|.sandy-approved-gitdir) return 0 ;; esac; return 1; }
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|launch|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.gitdir-holds|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list|.sandy-approved-gitdir) return 0 ;; esac; return 1; }
     _rs_not_kept() {
         local _e _c _bn _n=0
         for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -9258,7 +9380,7 @@ _sandy_rsy_path_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9._/@+-]+$'; }
 # Everything regenerated per launch or per process; never copied either way.
 _SANDY_RSY_NEVER=(sandy-session.json gemini-system-settings.json relay-state/ feature-state/
                   agent-args-composed/ launch/ proxy.log .protected-existed-at-launch claude/sessions/
-                  .protected-copies/ .uchg-locked .commondir-seeded .protected-provisional/)
+                  .protected-copies/ .uchg-locked .commondir-seeded .protected-provisional/ .gitdir-holds)
 _SANDY_RSY_ARCH_DIRS=(cargo go npm-global pip uv venv)
 # Non-interactive transport for every --rsync / --rsync-from transfer. -T on the
 # command line overrides a host's `RequestTTY yes` in ssh_config, which would
@@ -10277,7 +10399,13 @@ if [[ "${1:-}" == "--unlock" ]]; then
     _ulk_base="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"; _ulk_base="${_ulk_base:-project}"
     _ulk_sb="$SANDY_HOME/sandboxes/${_ulk_base}-${_ulk_hash}"
     _ulk_rec="$(_sandy_uchg_record "$_ulk_sb")"
-    if { [ ! -f "$_ulk_rec" ] || ! grep -q $'^locked\t' "$_ulk_rec" 2>/dev/null; } && [ ! -f "$_ulk_sb/.gitdir-holds" ]; then
+    # #596: and holds in the registry for this workspace's git dirs that no
+    # sandbox lists any more (a session ended while another holder ran, and
+    # that one then crashed): pruned and released here too.
+    _SANDY_HOLD_EXTRA="$(_sandy_hold_orphans "$WORK_DIR" "$_ulk_sb")"
+    [ -z "$_SANDY_HOLD_EXTRA" ] || _SANDY_HOLD_EXTRA="$_SANDY_HOLD_EXTRA"$'\n'
+    if { [ ! -f "$_ulk_rec" ] || ! grep -q $'^locked\t' "$_ulk_rec" 2>/dev/null; } && [ ! -f "$_ulk_sb/.gitdir-holds" ] \
+       && [ -z "$_SANDY_HOLD_EXTRA" ]; then
         info "No files of $WORK_DIR are locked by sandy. Nothing to do."
         exit 0
     fi
