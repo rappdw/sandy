@@ -3075,12 +3075,15 @@ _sandy_gitdir_rel() {
 # The path a .git FILE $1 names, into variable $2, as git reads one: the
 # file's content with its trailing newlines and carriage returns removed,
 # after a leading `gitdir: `. Without that prefix it names nothing ("").
-# No process.
+# A file holding a NUL byte names nothing either: git trims the whole file
+# and only then stops at the NUL (`gitdir: g\r\0` is `g\r` to git), which a
+# shell string cannot hold, so no reading of it here would be git's. No process.
 _sandy_gitfile_read() {   # $1 = file  $2 = variable to set
     local _gf_c=""
     printf -v "$2" '%s' ""
     [ -f "$1" ] || return 0
-    IFS= read -r -d '' _gf_c < "$1" 2>/dev/null || true
+    # read stops at the first NUL and then succeeds; at end of file it fails.
+    if IFS= read -r -d '' _gf_c < "$1" 2>/dev/null; then return 0; fi
     while :; do
         case "$_gf_c" in *$'\n'|*$'\r') _gf_c="${_gf_c%?}" ;; *) break ;; esac
     done
@@ -3147,23 +3150,61 @@ _sandy_phys_dir() {   # $1 = directory  $2 = variable to set
 # (`git config -z -f`, run from / so that no repository's own config is read)
 # when git is on PATH, else by _sandy_gitmodules_parse. A file that is a link,
 # and a name or path holding a newline, give nothing: sandy never matches them.
+# A name declared with several paths (twice in one section, or in two
+# sections of that name) keeps the LAST, which is the one git checks out and
+# maps (measured, git 2.47: `git submodule status` finds the submodule at the
+# last path and has "no submodule mapping" for the first). A path that two
+# names declare is dropped, so neither is recognized.
 _sandy_gitmodules_read() {   # $1 = .gitmodules
-    local _gm_r _gm_k _gm_v _gm_nl=$'\n'
+    local _gm_k _gm_i _gm_j _gm_n _gm_c
+    local -a _gm_nn=() _gm_pp=()
     _SANDY_GM_NAMES=(); _SANDY_GM_PATHS=()
     [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    _sandy_gitmodules_pairs "$1"
+    # The last path of each name, in the order of each name's last declaration.
+    _gm_i=$((${#_SANDY_GM_NAMES[@]} - 1))
+    while [ "$_gm_i" -ge 0 ]; do
+        _gm_n="${_SANDY_GM_NAMES[$_gm_i]}"; _gm_c=0
+        for _gm_k in ${_gm_nn[@]+"${_gm_nn[@]}"}; do [ "$_gm_k" != "$_gm_n" ] || { _gm_c=1; break; }; done
+        if [ "$_gm_c" = 0 ]; then _gm_nn=("$_gm_n" ${_gm_nn[@]+"${_gm_nn[@]}"}); _gm_pp=("${_SANDY_GM_PATHS[$_gm_i]}" ${_gm_pp[@]+"${_gm_pp[@]}"}); fi
+        _gm_i=$((_gm_i - 1))
+    done
+    _SANDY_GM_NAMES=(); _SANDY_GM_PATHS=()
+    _gm_i=0
+    while [ "$_gm_i" -lt ${#_gm_nn[@]} ]; do
+        _gm_c=0; _gm_j=0
+        while [ "$_gm_j" -lt ${#_gm_pp[@]} ]; do
+            [ "${_gm_pp[$_gm_j]%/}" != "${_gm_pp[$_gm_i]%/}" ] || _gm_c=$((_gm_c + 1))
+            _gm_j=$((_gm_j + 1))
+        done
+        if [ "$_gm_c" = 1 ]; then _SANDY_GM_NAMES+=("${_gm_nn[$_gm_i]}"); _SANDY_GM_PATHS+=("${_gm_pp[$_gm_i]}"); fi
+        _gm_i=$((_gm_i + 1))
+    done
+    return 0
+}
+# Every submodule.<name>.path declaration of $1, in file order, into
+# _SANDY_GM_NAMES / _SANDY_GM_PATHS (for _sandy_gitmodules_read).
+_sandy_gitmodules_pairs() {   # $1 = .gitmodules
+    local _gm_r _gm_k _gm_v _gm_nl=$'\n'
     if command -v git >/dev/null 2>&1; then
         while IFS= read -r -d '' _gm_r; do
             case "$_gm_r" in *"$_gm_nl"*) ;; *) continue ;; esac
             _gm_k="${_gm_r%%"$_gm_nl"*}"; _gm_v="${_gm_r#*"$_gm_nl"}"
-            case "$_gm_v" in *"$_gm_nl"*) continue ;; esac
+            # A path holding a newline is kept as one that never matches, so
+            # an earlier declaration of that name cannot stand in for it.
+            case "$_gm_v" in *"$_gm_nl"*) _gm_v="$_gm_nl" ;; esac
             case "$_gm_k" in submodule.?*.path) ;; *) continue ;; esac
             _gm_k="${_gm_k#submodule.}"; _gm_k="${_gm_k%.path}"
             _SANDY_GM_NAMES+=("$_gm_k"); _SANDY_GM_PATHS+=("$_gm_v")
         done < <(cd / && exec git config -z -f "$1" --get-regexp '^submodule\..*\.path$' 2>/dev/null)
         return 0
     fi
-    while IFS= read -r _gm_k && IFS= read -r _gm_v; do
-        _SANDY_GM_NAMES+=("${_gm_k#N}"); _SANDY_GM_PATHS+=("${_gm_v#P}")
+    while IFS= read -r _gm_k; do
+        if [ "$_gm_k" = '!' ]; then _SANDY_GM_NAMES=(); _SANDY_GM_PATHS=(); return 0; fi
+        IFS= read -r _gm_v || break
+        if [ "$_gm_v" = '!' ]; then _SANDY_GM_NAMES=(); _SANDY_GM_PATHS=(); return 0; fi
+        case "$_gm_v" in B) _gm_v="$_gm_nl" ;; *) _gm_v="${_gm_v#P}" ;; esac
+        _SANDY_GM_NAMES+=("${_gm_k#N}"); _SANDY_GM_PATHS+=("$_gm_v")
     done < <(_sandy_gitmodules_parse "$1")
     return 0
 }
@@ -3173,8 +3214,12 @@ _sandy_gitmodules_read() {   # $1 = .gitmodules
 # leading and trailing blanks dropped, double quotes removed, \" \\ \t \n \b
 # decoded, and a # or ; outside quotes starting a comment; a key may follow
 # the header on its line. Prints "N<name>" and "P<path>" lines, one pair per
-# submodule.<name>.path. Anything it does not follow (a continued line, the
-# old `[submodule.name]` form, a name or value holding a newline) is skipped,
+# submodule.<name>.path; a path holding a newline is printed as "B" (it is
+# kept, so a later reading cannot stand in for it, and never matches). A
+# path value or submodule header it cannot read (an unclosed quote, an
+# unknown escape, a continued line) prints "!", and the whole file is then read as declaring
+# nothing, as git refuses the whole file. Other constructs it does not follow
+# (the old `[submodule.name]` form, a name holding a newline) are skipped,
 # so a declaration it misreads is only one sandy does not recognize.
 _sandy_gitmodules_parse() {   # $1 = .gitmodules
     awk '
@@ -3205,8 +3250,10 @@ _sandy_gitmodules_parse() {   # $1 = .gitmodules
         if (k != "path" || NAME == "") return
         if (!match(s, /^[ \t]*=/)) return
         BAD = 0; v = val(substr(s, RLENGTH + 1))
-        if (BAD || index(v, "\n") || index(NAME, "\n")) return
-        print "N" NAME; print "P" v
+        if (BAD) { print "!"; return }
+        if (index(NAME, "\n")) return
+        print "N" NAME
+        if (index(v, "\n")) print "B"; else print "P" v
     }
     {
         line = $0; sub(/\r$/, "", line)
@@ -3220,9 +3267,9 @@ _sandy_gitmodules_parse() {   # $1 = .gitmodules
                 if (c == "\"") { ok = 1; break }
                 nm = nm c
             }
-            if (!ok) next
+            if (!ok) { print "!"; next }
             rest = substr(rest, i + 1)
-            if (!match(rest, /^[ \t]*\]/)) next
+            if (!match(rest, /^[ \t]*\]/)) { print "!"; next }
             NAME = nm; rest = substr(rest, RLENGTH + 1)
             if (NAME == "") next
             keyline(rest); next
@@ -3235,7 +3282,7 @@ _sandy_gitmodules_parse() {   # $1 = .gitmodules
 # around either separator; sandy refuses the backslash outright).
 _sandy_submodule_name_ok() {   # $1 = name
     local _sn_r="$1/" _sn_c
-    case "$1" in ''|/*|*\\*) return 1 ;; esac
+    case "$1" in ''|/*|*\\*|*$'\n'*) return 1 ;; esac
     while [ -n "$_sn_r" ]; do
         _sn_c="${_sn_r%%/*}"; _sn_r="${_sn_r#*/}"
         case "$_sn_c" in ''|.|..) return 1 ;; esac
@@ -3294,8 +3341,11 @@ _sandy_gitdir_submodule_of() {   # $1 = working tree  $2 = gitdir  [$3 = depth]
 # --approvals report both call it). Sets _SANDY_GD_VERDICT:
 #   none       no gitdir is named
 #   notgit     not a git directory by structure (refused; nothing can approve it)
-#   sandy      outside the workspace, in sandy's own state (refused, as #209
-#              refuses a link there)
+#   sandy      outside the workspace, and $SANDY_HOME, in it, or a directory
+#              holding it (refused, as #209 refuses a link there: mounted, it
+#              hands over every sandbox and approval file)
+#   home       outside the workspace, and $HOME or a directory holding it
+#              (refused: mounted, it hands over the home directory)
 #   inside     in the workspace
 #   submodule  outside, this workspace's submodule gitdir
 #   approved   outside, unrecognized, approved for this workspace and target
@@ -3304,7 +3354,7 @@ _sandy_gitdir_submodule_of() {   # $1 = working tree  $2 = gitdir  [$3 = depth]
 # and _SANDY_GD_PHYS (the physical gitdir, when outside), _SANDY_GD_PREV (the
 # directory an approval names, for `changed`), _SANDY_GD_AT (its date).
 _sandy_gitdir_judge() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
-    local _gj_w _gj_f _gj_a _gj_b _gj_ws _gj_tg _gj_sh
+    local _gj_w _gj_f _gj_a _gj_b _gj_ws _gj_tg _gj_sh _gj_hm
     _SANDY_GD_VERDICT=none; _SANDY_GD_PHYS=""; _SANDY_GD_PREV=""; _SANDY_GD_AT=""
     [ -n "$1" ] || return 0
     if [ -z "$2" ] || [ ! -f "$2/HEAD" ] || [ ! -d "$2/objects" ] || [ ! -d "$2/refs" ]; then
@@ -3314,8 +3364,16 @@ _sandy_gitdir_judge() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
     if ! _sandy_phys_dir "$2" _SANDY_GD_PHYS || ! _sandy_phys_dir "$WORK_DIR" _gj_w; then
         _SANDY_GD_VERDICT=notgit; return 0
     fi
+    # Never sandy's state or the home directory, nor a directory above
+    # either (`gitdir: ../..` onto a directory holding HEAD, objects/, refs/):
+    # no approval is offered, since none could make that mount safe. Compared
+    # physically, with a path boundary, `/` holding everything.
     if [ -d "${SANDY_HOME:-}" ] && _sandy_phys_dir "$SANDY_HOME" _gj_sh; then
         case "$_SANDY_GD_PHYS/" in "${_gj_sh%/}"/*) _SANDY_GD_VERDICT=sandy; return 0 ;; esac
+        case "${_gj_sh%/}/" in "${_SANDY_GD_PHYS%/}"/*) _SANDY_GD_VERDICT=sandy; return 0 ;; esac
+    fi
+    if [ -d "${HOME:-}" ] && _sandy_phys_dir "$HOME" _gj_hm; then
+        case "${_gj_hm%/}/" in "${_SANDY_GD_PHYS%/}"/*) _SANDY_GD_VERDICT=home; return 0 ;; esac
     fi
     if _sandy_gitdir_submodule_of "$_gj_w" "$_SANDY_GD_PHYS"; then
         _SANDY_GD_VERDICT=submodule; return 0
@@ -3372,8 +3430,13 @@ _sandy_gitdir_gate() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
             _sandy_daemon_fatal
             exit 1 ;;
         sandy)
-            error_lit "The .git file names a git directory inside sandy's own state: $_SANDY_GD_PHYS"
+            error_lit "The .git file names a git directory that is or holds sandy's own state (\$SANDY_HOME): $_SANDY_GD_PHYS"
             error "  Mounting \$SANDY_HOME into a sandbox would expose operator state the agent must not reach. Nothing was started."
+            _sandy_daemon_fatal
+            exit 1 ;;
+        home)
+            error_lit "The .git file names a git directory that is or holds your home directory: $_SANDY_GD_PHYS"
+            error "  Mounted read-write, it would hand the agent your home directory. No approval can make that safe. Nothing was started."
             _sandy_daemon_fatal
             exit 1 ;;
         pending|changed) ;;
@@ -20008,17 +20071,26 @@ _sandy_resolve_symlinks() {
         # two (refused > changed > pending > approved > not_applicable): both
         # refuse a launch that cannot ask. Judged by the launch's own
         # _sandy_gitdir_judge; nothing is written.
-        local _gdr="" _gdh="" _gds=not_applicable _gdrel=none _gdt="" _gdat="" _gdn _gdo=0
+        local _gdr="" _gdh="" _gds=not_applicable _gdrel=none _gdt="" _gdat="" _gdn _gdo=0 _gdp _gdw
         if [ -f "$WORK_DIR/.git" ]; then
             _gdr="$(_sandy_gitdir_rel)"
             [ -z "$_gdr" ] || _gdh="$(_sandy_gitdir_host "$_gdr")"
         fi
         _sandy_gitdir_judge "$_gdr" "$_gdh"
         case "$_SANDY_GD_VERDICT" in
-            inside) _gdrel=inside_workspace; _gdt="$_gdh" ;;
+            # Spelled in the workspace but lying outside it, through a link
+            # there (`gitdir: lnk`, `gitdir: vendor/.git` with vendor a link
+            # out): the links are this gate's, so the gitdir verdict stays
+            # not_applicable and names the place it physically lies.
+            inside)
+                _gdrel=inside_workspace; _gdt="$_gdh"
+                if _sandy_phys_dir "$_gdh" _gdp && _sandy_phys_dir "$WORK_DIR" _gdw; then
+                    case "$_gdp/" in "${_gdw%/}"/*) ;; *) _gdrel=via_link; _gdt="$_gdp" ;; esac
+                fi ;;
             submodule) _gdrel=submodule; _gdt="$_SANDY_GD_PHYS" ;;
             notgit) _gdrel=not_a_git_directory; _gds=refused; _gdt="$_gdh" ;;
             sandy) _gdrel=sandy_state; _gds=refused; _gdt="$_SANDY_GD_PHYS" ;;
+            home) _gdrel=home_directory; _gds=refused; _gdt="$_SANDY_GD_PHYS" ;;
             approved|pending|changed) _gdrel=unrecognized; _gds="$_SANDY_GD_VERDICT"; _gdt="$_SANDY_GD_PHYS"; _gdat="$_SANDY_GD_AT" ;;
         esac
         for _gdn in "$_rs" "$_gds"; do
@@ -25316,8 +25388,9 @@ if [ -f "$WORK_DIR/.git" ]; then
         [ -f "$GITDIR_HOST/config.worktree" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config.worktree:$GITDIR_CONTAINER/config.worktree:ro")
         info "  Git submodule: gitdir at $GITDIR_CONTAINER"
     elif [ -s "$WORK_DIR/.git" ]; then
-        # Not a `gitdir: ` file, so git cannot use it either; nothing is mounted for it.
-        warn "The workspace's .git file does not start with 'gitdir: ', so it names no git directory; none is mounted for it (git in the session will not find a repository)."
+        # Not a `gitdir: ` file, or one holding a NUL byte (_sandy_gitfile_read):
+        # nothing is mounted for it.
+        warn "The workspace's .git file does not start with 'gitdir: ', or holds a NUL byte, so sandy takes it to name no git directory; none is mounted for it (git in the session will not find a repository)."
     fi
 fi
 _sandy_resolve_symlinks
