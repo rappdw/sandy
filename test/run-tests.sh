@@ -1079,7 +1079,7 @@ check "cmux setup skipped when host hooks dir exists" \
 info "23. Container hardening flags"
 # ============================================================
 
-# "pids-limit is configured": the agent's --pids-limit 512 is asserted by
+# "pids-limit is configured": the agent's --pids-limit "$SANDY_PIDS_LIMIT" line is asserted by
 # §175(6) (mutation C06).
 
 # "cap-drop ALL is configured": run, not grepped, on the agent's recorded
@@ -20937,7 +20937,7 @@ check "§175(5) ...and README states the written exception itself, so a 2.5.0 ro
 # (an append before them is silently discarded) and before the run.
 _S175_L_INIT="$(grep -m1 -n '^RUN_FLAGS+=(--init)$' "$_S175_SANDY" | cut -d: -f1 || true)"
 _S175_L_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_S175_SANDY" | tail -1 | cut -d: -f1 || true)"
-_S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit 512)$' "$_S175_SANDY" | cut -d: -f1 || true)"
+_S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit "$SANDY_PIDS_LIMIT")$' "$_S175_SANDY" | cut -d: -f1 || true)"
 check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every per-mode RUN_FLAGS=(...) reset, beside --pids-limit (init=${_S175_L_INIT:-?} last-reset=${_S175_L_LASTSET:-?} pids=${_S175_L_PIDS:-?})" \
     bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
 unset _S175_MISS _s175_t
@@ -25250,8 +25250,8 @@ check "§204(5a) build_claude_cmd still emits model, teammate mode, effort, perm
 check "§204(5b) a hostile passive value is still quoted at the sink (R1): teammate mode with ';' stays one argument" \
     bash -c 'printf "%s" "$1" | grep -qF -- "--teammate-mode x\\;id"' -- "$(_s204_cmd build_claude_cmd 'SANDY_TEAMMATE_MODE=x;id' SANDY_NEW_SESSION=true)"
 mkdir -p "$_S204_D/h5/.claude/projects/-w"; : > "$_S204_D/h5/.claude/projects/-w/old.jsonl"
-check "§204(6a) the agent-view pane: claude agents with model, bypass, and the operator's --mcp-config -- never --continue, never other flags" \
-    bash -c '[ "$1" = "claude agents --model claude-opus-5 --dangerously-skip-permissions --mcp-config /x.json; read -p '"''"'" ]' -- "$(_s204_cmd build_claude_agents_cmd)"
+check "§204(6a) the agent-view pane: claude agents with model, bypass, and the operator's --mcp-config -- never --continue, never other flags -- then its exit reported at every verbosity (#603)" \
+    bash -c '[ "$1" = "claude agents --model claude-opus-5 --dangerously-skip-permissions --mcp-config /x.json; _exit=\$?; echo '"''"'; echo \"[sandy] Claude Code agent view exited (code: \$_exit)\"; read -p '"'Press Enter to exit...'"'" ]' -- "$(_s204_cmd build_claude_agents_cmd)"
 _S204_DISP="$(sed -n '/^_sandy_build_agent_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 check "§204(6b) the dispatcher gives the claude pane agent view when sessions are active, and the ordinary claude command otherwise or when headless" \
     bash -c 'run() { env -i PATH="$PATH" HOME="$4" WORKSPACE=/w SANDY_NEW_SESSION=true "$@" bash -c "eval \"\$1\"; eval \"\$2\"; _sandy_build_agent_cmd claude" _ "$1" "$2" 2>/dev/null; }
@@ -26740,15 +26740,15 @@ for _A6_MODE in headless interactive; do
     _a6_launch "hardening-$_A6_MODE" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_CPUS=3 SANDY_MEM=5g -- ${_A6_ARGS[@]+"${_A6_ARGS[@]}"}
     _A6_A="$(_a6_agent_args "hardening-$_A6_MODE")"
     [ "$_A6_RC" = 0 ] && [ -n "$_A6_A" ] || _a6_diag "§225 $_A6_MODE" "hardening-$_A6_MODE"
-    _A6_WHY="$(_hardening_unmet "$_A6_A" 512 5g 'SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL')"
-    check "§225(1) $_A6_MODE: the agent's docker run: --read-only, --cap-drop ALL adding back only SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL, no-new-privileges, --pids-limit 512, --memory 5g, --cpus 3, --init (rc ${_A6_RC:-none}; unmet:${_A6_WHY:- none})" \
+    _A6_WHY="$(_hardening_unmet "$_A6_A" 4096 5g 'SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL')"
+    check "§225(1) $_A6_MODE: the agent's docker run: --read-only, --cap-drop ALL adding back only SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL, no-new-privileges, --pids-limit 4096 (the SANDY_PIDS_LIMIT default), --memory 5g, --cpus 3, --init (rc ${_A6_RC:-none}; unmet:${_A6_WHY:- none})" \
         bash -c 'test "$1" = 0 && test -n "$2" && test -z "$3" && grep -qx -- "$4" "$2" && grep -qx -- "--init" "$2" && awk "p==\"--cpus\" && \$0==\"3\" {ok=1} {p=\$0} END {exit ok?0:1}" "$2"' _ "$_A6_RC" "$_A6_A" "$_A6_WHY" "$_A6_TTY"
 done
 # The daemon supervisor takes the third reset and cannot be launched here; the
 # flags reach it only as unconditional column-0 appends after the last reset.
 _A6_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_A6_SCRIPT" | tail -1 | cut -d: -f1 || true)"
 _A6_MISS=""
-for _A6_F in 'RUN_FLAGS+=(--security-opt no-new-privileges:true)' 'RUN_FLAGS+=(--cap-drop ALL)' 'RUN_FLAGS+=(--pids-limit 512)' 'RUN_FLAGS+=(--init)' 'RUN_FLAGS+=(--read-only)'; do
+for _A6_F in 'RUN_FLAGS+=(--security-opt no-new-privileges:true)' 'RUN_FLAGS+=(--cap-drop ALL)' 'RUN_FLAGS+=(--pids-limit "$SANDY_PIDS_LIMIT")' 'RUN_FLAGS+=(--init)' 'RUN_FLAGS+=(--read-only)'; do
     _A6_L="$(grep -m1 -nxF -- "$_A6_F" "$_A6_SCRIPT" | cut -d: -f1 || true)"
     [ -n "$_A6_L" ] && [ -n "$_A6_LASTSET" ] && [ "$_A6_L" -gt "$_A6_LASTSET" ] || _A6_MISS="$_A6_MISS [$_A6_F]"
 done
@@ -34591,6 +34591,79 @@ rm -rf "$_S259_D"
 _a6_done
 unset -f _s259_gd _s259_case _s259_fix _s259_plant
 unset _S259_K _S259_KINDS _S259_N _S259_C _S259_W _S259_G _S259_L _S259_OK _S259_R _S259_D
+echo ""
+
+section "§260: SANDY_PIDS_LIMIT sets the agent's --pids-limit (default 4096), a bad value refuses the launch, a workspace may lower it but raising it is gated, and the agent view's pane reports its exit at every verbosity (#603)"
+# ============================================================
+_fx_a6
+# The fixed --pids-limit 512 counted threads, and a multi-session sandbox
+# reached it: one failed fork ended every session at once (#603). These run a
+# real headless launch through the §215 stubs and read the argv the agent's
+# docker run received, so the value, not only the flag, is asserted.
+# $1 = CASE -> the value after --pids-limit in the agent's run, or nothing.
+_s260_pids() {
+    local a
+    a="$(_a6_agent_args "$1")"
+    [ -n "$a" ] && awk 'p=="--pids-limit" {print; exit} {p=$0}' "$a"
+}
+_a6_launch pids-env SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_PIDS_LIMIT=2000
+_S260_V="$(_s260_pids pids-env || true)"
+check "§260(1) SANDY_PIDS_LIMIT=2000 from the environment: the agent's docker run carries --pids-limit 2000 (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 2000' _ "$_A6_RC" "$_S260_V"
+for _S260_BAD in abc 0 -1 08 1234567890 '4096 '; do
+    _S260_C="pids-bad-$(printf '%s' "$_S260_BAD" | tr -c 'A-Za-z0-9' '_')"
+    _a6_launch "$_S260_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 "SANDY_PIDS_LIMIT=$_S260_BAD"
+    check "§260(2) SANDY_PIDS_LIMIT='$_S260_BAD' refuses the launch with a message naming the key, and no agent container is run (rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 1 && grep -qF "SANDY_PIDS_LIMIT must be a positive integer" "$2/out" && test -z "$3"' _ "$_A6_RC" "$_A6_DIR/$_S260_C" "$(_a6_agent_args "$_S260_C")"
+done
+# The ordered gate: from a workspace .sandy/config a value at or below the
+# baseline is passive; a higher one needs approval, which a headless launch
+# cannot give, so it is dropped with the usual notice and the baseline holds.
+# $1 = CASE  $2 = workspace value  $3 = host config value or ""
+_s260_ws() {
+    mkdir -p "$_A6_DIR/$1/ws/.sandy" "$_A6_DIR/$1/sh"
+    printf 'SANDY_PIDS_LIMIT=%s\n' "$2" > "$_A6_DIR/$1/ws/.sandy/config"
+    if [ -n "$3" ]; then printf 'SANDY_PIDS_LIMIT=%s\n' "$3" > "$_A6_DIR/$1/sh/config"; fi
+}
+_s260_ws pids-ws-lower 1000 ""
+_a6_launch pids-ws-lower SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S260_V="$(_s260_pids pids-ws-lower || true)"
+check "§260(3) a workspace SANDY_PIDS_LIMIT=1000, below the default, is honoured with no approval (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 1000 && ! grep -qF "wants to set privileged keys" "$3/out"' _ "$_A6_RC" "$_S260_V" "$_A6_DIR/pids-ws-lower"
+_s260_ws pids-ws-higher 8192 ""
+_a6_launch pids-ws-higher SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S260_V="$(_s260_pids pids-ws-higher || true)"
+check "§260(4) a workspace SANDY_PIDS_LIMIT=8192, above the default, is approval-gated: headless drops it and the default 4096 holds (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 4096 && grep -qF "wants to set privileged keys" "$3/out" && grep -qF "Non-interactive session" "$3/out"' _ "$_A6_RC" "$_S260_V" "$_A6_DIR/pids-ws-higher"
+_s260_ws pids-ws-host 8192 10000
+_a6_launch pids-ws-host SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S260_V="$(_s260_pids pids-ws-host || true)"
+check "§260(5) the gate compares against the host config: workspace 8192 under a host 10000 is a lowering, honoured with no approval (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 8192 && ! grep -qF "wants to set privileged keys" "$3/out"' _ "$_A6_RC" "$_S260_V" "$_A6_DIR/pids-ws-host"
+# The agent view (the claude pane with named sessions) fronts every background
+# session; when its daemon died the pane sat in a bare `read` for hours. Its
+# command string is RUN: a pane whose command exits 3 must print the label and
+# the code at SANDY_VERBOSE=0. The control is an ordinary pane at verbosity 0,
+# which still pauses silently.
+_S260_T="$(dirname "$SANDY_SCRIPT")/templates/user-setup.sh.tmpl"
+_S260_D="$(mktemp -d "${TMPDIR:-/tmp}/s260.XXXXXX")"
+awk '/^_sandy_wrap_cmd_exit_pause\(\) \{/ {on=1} on {print} on && /^\}/ {exit}' "$_S260_T" > "$_S260_D/wrap.sh"
+_S260_BODY="$(awk '/^build_claude_agents_cmd\(\) \{/ {on=1} on {print} on && /^\}/ {exit}' "$_S260_T")"
+check "§260(6) build_claude_agents_cmd asks the exit pause to report at every verbosity" \
+    bash -c 'printf "%s\n" "$1" | grep -qE "^[[:space:]]*_sandy_wrap_cmd_exit_pause \"Claude Code agent view\" \"\\\$cmd\" report\$"' _ "$_S260_BODY"
+check "§260(7) the agent view's pane, its command exiting 3 at SANDY_VERBOSE=0, prints [sandy] Claude Code agent view exited (code: 3)" \
+    bash -c '. "$1/wrap.sh"; _sandy_is_headless=false; SANDY_VERBOSE=0
+             s="$(_sandy_wrap_cmd_exit_pause "Claude Code agent view" "(exit 3)" report)"
+             bash -c "$s" </dev/null 2>/dev/null | grep -qxF "[sandy] Claude Code agent view exited (code: 3)"' _ "$_S260_D"
+check "§260(8) control: an ordinary pane at SANDY_VERBOSE=0 still pauses without the line (the probe can tell the two apart)" \
+    bash -c '. "$1/wrap.sh"; _sandy_is_headless=false; SANDY_VERBOSE=0
+             s="$(_sandy_wrap_cmd_exit_pause "Codex CLI" "(exit 3)")"
+             case "$s" in *"read -p"*) ;; *) exit 1 ;; esac
+             ! bash -c "$s" </dev/null 2>/dev/null | grep -qF "exited (code:"' _ "$_S260_D"
+rm -rf "$_S260_D"
+_a6_done
+unset -f _s260_pids _s260_ws
+unset _S260_V _S260_BAD _S260_C _S260_T _S260_D _S260_BODY
 echo ""
 
 # BEGIN SUMMARY

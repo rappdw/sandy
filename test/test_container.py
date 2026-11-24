@@ -108,7 +108,7 @@ else:
     def check_tini_forwards_signals_to_the_dropped_child(self):
         """#493: a signal delivered to PID 1 must reach the agent, not end the container."""
         start = 'RUN_FLAGS+=(--security-opt no-new-privileges:true)\n'
-        end = 'RUN_FLAGS+=(--pids-limit 512)\n'
+        end = 'RUN_FLAGS+=(--pids-limit "$SANDY_PIDS_LIMIT")\n'
         flags_source = 'RUN_FLAGS=()\n' + start + production_contracts.span(start, end) + 'printf "%s\\0" "${RUN_FLAGS[@]}"\n'
         run = subprocess.run(['bash', '-c', flags_source], capture_output=True, text=True, timeout=10)
         self.assertEqual(run.returncode, 0, run.stderr)
