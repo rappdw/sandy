@@ -580,6 +580,16 @@ _a6_diag() {   # $1 = label  $2 = CASE
     printf '    \033[0;33m^ %s: rc %s, output (last 400 bytes): %s\033[0m\n' \
         "$1" "${_A6_RC:-none}" "$(tail -c 400 "$_A6_DIR/$2/out" 2>/dev/null | tr '\n' ' ' | cat -v)"
 }
+# _a6_gitdir_approve CASE TARGET: the approval a "y" at the #598 gitdir prompt
+# records (written by sandy's own _sandy_gitdir_record), for a fixture whose
+# .git file names a git directory outside its workspace that is no submodule
+# gitdir, as a --separate-git-dir is not.
+_A6_GDREC="$(sed -n '/^_sandy_hex() {/,/^}$/p; /^_sandy_gitdir_record() {/,/^}$/p' "$SANDY_SCRIPT")"
+_a6_gitdir_approve() {   # $1 = CASE  $2 = the git directory
+    local s
+    s="$(_a6_sandbox "$1")"; mkdir -p "$s"
+    SANDBOX_DIR="$s" bash -c "$_A6_GDREC"$'\n''_sandy_gitdir_record "$1" "$2"' _ "$_A6_DIR/$1/ws" "$(cd -P "$2" && pwd -P)"
+}
 
 # --- Independent launches run side by side (§236-§239) ----------------------
 # A launch through these stubs is a few hundred short-lived processes, about a
@@ -13405,7 +13415,12 @@ _fx_sandbox_dir
 _S130_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 # The block, after the two helpers it resolves the gitdir with (shared with
 # the by-name symlink sweep).
-sed -n '/^_sandy_gitdir_rel() {/,/^}$/p; /^_sandy_gitdir_host() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S130_DIR/gitblk.sh"
+: > "$_S130_DIR/gitblk.sh"
+for _f in _sandy_gitdir_rel _sandy_gitfile_read _sandy_gitdir_host _sandy_ws_physical _sandy_is_gitdir _sandy_phys_dir _sandy_gitmodules_read _sandy_gitmodules_pairs \
+          _sandy_gitmodules_parse _sandy_submodule_name_ok _sandy_gitdir_submodule_of _sandy_gitdir_judge _sandy_gitdir_gate; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
+done
+unset _f
 awk '/^if \[ -f "\$WORK_DIR\/\.git" \]; then$/,/^fi$/' "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
 sed -n '/^_sandy_is_protected_rel() {/,/^}$/p'   "$SANDY_SCRIPT"  > "$_S130_DIR/pred.sh"
 sed -n '/^_sandy_protected_files() {/,/^}$/p'    "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
@@ -13441,13 +13456,17 @@ _s130_git() {   # _s130_git <gitdir-line> [missing-marker]
              "$d/home/dev/super/.git/modules/vendor/lib/refs" \
              "$d/home/dev/super/vendor/lib" "$d/home/.ssh"
     printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
+    # The superproject declares the submodule (#598: an outside gitdir is
+    # mounted with no prompt only as this workspace's submodule gitdir).
+    mkdir -p "$d/home/dev/super/.git/objects" "$d/home/dev/super/.git/refs"; printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/HEAD"
+    printf '[submodule "vendor/lib"]\n\tpath = vendor/lib\n' > "$d/home/dev/super/.gitmodules"
     printf '[core]\n'               > "$d/home/dev/super/.git/modules/vendor/lib/config"; mkdir -p "$d/home/dev/super/.git/modules/vendor/lib/objects" "$d/home/dev/super/.git/modules/vendor/lib/refs"; printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
     printf 'PRIVATE-KEY\n'          > "$d/home/.ssh/id_ed25519"
     [ -n "${2:-}" ] && rm -rf "$d/home/dev/super/.git/modules/vendor/lib/$2"
     printf '%s\n' "$1" > "$d/home/dev/super/vendor/lib/.git"
     (
         trap - ERR; set +e
-        info() { :; }
+        info() { :; }; warn() { :; }; warn_lit() { :; }; error() { :; }; error_lit() { :; }
         _sandy_daemon_fatal() { return 0; }
         HOME="$d/home"; WORK_DIR="$d/home/dev/super/vendor/lib"; RUN_FLAGS=()
         . "$_S130_DIR/gitblk.sh" >/dev/null 2>&1 || exit $?
@@ -28383,6 +28402,7 @@ _s248_wt() {   # $1 = CASE: ws/.git -> ../realgit, with commondir and a submodul
     mkdir -p "$_A6_DIR/$1/ws" "$g/objects" "$g/refs" "$g/modules/sub"
     printf 'ref: refs/heads/main\n' > "$g/HEAD"; printf '[core]\n' > "$g/config"; printf '../main\n' > "$g/commondir"
     printf '[core]\n' > "$g/modules/sub/config"; mkdir -p "$g/modules/sub/objects" "$g/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$g/modules/sub/HEAD"; printf 'gitdir: ../realgit\n' > "$_A6_DIR/$1/ws/.git"
+    _a6_gitdir_approve "$1" "$g"   # #598: outside the workspace and no submodule gitdir
 }
 _s248_wta() {   # $1 = workspace: .git/worktrees/wt1 (commondir) and wt2 (commondir, config.worktree)
     local n
@@ -28709,12 +28729,14 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
     for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
         grep -qxF "$_S248_W/.git/worktrees/$_S248_F:/home/sandy/ws/.git/worktrees/$_S248_F:ro" "$_S248_A" || echo "not :ro: $_S248_F"
     done
-    for _S248_F in .git/worktrees .git/worktrees/wt1 .git/worktrees/wt2; do
-        grep -qxF "$_S248_W/$_S248_F:/home/sandy/ws/$_S248_F" "$_S248_A" || echo "not pinned: $_S248_F"
+    grep -qxF "$_S248_W/.git/worktrees:/home/sandy/ws/.git/worktrees" "$_S248_A" || echo "not pinned: .git/worktrees"
+    # 2.12.0 (#597): each admin dir is itself mounted :ro, which also pins it.
+    for _S248_F in .git/worktrees/wt1 .git/worktrees/wt2; do
+        grep -qxF "$_S248_W/$_S248_F:/home/sandy/ws/$_S248_F:ro" "$_S248_A" || echo "neither pinned nor :ro: $_S248_F"
     done
     [ "$(_s248_block "$_A6_DIR/$_S248_C/out")" = .git/worktrees/wt1/commondir ] || echo "block: $(_s248_block "$_A6_DIR/$_S248_C/out" | tr '\n' ' ')"; } 2>&1)" || true
 if [ -n "$_S248_R" ]; then _a6_diag "§248(m1)" "$_S248_C"; fi
-check "§248(m1) each linked-worktree admin dir's commondir and config.worktree is :ro, its ancestors are pinned, and a rewrite is reported (mutation: no _protect_worktree_admin_dirs call; ${_S248_R:-ok})" \
+check "§248(m1) each linked-worktree admin dir's commondir and config.worktree is :ro, worktrees/ is pinned and each admin dir mounted :ro (#597), and a rewrite is reported (mutation: no _protect_worktree_admin_dirs call; ${_S248_R:-ok})" \
     test -z "$_S248_R"
 _S248_C=s248-wtamac; _S248_W="$_A6_DIR/$_S248_C/ws"; _a6_join "$_S248_C"
 _S248_R="$( { for _S248_F in wt1/commondir wt2/commondir wt2/config.worktree; do
@@ -28926,7 +28948,8 @@ _S248_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S248_A" ]; then echo "launch rc $
             split("modules modules/sub worktrees worktrees/w", R, " ")
             for (k = 1; k <= 4; k++) {
                 r = R[k]; pin = g "/" r ":" c "/" r; pi = 0
-                for (i = 1; i <= n; i++) if (v[i] == pin) pi = i
+                # 2.12.0 (#597): a worktree admin dir is mounted :ro, which pins it.
+                for (i = 1; i <= n; i++) if (v[i] == pin || (r ~ /^worktrees\// && v[i] == pin ":ro")) pi = i
                 if (!pi) { print "not pinned: " r; continue }
                 if (pi < gm) print "pin " r " before the gitdir mount"
                 for (i = 1; i <= n; i++) { d = v[i]; sub(/^[^:]*:/, "", d); sub(/:ro$/, "", d)
@@ -34397,7 +34420,7 @@ check "§258(e2) a launch whose teardown cannot reach the docker daemon (inspect
 # after the provisional report is reported.
 _S258_C=s258-gitf; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_G="$_A6_DIR/$_S258_C/realgit"
 mkdir -p "$_S258_W" "$_S258_G/objects" "$_S258_G/refs"; printf 'ref: refs/heads/main\n' > "$_S258_G/HEAD"; printf '[core]\n' > "$_S258_G/config"
-printf 'gitdir: ../realgit\n' > "$_S258_W/.git"
+printf 'gitdir: ../realgit\n' > "$_S258_W/.git"; _a6_gitdir_approve "$_S258_C" "$_S258_G"   # #598
 _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
 _S258_R="$( { grep -q "^gitdir	[0-9a-f]" "$(ls "$(_a6_sandbox "$_S258_C")/.protected-provisional/"*.info 2>/dev/null | head -n 1)" 2>/dev/null || echo "the gitdir was not recorded beside the kept snapshot (rc $_A6_RC)"; } 2>&1)" || true
 mkdir -p "$_S258_G/worktrees/new"; printf 'ref: refs/heads/new\n' > "$_S258_G/worktrees/new/HEAD"
@@ -34593,7 +34616,1723 @@ unset -f _s259_gd _s259_case _s259_fix _s259_plant
 unset _S259_K _S259_KINDS _S259_N _S259_C _S259_W _S259_G _S259_L _S259_OK _S259_R _S259_D
 echo ""
 
-section "§260: SANDY_PIDS_LIMIT sets the agent's --pids-limit (default 4096), a bad value refuses the launch, a workspace may lower it but raising it is gated, and the agent view's pane reports its exit at every verbosity (#603)"
+# ============================================================
+section "§260: a gitdir a .git FILE names outside the workspace is mounted only for a recognized relationship (this workspace's submodule gitdir, nested ones included) or after a one-time approval naming it, kept per workspace and target; headless launches refuse, the --start pass asks on the client tty, SANDY_AUTO_APPROVE_PRIVILEGED does not approve it, and a linked worktree's admin dir is still refused (#598)"
+# ============================================================
+_fx_a6
+# WHY. R5a (1.14.0) accepted any gitdir that is a git directory by structure
+# (HEAD, objects/, refs/), wherever it lies, on the premise that a directory an
+# attacker could furnish so is one they can already write. A sibling
+# repository the user owns is the counterexample: a workspace whose .git file
+# says `gitdir: ../other/.git` launched with no prompt and that repository's
+# objects and refs mounted READ-WRITE, so the agent could rewrite its history.
+# Decision (2.12.0, option A): outside the workspace, a gitdir is mounted with
+# no prompt only when it is this workspace's submodule gitdir (the nearest
+# enclosing repository's .gitmodules declares this path, and the gitdir is
+# <its gitdir>/modules/<NAME>); anything else asks once, recorded per workspace
+# and target in the sandbox; a launch that cannot ask refuses.
+#
+# Every fixture is a real git layout made by git itself (submodule add,
+# --separate-git-dir, worktree add), except the fakes in (4), which are shaped
+# to pass for a submodule gitdir and are not one. The submodule names hold a
+# space and differ from their paths: git names modules/<dir> by the NAME.
+_S260_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_S260_MSG="This git directory needs a one-time approval, but stdin is not a terminal."
+_s260_git() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+        GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
+        git -c protocol.file.allow=always -c init.defaultBranch=main -c advice.detachedHead=false "$@" >/dev/null 2>&1
+}
+_s260_repo() { _s260_git init -q "$1" && _s260_git -C "$1" commit -q --allow-empty -m init; }
+_S260_SRC="$_A6_DIR/s260-src"; _s260_repo "$_S260_SRC"
+# Not named pty.py: a script of that name shadows the module it imports.
+_S260_PTY="$_A6_DIR/s260-ptydrive.py"
+cat > "$_S260_PTY" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]; argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try: os.execvp(argv[0], argv)
+    finally: os._exit(127)
+buf = b''; sent = False; deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try: d = os.read(fd, 4096)
+        except OSError: break
+        if not d: break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode()); sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+rc = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 128 + os.WTERMSIG(st)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+sys.stdout.write('\nPTYDRIVE_RC=%d\n' % rc)
+PY
+# _a6_launch on a pty that answers the first [y/N] with $2; _A6_RC is sandy's.
+_s260_pty() {   # $1 = CASE  $2 = answer  [VAR=value ...] [-- sandy-args ...]
+    local c="$_A6_DIR/$1" ans="$2" envs args; shift 2
+    envs=(); args=(-p fixture)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
+    rm -rf "$c/runs"; mkdir -p "$c/ws" "$c/sh" "$c/runs"; : > "$c/events.log"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$c/ws" && env PATH="$_A6_DIR/bin:$PATH" HOME="$c" SANDY_HOME="$c/sh" \
+            A6_LOG="$c" A6_WS="$c/ws" A6_CWS=/home/sandy/ws A6_OS=Linux SANDY_EGRESS=off SANDY_OFFLINE=1 \
+            ${envs[@]+"${envs[@]}"} python3 "$_S260_PTY" "$ans" bash "$_A6_SCRIPT" ${args[@]+"${args[@]}"} </dev/null >"$c/out" 2>&1
+    ) || true
+    _A6_RC="$(sed -n 's/^PTYDRIVE_RC=\([0-9][0-9]*\).*/\1/p' "$c/out")"
+    [ -n "$_A6_RC" ] || _A6_RC=lost
+}
+# Refused by the gate without a terminal: rc 1, no agent run, the message and
+# the target named, no approval recorded, and the target in no docker argv.
+_s260_refused() {   # $1 = CASE  $2 = the target (physical)
+    [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args "$1")" ] && grep -qF -- "$_S260_MSG" "$_A6_DIR/$1/out" \
+        && grep -qF -- "$2" "$_A6_DIR/$1/out" && [ ! -e "$(_a6_sandbox "$1")/.sandy-approved-gitdir" ] \
+        && ! grep -rqsF -- "$2" "$_A6_DIR/$1/runs"
+}
+# Launched (rc 0) with the gitdir mounted from $2 at $3, asked nothing.
+_s260_mounted() {   # $1 = CASE  $2 = host  $3 = container
+    [ "$_A6_RC" = 0 ] && _a6_pair "$(_a6_agent_args "$1")" -v "$2:$3" && ! grep -qF "one-time approval" "$_A6_DIR/$1/out"
+}
+
+# (1) Real submodules, made by `git submodule add`: one in $HOME (the
+# superproject), named "lib one" at path ws; and one nested, "inner lib" at ws
+# in submodule "mid" (path mid) of s260-nest.
+_S260_D="$_A6_DIR/s260-sub"; _s260_repo "$_S260_D"; _s260_git -C "$_S260_D" submodule add -q --name "lib one" "$_S260_SRC" ws
+_a6_bg s260-sub _a6_launch s260-sub "${_S260_K[@]}"
+_S260_D="$_A6_DIR/s260-nest"; _s260_repo "$_S260_D"; _s260_git -C "$_S260_D" submodule add -q --name mid "$_S260_SRC" mid
+_s260_git -C "$_S260_D/mid" submodule add -q --name "inner lib" "$_S260_SRC" ws
+_a6_bg s260-nest/mid _a6_launch s260-nest/mid "${_S260_K[@]}"
+# (2) --separate-git-dir, spelled through a link (store -> store-real), with a
+# second separate git dir beside it: headless, then approved at the real
+# prompt (a pty answering y, in the approval pass), then launched, then the
+# .git file pointed at the other directory.
+_s260_sep() {
+    local c="$_A6_DIR/s260-sep"
+    _a6_launch s260-sep "${_S260_K[@]}"; cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"
+    _s260_pty s260-sep y "${_S260_K[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$c/result" --
+    cp "$c/out" "$c/out.2"; echo "$_A6_RC" > "$c/rc.2"
+    cp "$(_a6_sandbox s260-sep)/.sandy-approved-gitdir" "$c/approval.2" 2>/dev/null || true
+    _a6_launch s260-sep "${_S260_K[@]}"; cp "$c/out" "$c/out.3"; echo "$_A6_RC" > "$c/rc.3"; cp "$(_a6_agent_args s260-sep)" "$c/args.3" 2>/dev/null || true
+    _a6_launch s260-sep "${_S260_K[@]}" -- --approvals --workspace "$c/ws"; cp "$c/out" "$c/out.4"; echo "$_A6_RC" > "$c/rc.4"
+    printf 'gitdir: ../store/b.git\n' > "$c/ws/.git"
+    _a6_launch s260-sep "${_S260_K[@]}"; cp "$c/out" "$c/out.5"; echo "$_A6_RC" > "$c/rc.5"; rm -rf "$c/runs.5"; cp -R "$c/runs" "$c/runs.5"
+    _a6_launch s260-sep "${_S260_K[@]}" -- --approvals --workspace "$c/ws"; echo "$_A6_RC" > "$c/rc.6"
+}
+_S260_C="$_A6_DIR/s260-sep"; mkdir -p "$_S260_C/store-real"; ln -s store-real "$_S260_C/store"
+_s260_git init -q --separate-git-dir "$_S260_C/store-real/a.git" "$_S260_C/ws"; _s260_git init -q --bare "$_S260_C/store-real/b.git"
+printf 'gitdir: ../store/a.git\n' > "$_S260_C/ws/.git"
+if command -v python3 >/dev/null 2>&1; then _a6_bg s260-sep _s260_sep; fi
+# (3) a sibling repository; (5) the same with SANDY_AUTO_APPROVE_PRIVILEGED=1.
+for _S260_N in sib auto; do
+    _S260_C="$_A6_DIR/s260-$_S260_N"; _s260_repo "$_S260_C/other"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../other/.git\n' > "$_S260_C/ws/.git"
+done
+_a6_bg s260-sib _a6_launch s260-sib "${_S260_K[@]}"
+_a6_bg s260-auto _a6_launch s260-auto "${_S260_K[@]}" SANDY_AUTO_APPROVE_PRIVILEGED=1
+# (4) fakes. unl: $HOME is a repository with a bare repository at
+# .git/modules/x, and its .gitmodules declares x at another path. name: it
+# declares path ws under the name y (modules/y exists too). anc: the
+# superproject that declares ws as x is a sibling, not an ancestor. link:
+# declared as x at ws, but .git/modules/x is a link to a repository elsewhere.
+# nest: $HOME (mid) declares ws as x and holds its gitdir under ITS gitdir's
+# modules/x, but mid is a --separate-git-dir repository, no one's submodule.
+_s260_fkc() { case "$1" in nest) echo s260-fk-nest/mid ;; *) echo "s260-fk-$1" ;; esac; }
+_s260_fake() {   # $1 = kind
+    local c="$_A6_DIR/$(_s260_fkc "$1")"
+    mkdir -p "$c/ws"
+    case "$1" in
+        nest) mkdir -p "$c/../store"; _s260_git init -q --separate-git-dir "$c/../store/mid.git" "$c"; _s260_git init -q --bare "$c/../store/mid.git/modules/x"
+              printf '[submodule "x"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../../store/mid.git/modules/x\n' > "$c/ws/.git"
+              echo "$_A6_DIR/s260-fk-nest/store/mid.git/modules/x" ;;
+        unl)  _s260_repo "$c"; _s260_git init -q --bare "$c/.git/modules/x"; printf '[submodule "x"]\n\tpath = other\n' > "$c/.gitmodules"
+              printf 'gitdir: ../.git/modules/x\n' > "$c/ws/.git"; echo "$c/.git/modules/x" ;;
+        name) _s260_repo "$c"; _s260_git init -q --bare "$c/.git/modules/x"; _s260_git init -q --bare "$c/.git/modules/y"
+              printf '[submodule "y"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../.git/modules/x\n' > "$c/ws/.git"; echo "$c/.git/modules/x" ;;
+        anc)  _s260_repo "$c/osup"; _s260_git init -q --bare "$c/osup/.git/modules/x"; printf '[submodule "x"]\n\tpath = ws\n' > "$c/osup/.gitmodules"
+              printf 'gitdir: ../osup/.git/modules/x\n' > "$c/ws/.git"; echo "$c/osup/.git/modules/x" ;;
+        link) _s260_repo "$c"; _s260_git init -q --bare "$c/elsewhere/x.git"; mkdir -p "$c/.git/modules"; ln -s ../../elsewhere/x.git "$c/.git/modules/x"
+              printf '[submodule "x"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../.git/modules/x\n' > "$c/ws/.git"; echo "$c/elsewhere/x.git" ;;
+    esac
+}
+for _S260_N in unl name anc link nest; do
+    _s260_fake "$_S260_N" > "$_A6_DIR/s260-fk-$_S260_N.target"
+    _a6_bg "$(_s260_fkc "$_S260_N")" _a6_launch "$(_s260_fkc "$_S260_N")" "${_S260_K[@]}"
+done
+# (8) a git directory inside $SANDY_HOME is refused outright, as a link there is.
+_S260_C="$_A6_DIR/s260-sh"; _s260_git init -q --bare "$_S260_C/sh/x.git"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../sh/x.git\n' > "$_S260_C/ws/.git"
+_a6_bg s260-sh _a6_launch s260-sh "${_S260_K[@]}"
+# (6) --start. pp: the approval pass with no terminal refuses and starts
+# nothing; then the supervisor itself refuses, dropping the .fatal marker.
+# cli: the REAL --start client on a pty, answered n: it asks there, and exits
+# 6 without forking a supervisor. ok: the pass answered y on a pty, then the
+# supervisor launches and mounts the approved directory.
+_s260_pp() {
+    local c="$_A6_DIR/s260-pp"
+    _a6_launch s260-pp "${_S260_K[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$c/result" --
+    cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"; cp "$c/events.log" "$c/events.1"
+    _a6_launch s260-pp "${_S260_K[@]}" SANDY_DAEMON_SUPERVISOR=1 SANDY_DAEMON_LOG="$c/dlog" A6_TERM_ON_DETACH=1 -- --start --workspace "$c/ws"
+}
+_s260_ok() {
+    local c="$_A6_DIR/s260-ok"
+    _s260_pty s260-ok y "${_S260_K[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$c/result" --
+    cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"
+    _a6_launch s260-ok "${_S260_K[@]}" SANDY_DAEMON_SUPERVISOR=1 A6_TERM_ON_DETACH=1 -- --start --workspace "$c/ws"
+}
+for _S260_N in pp cli ok; do
+    _S260_C="$_A6_DIR/s260-$_S260_N"; _s260_repo "$_S260_C/other"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../other/.git\n' > "$_S260_C/ws/.git"
+done
+_a6_bg s260-pp _s260_pp
+if command -v python3 >/dev/null 2>&1; then
+    _a6_bg s260-cli _s260_pty s260-cli n "${_S260_K[@]}" -- --start --workspace "$_A6_DIR/s260-cli/ws"
+    _a6_bg s260-ok _s260_ok
+fi
+# (7) a linked worktree made by `git worktree add`: its admin directory has no
+# objects/, so the structural check refuses it, as before #598.
+_S260_C="$_A6_DIR/s260-wt"; _s260_repo "$_S260_C/main"; _s260_git -C "$_S260_C/main" worktree add -q "$_S260_C/ws"
+_a6_bg s260-wt _a6_launch s260-wt "${_S260_K[@]}"
+
+_a6_join s260-sub; _S260_D="$_A6_DIR/s260-sub"
+_S260_OK=0; { _s260_mounted s260-sub "$_S260_D/.git/modules/lib one" "/home/sandy/.git/modules/lib one" \
+    && [ ! -e "$(_a6_sandbox s260-sub)/.sandy-approved-gitdir" ]; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(1a)" s260-sub
+check "§260(1a) a real submodule checkout (git submodule add, named \"lib one\" at path ws) launches headless with no prompt and its gitdir .git/modules/lib one mounted, nothing recorded (mutation: the submodule test dropped, or modules/<path> taken for modules/<name>; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_join s260-nest/mid; _S260_D="$_A6_DIR/s260-nest"
+_S260_OK=0; _s260_mounted s260-nest/mid "$_S260_D/.git/modules/mid/modules/inner lib" "$_S260_D/.git/modules/mid/modules/inner lib" || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(1b)" s260-nest/mid
+check "§260(1b) ...and a nested one (\"inner lib\" at ws in submodule mid): its gitdir .git/modules/mid/modules/inner lib is recognized through mid's own .gitmodules and gitdir (mutation: the nested superproject not followed; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+
+if command -v python3 >/dev/null 2>&1; then
+    _a6_join s260-sep; _S260_C="$_A6_DIR/s260-sep"; _S260_T="$_S260_C/store-real/a.git"
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.1")" = 1 ] && grep -qF -- "$_S260_MSG" "$_S260_C/out.1" && grep -qF -- "$_S260_T" "$_S260_C/out.1" \
+      && grep -qF "SANDY_AUTO_APPROVE_PRIVILEGED does not approve it" "$_S260_C/out.1"; } || _S260_OK=$?
+    check "§260(2a) a --separate-git-dir workspace launched headless is refused (rc 1) by name, the physical target given, and says how to approve it (mutation: the [ -t 0 ] test dropped, the read takes EOF as no; rc $(cat "$_S260_C/rc.1" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.2")" = 0 ] && grep -qF "Mount it read-write for this workspace? [y/N]" "$_S260_C/out.2" && grep -qF -- "$_S260_T" "$_S260_C/out.2" \
+      && grep -qF "read-write access to that repository's" "$_S260_C/out.2" && [ -s "$_S260_C/approval.2" ]; } || _S260_OK=$?
+    check "§260(2b) the approval pass on a terminal asks, naming the target and the read-write access to its history, and a y records it (rc $(cat "$_S260_C/rc.2" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.3")" = 0 ] && _a6_pair "$_S260_C/args.3" -v "$_S260_T:/home/sandy/store/a.git" \
+      && ! grep -qF "one-time approval" "$_S260_C/out.3" && cmp -s "$_S260_C/approval.2" "$(_a6_sandbox s260-sep)/.sandy-approved-gitdir"; } || _S260_OK=$?
+    check "§260(2c) ...then a headless launch mounts it, from the PHYSICAL directory approved (store-real/a.git, spelled store/a.git) at the spelled container path, asking nothing (mutation: the source left as spelled; rc $(cat "$_S260_C/rc.3" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.5")" = 1 ] && grep -qF -- "$_S260_MSG" "$_S260_C/out.5" && grep -qF -- "$_S260_C/store-real/b.git" "$_S260_C/out.5" \
+      && grep -qF "The approval on record is for a different directory: $_S260_T" "$_S260_C/out.5" \
+      && ! grep -rqsF -- "$_S260_C/store-real/b.git" "$_S260_C/runs.5" \
+      && cmp -s "$_S260_C/approval.2" "$(_a6_sandbox s260-sep)/.sandy-approved-gitdir"; } || _S260_OK=$?
+    check "§260(2d) the .git file pointed at another directory after the approval asks again (headless: refused, naming the new target and the approved one), the record unchanged (mutation: the record matched on the workspace alone; rc $(cat "$_S260_C/rc.5" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    _S260_R="$(python3 - "$_S260_C/out.4" "$_S260_T" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); s = [x for x in d["gates"] if x["gate"] == "symlinks"][0]; g = s["gitdir"]
+want = ("approved", "approved", "unrecognized", sys.argv[2])
+print("ok" if (s["status"], g["status"], g["relationship"], g["target"]) == want and g["approved_at"] else "got %s %s" % (s["status"], g))
+PY
+)" || _S260_R="unparsed"
+    { [ "$_S260_R" = ok ] && [ "$(cat "$_S260_C/rc.4")" = 0 ] && [ "$(cat "$_S260_C/rc.6")" = 2 ]; } || _S260_OK=1
+    check "§260(2e) --approvals reports it under the symlinks gate (gitdir: approved, unrecognized, the target; exit 0), and as unresolved once the target changes (exit 2) (${_S260_R:-none}; rc $(cat "$_S260_C/rc.4" 2>/dev/null) then $(cat "$_S260_C/rc.6" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+else
+    skip "§260(2) python3 not available to drive the prompt on a pty"
+fi
+
+_a6_join s260-sib; _S260_OK=0; _s260_refused s260-sib "$_A6_DIR/s260-sib/other/.git" || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(3)" s260-sib
+check "§260(3) a sibling repository (gitdir: ../other/.git) launched headless is refused by the gate, naming it; nothing of it reaches a docker run (mutation: the outside gate dropped: mounted rw as before; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_join s260-auto; _S260_OK=0; _s260_refused s260-auto "$_A6_DIR/s260-auto/other/.git" || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(5)" s260-auto
+check "§260(5) ...and with SANDY_AUTO_APPROVE_PRIVILEGED=1 the same: the bypass does not approve it (mutation: the bypass honoured; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+for _S260_N in unl name anc link nest; do
+    _S260_C="$(_s260_fkc "$_S260_N")"
+    _a6_join "$_S260_C"; _S260_OK=0; _s260_refused "$_S260_C" "$(cat "$_A6_DIR/s260-fk-$_S260_N.target")" || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(4) $_S260_N" "$_S260_C"
+    case "$_S260_N" in
+        unl) _S260_R="a gitdir under the enclosing repository's .git/modules/x that its .gitmodules declares at another path (mutation: the path not compared)" ;;
+        name) _S260_R="...declared at ws under another name, y (mutation: modules/<name> not compared)" ;;
+        anc) _S260_R="...under a sibling's .git/modules/x that declares ws as x: not an ancestor (mutation: any repository's declaration taken)" ;;
+        link) _S260_R="...declared as x at ws, with .git/modules/x a link to a repository elsewhere (mutation: the spelled path compared, not the physical one)" ;;
+        nest) _S260_R="...declared as x at ws by a repository whose own gitdir is a --separate-git-dir, not a submodule gitdir (mutation: the enclosing repository's gitdir not judged in turn)" ;;
+    esac
+    check "§260(4) $_S260_N: $_S260_R is not recognized, so a headless launch refuses it (rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+done
+
+_a6_join s260-pp; _S260_C="$_A6_DIR/s260-pp"
+_S260_OK=0
+{ [ "$(cat "$_S260_C/rc.1")" = 1 ] && grep -qF -- "$_S260_MSG" "$_S260_C/out.1" && ! grep -q "^docker run" "$_S260_C/events.1" \
+  && [ ! -e "$(_a6_sandbox s260-pp)/.sandy-approved-gitdir" ]; } || _S260_OK=$?
+check "§260(6a) under --start the approval pass with no terminal refuses (rc 1, so --start exits 6 before forking), runs no container and records nothing (mutation: the pass does not call the gate; rc $(cat "$_S260_C/rc.1" 2>/dev/null))" \
+    test "$_S260_OK" = 0
+_S260_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -e "$_S260_C/dlog.fatal" ] && grep -qF -- "$_S260_MSG" "$_S260_C/out" && [ -z "$(_a6_agent_args s260-pp)" ]; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(6b)" s260-pp
+check "§260(6b) ...and the supervisor (no approval granted) refuses with the .fatal marker, so the client stops at once (rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+if command -v python3 >/dev/null 2>&1; then
+    _a6_join s260-cli; _S260_C="$_A6_DIR/s260-cli"
+    _S260_OK=0
+    { [ "$_A6_RC" = 6 ] && grep -qF "Mount it read-write for this workspace? [y/N]" "$_S260_C/out" && grep -qF -- "$_S260_C/other/.git" "$_S260_C/out" \
+      && ! grep -q "^docker run" "$_S260_C/events.log" && [ ! -e "$(_a6_sandbox s260-cli)/.sandy-approved-gitdir" ]; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(6c)" s260-cli
+    check "§260(6c) the real --start client on a terminal asks there (the pass's prompt, naming the target), and answered n exits 6 with no supervisor and no container (rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+    _a6_join s260-ok; _S260_C="$_A6_DIR/s260-ok"
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.1")" = 0 ] && _a6_pair "$(_a6_agent_args s260-ok)" -v "$_S260_C/other/.git:/home/sandy/other/.git" \
+      && ! grep -qF "one-time approval" "$_S260_C/out"; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(6d)" s260-ok
+    check "§260(6d) answered y in the approval pass, the headless supervisor mounts the approved directory (rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+else
+    skip "§260(6c,6d) python3 not available to drive the prompt on a pty"
+fi
+_a6_join s260-wt; _S260_C="$_A6_DIR/s260-wt"
+_S260_OK=0
+{ [ "$_A6_RC" = 0 ] && _a6_pair "$(_a6_agent_args s260-wt)" -v "$_S260_C/main/.git:/home/sandy/main/.git" \
+  && ! grep -qF "one-time approval" "$_S260_C/out"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(7)" s260-wt
+check "§260(7) a linked worktree (git worktree add) is a recognized relationship (#582): it launches headless with no approval offered, its common dir mounted (§264 has the rest; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_join s260-sh; _S260_C="$_A6_DIR/s260-sh"
+_S260_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s260-sh)" ] && grep -qF "is or holds sandy's own state (\$SANDY_HOME): $_S260_C/sh/x.git" "$_S260_C/out" \
+  && ! grep -qF "[y/N]" "$_S260_C/out"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(8)" s260-sh
+check "§260(8) a git directory inside \$SANDY_HOME is refused outright, with no approval offered (mutation: the sandy-state test dropped; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+# (9) The .gitmodules reader without git (_sandy_gitmodules_parse) reads what
+# git reads: names and paths with spaces, a quoted name with an escaped quote,
+# keys in any case, quoted values, escapes, comments, a key on the header
+# line, and keys of other sections ignored. Compared with git config -z itself.
+_S260_D="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_gitmodules_read _sandy_gitmodules_pairs _sandy_gitmodules_parse; do sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S260_D/fns.sh"; done
+unset _f
+printf '%s\n' '[submodule "lib one"]' '	path = lib one' '	url = ../x' '[Submodule "q\"uote"] ; a comment' '	PATH = "with  spaces " # trailing' \
+    '[submodule "semi"]' '	path = a;b' '[submodule "esc"]' '	path = a\\b' '[submodule "tab"]' '	path = "x\ty"' \
+    '[submodule "h"] path = inline' '[core]' '	path = notsub' '[submodule "dot.path"]' '	path = d' > "$_S260_D/gm"
+_s260_gm() {   # $1 = dir  [$2 = PATH] -> the pairs read
+    bash -c '. "$1/fns.sh"; [ -z "$2" ] || PATH="$2"; _sandy_gitmodules_read "$1/gm"
+             for i in "${!_SANDY_GM_NAMES[@]}"; do printf "[%s=%s]" "${_SANDY_GM_NAMES[$i]}" "${_SANDY_GM_PATHS[$i]}"; done' _ "$1" "${2:-}" 2>&1 | tr '\t\n' '~^'
+}
+# PATH with awk and nothing else: no git.
+mkdir "$_S260_D/bin"; ln -s "$(command -v awk)" "$_S260_D/bin/awk"
+_S260_G="$(_s260_gm "$_S260_D")"; _S260_P="$(_s260_gm "$_S260_D" "$_S260_D/bin")"
+check "§260(9) without git, .gitmodules is read as git reads it: every submodule.<name>.path pair the same, in order (mutation: quotes or comments not handled; git: $_S260_G; parser: $_S260_P)" \
+    bash -c '[ "$1" = "$2" ] && [ "$(printf "%s" "$1" | tr -cd "[" | wc -c | tr -d " ")" = 7 ]' _ "$_S260_G" "$_S260_P"
+# (9b) A name declared with two paths keeps the LAST one (git checks out and
+# maps that one), in one section or in two of that name; a path two names
+# declare is dropped. Both readers, on the same files.
+_s260_gmf() {   # $1 = file content (printf format) -> both readers, "git | parser"
+    printf "$1" > "$_S260_D/gm"
+    printf '%s | %s' "$(_s260_gm "$_S260_D")" "$(_s260_gm "$_S260_D" "$_S260_D/bin")"
+}
+_S260_R=""
+for _S260_N in 'sf|[submodule "lib"]\n\tpath = ws\n\tpath = decoy\n|[lib=decoy]' \
+               'sl|[submodule "lib"]\n\tpath = decoy\n\tpath = ws\n|[lib=ws]' \
+               'tf|[submodule "lib"]\n\tpath = ws\n[submodule "lib"]\n\tpath = decoy\n|[lib=decoy]' \
+               'tn|[submodule "lib"]\n\tpath = ws\n[submodule "other"]\n\tpath = ws/\n[submodule "z"]\n\tpath = z\n|[z=z]' \
+               'nl|[submodule "lib"]\n\tpath = ws\n\tpath = "x\\ny"\n|[lib=^]' \
+               'bad|[submodule "lib"]\n\tpath = ws\n[submodule "x"]\n\tpath = "open\n|'; do
+    _S260_G="$(_s260_gmf "$(printf '%s' "$_S260_N" | cut -d'|' -f2)")"
+    _S260_P="$(printf '%s' "$_S260_N" | cut -d'|' -f3)"
+    [ "$_S260_G" = "$_S260_P | $_S260_P" ] || _S260_R="$_S260_R ${_S260_N%%|*}: got [$_S260_G], want [$_S260_P]"
+done
+check "§260(9b) a name declared twice keeps its last path (one section or two; a last path holding a newline, shown ^, is kept as one that never matches), a path two names declare is dropped, and an unreadable file declares nothing, with git and without (mutation: every declaration kept; or a shared path kept; or a newline path skipped${_S260_R:+;$_S260_R})" \
+    test -z "$_S260_R"
+rm -rf "$_S260_D"
+# (10) Never sandy's state, the home directory, or a directory above either,
+# whatever an approval says, and no approval is offered. shanc: SANDY_HOME is
+# CASE/st/sh and the gitdir is CASE/st. home: the gitdir is CASE, which is
+# $HOME. hanc: $HOME is CASE/h and the gitdir is CASE. In home and hanc
+# SANDY_HOME is outside CASE, so only the home test applies. shanc and home
+# carry an approval of that target, written where their launch looks for it.
+_s260_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+_s260_approve_in() {   # $1 = CASE  $2 = target  $3 = the SANDY_HOME the launch uses
+    _a6_gitdir_approve "$1" "$2"; mkdir -p "$3/sandboxes"; cp -R "$(_a6_sandbox "$1")" "$3/sandboxes/"
+}
+_S260_C="$_A6_DIR/s260-shanc"; _s260_gd "$_S260_C/st"; mkdir -p "$_S260_C/st/sh" "$_S260_C/ws"; printf 'gitdir: ../st\n' > "$_S260_C/ws/.git"
+_s260_approve_in s260-shanc "$_S260_C/st" "$_S260_C/st/sh"
+_a6_bg s260-shanc _a6_launch s260-shanc "${_S260_K[@]}" SANDY_HOME="$_S260_C/st/sh"
+_S260_C="$_A6_DIR/s260-home"; _s260_gd "$_S260_C"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ..\n' > "$_S260_C/ws/.git"
+_s260_approve_in s260-home "$_S260_C" "$_A6_DIR/s260-home-sh"
+_a6_bg s260-home _a6_launch s260-home "${_S260_K[@]}" SANDY_HOME="$_A6_DIR/s260-home-sh"
+_S260_C="$_A6_DIR/s260-hanc"; _s260_gd "$_S260_C"; mkdir -p "$_S260_C/ws" "$_S260_C/h" "$_A6_DIR/s260-hanc-sh"; printf 'gitdir: ..\n' > "$_S260_C/ws/.git"
+_a6_bg s260-hanc _a6_launch s260-hanc "${_S260_K[@]}" HOME="$_S260_C/h" SANDY_HOME="$_A6_DIR/s260-hanc-sh"
+# (11) a .git file holding a NUL byte names nothing (git would read `gitdir:
+# ../other/.git\r`, a path sandy cannot hold): warned, nothing mounted.
+_S260_C="$_A6_DIR/s260-nul"; _s260_repo "$_S260_C/other"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../other/.git\r\0' > "$_S260_C/ws/.git"
+_a6_bg s260-nul _a6_launch s260-nul "${_S260_K[@]}"
+# (12) duplicate declarations, on a real submodule "lib" at ws (git
+# submodule add), with .gitmodules then rewritten: sf/tf declare ws first and
+# decoy last (one section, two sections), sl/tl the other way round, tn
+# declares ws under two names. Git itself is asked which path it maps
+# (`git submodule status` on the gitlink at ws).
+_s260_dup() {   # $1 = kind
+    local c="$_A6_DIR/s260-dup-$1" u="$_S260_SRC"
+    _s260_repo "$c"; _s260_git -C "$c" submodule add -q --name lib "$_S260_SRC" ws
+    case "$1" in
+        sf) printf '[submodule "lib"]\n\tpath = ws\n\tpath = decoy\n\turl = %s\n' "$u" ;;
+        sl) printf '[submodule "lib"]\n\tpath = decoy\n\tpath = ws\n\turl = %s\n' "$u" ;;
+        tf) printf '[submodule "lib"]\n\tpath = ws\n\turl = %s\n[submodule "lib"]\n\tpath = decoy\n' "$u" ;;
+        tl) printf '[submodule "lib"]\n\tpath = decoy\n\turl = %s\n[submodule "lib"]\n\tpath = ws\n' "$u" ;;
+        tn) printf '[submodule "lib"]\n\tpath = ws\n\turl = %s\n[submodule "other"]\n\tpath = ws\n\turl = %s\n' "$u" "$u" ;;
+    esac > "$c/.gitmodules"
+    ( cd "$c" && env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git submodule status 2>&1 ) > "$c/git-status" || true
+}
+for _S260_N in sf sl tf tl tn; do
+    _s260_dup "$_S260_N"; _a6_bg "s260-dup-$_S260_N" _a6_launch "s260-dup-$_S260_N" "${_S260_K[@]}"
+done
+# (13) --approvals on `gitdir: vendor/.git` with vendor a link out of the
+# workspace: spelled inside, lying outside, so via_link (the link is the
+# symlink gate's, which reports it pending).
+_S260_C="$_A6_DIR/s260-vl"; _s260_repo "$_S260_C/outrepo"; mkdir -p "$_S260_C/ws"; ln -s "$_S260_C/outrepo" "$_S260_C/ws/vendor"
+printf 'gitdir: vendor/.git\n' > "$_S260_C/ws/.git"
+_a6_bg s260-vl _a6_launch s260-vl "${_S260_K[@]}" -- --approvals --workspace "$_S260_C/ws"
+
+for _S260_N in shanc home hanc; do
+    _S260_C="$_A6_DIR/s260-$_S260_N"; _a6_join "s260-$_S260_N"
+    case "$_S260_N" in
+        shanc) _S260_T="is or holds sandy's own state (\$SANDY_HOME): $_S260_C/st" ;;
+        *) _S260_T="is or holds your home directory: $_S260_C" ;;
+    esac
+    _S260_OK=0
+    { [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args "s260-$_S260_N")" ] && grep -qF -- "$_S260_T" "$_S260_C/out" \
+      && ! grep -qF "[y/N]" "$_S260_C/out" && ! grep -rqsF -- "$_S260_C:" "$_S260_C/runs"; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(10) $_S260_N" "s260-$_S260_N"
+    case "$_S260_N" in
+        shanc) _S260_R="a git directory holding \$SANDY_HOME (gitdir: ../st, SANDY_HOME=st/sh), approved or not, is refused with no approval offered (mutation: only a target under \$SANDY_HOME refused)" ;;
+        home) _S260_R="...and one that is \$HOME (gitdir: ..), approved or not (mutation: the home test dropped)" ;;
+        hanc) _S260_R="...and one holding \$HOME (HOME=h, gitdir: ..) (mutation: only \$HOME itself refused)" ;;
+    esac
+    check "§260(10) $_S260_N: $_S260_R (rc ${_A6_RC:-none})" test "$_S260_OK" = 0
+done
+_a6_join s260-nul; _S260_C="$_A6_DIR/s260-nul"
+_S260_OK=0
+{ [ "$_A6_RC" = 0 ] && grep -qF "or holds a NUL byte, so sandy takes it to name no git directory" "$_S260_C/out" \
+  && ! grep -rqsF -- "$_S260_C/other" "$_S260_C/runs" && ! grep -qF "[y/N]" "$_S260_C/out"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(11)" s260-nul
+check "§260(11) a .git file holding a NUL byte (gitdir: ../other/.git, CR, NUL) names nothing: warned, launched, nothing of ../other mounted (mutation: read up to the NUL; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+for _S260_N in sf sl tf tl tn; do
+    _S260_C="$_A6_DIR/s260-dup-$_S260_N"; _a6_join "s260-dup-$_S260_N"; _S260_OK=0
+    case "$_S260_N" in
+        sl|tl) { _s260_mounted "s260-dup-$_S260_N" "$_S260_C/.git/modules/lib" /home/sandy/.git/modules/lib \
+                 && ! grep -qF "no submodule mapping found in .gitmodules for path 'ws'" "$_S260_C/git-status"; } || _S260_OK=$?
+               _S260_R="ws declared last: git maps ws, and the launch mounts its gitdir with no prompt" ;;
+        sf|tf) { _s260_refused "s260-dup-$_S260_N" "$_S260_C/.git/modules/lib" \
+                 && grep -qF "no submodule mapping found in .gitmodules for path 'ws'" "$_S260_C/git-status"; } || _S260_OK=$?
+               _S260_R="ws declared first, decoy last: git does not map ws, and a headless launch refuses (mutation: every declaration kept)" ;;
+        tn) _s260_refused "s260-dup-$_S260_N" "$_S260_C/.git/modules/lib" || _S260_OK=$?
+            _S260_R="ws declared by two names: neither recognized, a headless launch refuses (mutation: a shared path kept)" ;;
+    esac
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(12) $_S260_N" "s260-dup-$_S260_N"
+    check "§260(12) $_S260_N: $_S260_R (git: $(head -c 120 "$_S260_C/git-status" | tr '\n' ' '); rc ${_A6_RC:-none})" test "$_S260_OK" = 0
+done
+_a6_join s260-vl; _S260_C="$_A6_DIR/s260-vl"
+_S260_R="$(python3 - "$_S260_C/out" "$_S260_C/outrepo/.git" <<'PY' 2>&1
+import json, sys
+d = json.load(open(sys.argv[1])); s = [x for x in d["gates"] if x["gate"] == "symlinks"][0]; g = s["gitdir"]
+got = (s["status"], g["status"], g["relationship"], g["target"])
+print("ok" if got == ("pending", "not_applicable", "via_link", sys.argv[2]) else "got %s" % (got,))
+PY
+)" || _S260_R="unparsed"
+check "§260(13) --approvals names a gitdir spelled inside the workspace but lying outside it through a link as via_link, with its physical place, the gate pending on the link (mutation: reported as inside_workspace; ${_S260_R:-none}; rc ${_A6_RC:-none})" \
+    test "$_S260_R" = ok
+_a6_done
+unset -f _s260_git _s260_repo _s260_pty _s260_refused _s260_mounted _s260_sep _s260_fake _s260_fkc _s260_pp _s260_ok _s260_gm _s260_gmf _s260_gd _s260_approve_in _s260_dup
+unset _S260_K _S260_MSG _S260_SRC _S260_PTY _S260_D _S260_C _S260_N _S260_T _S260_OK _S260_R _S260_G _S260_P
+echo ""
+
+# ============================================================
+section "§261: a git dir two sessions share (a superproject and its submodule checkout) keeps its commondir seed and macOS locks until the last of them ends; --unlock and --reset-sandbox leave what another running session holds (#596); a kept provisional snapshot is judged from its own path (#599)"
+# ============================================================
+# _s261_wrong_start PID: a start that is NOT that process's, in the format
+# this host reads (`p1` where /proc gives p<ticks>, `e1` where ps gives
+# e<epoch>): a record of it makes the live pid a reused one. A start in the
+# other format would be judged alive (cross-format, fail safe), so a fixture
+# that wrote `p1` on macOS proved nothing.
+eval "$(sed -n '/^_sandy_pid_start() {/,/^}$/p' "$SANDY_SCRIPT")"
+_s261_wrong_start() {   # $1 = pid
+    local _ws_s=""
+    _sandy_pid_start "$1" _ws_s || true
+    case "$_ws_s" in p*) echo p1 ;; e*) echo e1 ;; *) echo "UNREADABLE" ;; esac
+}
+_fx_a6; _fx_s248
+# WHY (#596). A superproject session and a session of one of its submodule
+# checkouts both seed and lock .git/modules/<sub>. The first to end removed
+# the seed the other's container had mounted :ro (on Linux a host rm of a
+# file that is a mount point in another mount namespace detaches the mount)
+# and, on macOS, cleared the locks the other had recorded as `preset`. Now
+# every git dir a session seeds or locks is registered in a hold
+# ($SANDY_HOME/gitdir-holds/<key>/holder.<container>), the seeds and flags
+# set there are listed in the hold, and only the last holder releases them.
+# Another holder is alive while its launcher pid runs or its container is not
+# known gone (Docker unreachable counts as there).
+#
+# The stub in front of the §248 ones answers `docker inspect -f {{.Id}} NAME`
+# per container: present for a NAME listed in $S261_PRESENT, unreachable for
+# one in $S261_UNKNOWN, gone otherwise. A session whose container stays
+# present at its end keeps its hold, as a running one does; its launcher pid
+# is gone, so only the container keeps it alive.
+_S261_B="$_A6_DIR/s261bin"; mkdir -p "$_S261_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "inspect -f {{.Id}} "*)\n'
+  printf '    for n do :; done\n'   # the last argument ("${*##* }" strips each word under bash, as macOS /bin/sh is)
+  printf '    if [ -n "${S261_UNKNOWN:-}" ] && grep -qxF "$n" "$S261_UNKNOWN" 2>/dev/null; then echo "failed to connect to the docker API at unix:///var/run/docker.sock: connect: no such file or directory" >&2; exit 1; fi\n'
+  printf '    if [ -n "${S261_PRESENT:-}" ] && grep -qxF "$n" "$S261_PRESENT" 2>/dev/null; then echo deadbeef; fi\n'
+  printf '    exit 0 ;;\nesac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S261_B/docker"
+chmod +x "$_S261_B/docker"
+_S261_PATH="$_S261_B:$_S248_PATH"
+_s261_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
+# CASE/ws a superproject (.git, .gitmodules declaring sub, .git/modules/sub);
+# CASE/ws/sub its submodule checkout (.git FILE naming that gitdir).
+_s261_fix() {   # $1 = CASE
+    local w="$_A6_DIR/$1/ws"
+    _s261_gd "$w/.git"; _s261_gd "$w/.git/modules/sub"
+    printf '[submodule "sub"]\n\tpath = sub\n\turl = ./sub\n' > "$w/.gitmodules"
+    mkdir -p "$w/sub"; printf 'gitdir: ../.git/modules/sub\n' > "$w/sub/.git"
+    : > "$_A6_DIR/$1/present"; : > "$_A6_DIR/$1/unknown"
+}
+_s261_ctr() {   # $1 = workspace -> its container name, as sandy names it
+    local h b
+    h="$(printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; })"; h="${h%% *}"
+    b="$(basename "$1" | tr -cd 'a-zA-Z0-9._-')"
+    printf 'sandy-%s-%s\n' "${b:-project}" "${h:0:8}"
+}
+_s261_run() {   # $1 = CASE  $2 = workspace  [VAR=value ...]
+    local c="$1" w="$2"; shift 2
+    _a6_launch "$c" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin \
+        S261_PRESENT="$_A6_DIR/$c/present" S261_UNKNOWN="$_A6_DIR/$c/unknown" PATH="$_S261_PATH" "$@" -- --workspace "$w" -p fixture
+}
+_s261_holds() { ls "$_A6_DIR/$1/sh/gitdir-holds" 2>/dev/null | wc -l | tr -d ' '; }
+# _s261_both CASE: the superproject session starts first (it seeds the
+# submodule gitdir's commondir and locks its config), then the submodule
+# session starts beside it (it finds both already set), and both run on (their
+# containers present). Then the superproject's container is gone, so the
+# superproject session has ended; its end is made by its next launch here
+# (the launch-start release of what it left, then that session's own end).
+_s261_both() {   # $1 = CASE
+    local w="$_A6_DIR/$1/ws"
+    _s261_fix "$1"
+    _s261_ctr "$w" > "$_A6_DIR/$1/present"
+    _s261_run "$1" "$w"
+    _s261_ctr "$w/sub" >> "$_A6_DIR/$1/present"
+    _s261_run "$1" "$w/sub"
+    _s261_ctr "$w/sub" > "$_A6_DIR/$1/present"
+}
+# (a) the superproject session ends while the submodule session runs on: the
+# shared submodule gitdir keeps its seed and lock; the superproject's own .git
+# is released.
+_S261_C=s261-share; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_S261_R="$( { [ -f "$_S261_G/commondir" ] && grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "fixture: the superproject session did not seed and lock the submodule gitdir"; } 2>&1)" || true
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ "$(cat "$_S261_G/commondir" 2>/dev/null)" = . ] || echo "the submodule gitdir's seed was removed under the session still using it"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "its config was unlocked under the session still using it"
+    grep -qF "Left the commondir seed and file locks of $_S261_G (held by $(_s261_ctr "$_S261_W/sub"))" "$_A6_DIR/$_S261_C/out" || echo "the superproject session does not say it left them"
+    [ ! -e "$_S261_W/.git/commondir" ] || echo "the superproject's own .git seed was kept"
+    if grep -qxF "$_S261_W/.git/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the superproject's own .git/config stayed locked"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(a)" "$_S261_C"
+check "§261(a) the superproject session, which seeded and locked the submodule gitdir, ends while its submodule checkout's session runs on: that gitdir keeps its seeded commondir and its macOS lock, and says so; the superproject's own .git is released (on 2.11.1 both went; mutation: the hold release ignoring other holders; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (b) then the submodule session ends (its container gone; its end is made by
+# its next launch): released, by the last holder, though another set them.
+: > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_S261_W/sub"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S261_G/commondir" ] || echo "the seed outlived its last holder"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the lock outlived its last holder"; fi
+    [ "$(_s261_holds "$_S261_C")" = 0 ] || echo "holds left: $(ls "$_A6_DIR/$_S261_C/sh/gitdir-holds" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(b)" "$_S261_C"
+check "§261(b) ...and once the submodule session has ended too, the seed and lock the superproject session set are released by it, the last holder, and no hold is left (mutation: the last holder releasing only its own record; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (c) the other holder's container state is unknown (Docker unreachable for
+# it): it counts as alive.
+_S261_C=s261-unk; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+: > "$_A6_DIR/$_S261_C/present"; _s261_ctr "$_S261_W/sub" > "$_A6_DIR/$_S261_C/unknown"
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ "$(cat "$_S261_G/commondir" 2>/dev/null)" = . ] || echo "the seed was removed while the other holder's container state is unknown"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "unlocked while the other holder's container state is unknown"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(c)" "$_S261_C"
+check "§261(c) a holder whose container cannot be judged (Docker unreachable) counts as alive: the shared gitdir keeps its seed and lock (mutation: unknown counted as gone; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (d) a stale holder: its launcher is gone and so is its container: pruned,
+# and the session ending releases as the last holder.
+_S261_C=s261-stale; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+: > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S261_G/commondir" ] || echo "the seed was kept for a holder that is gone"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the lock was kept for a holder that is gone"; fi
+    [ ! -e "$_A6_DIR/$_S261_C/sh/gitdir-holds/$(ls "$_A6_DIR/$_S261_C/sh/gitdir-holds" 2>/dev/null | head -n 1)/holder.$(_s261_ctr "$_S261_W/sub")" ] || echo "the stale holder entry was not pruned"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(d)" "$_S261_C"
+check "§261(d) a stale holder (its launcher and its container both gone) is pruned, and the session ending releases the shared gitdir's seed and lock as its last holder (mutation: no pruning; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (e) --unlock of the superproject refuses while the submodule session still
+# holds the shared gitdir, naming it; once that one is gone it unlocks.
+_S261_C=s261-unlock; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --unlock --workspace "$_S261_W"
+_S261_R="$( { [ "$_A6_RC" = 1 ] || echo "--unlock rc $_A6_RC, want 1"
+    grep -qF "a git dir of this workspace is also used by another running session" "$_A6_DIR/$_S261_C/out" || echo "no refusal"
+    grep -qF "$_S261_G (container $(_s261_ctr "$_S261_W/sub")" "$_A6_DIR/$_S261_C/out" || echo "the holder is not named"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "unlocked anyway"; } 2>&1)" || true
+: > "$_A6_DIR/$_S261_C/present"
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --unlock --workspace "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "--unlock rc $_A6_RC once the other session is gone"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the shared gitdir stayed locked"; fi
+    if grep -qxF "$_S261_W/.git/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the superproject's own .git/config stayed locked"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(e)" "$_S261_C"
+check "§261(e) --unlock refuses while another running session holds a git dir of the workspace, naming the dir and the session, and unlocks it once that session is gone (mutation: --unlock ignoring other holders; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (f) --reset-sandbox (which asks no Docker) of the superproject names the
+# shared gitdir it leaves, releases nothing through the holds, and leaves its
+# entries there; what sandy set in its git dirs is still released by the
+# last holder (here the superproject's next session, once the submodule
+# session is gone).
+_S261_C=s261-reset; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --reset-sandbox --workspace "$_S261_W" --keep-history --yes
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "--reset-sandbox rc $_A6_RC"
+    grep -qF "Shares git dirs with another session" "$_A6_DIR/$_S261_C/out" || echo "the plan does not say so"
+    grep -qF "  $_S261_G (container $(_s261_ctr "$_S261_W/sub")" "$_A6_DIR/$_S261_C/out" || echo "the plan does not name the dir and its holder"
+    [ "$(cat "$_S261_G/commondir" 2>/dev/null)" = . ] || echo "the shared seed was removed"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "the shared lock was cleared"; } 2>&1)" || true
+: > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "launch after the reset rc $_A6_RC"
+    [ ! -e "$_S261_G/commondir" ] || echo "the shared seed was never released after the reset"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the shared lock was never released after the reset"; fi
+    if grep -qxF "$_S261_W/.git/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the superproject's own .git/config lock was stranded by the reset"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(f)" "$_S261_C"
+check "§261(f) --reset-sandbox of the superproject names the shared gitdir and its other holder, keeps that dir's seed and lock, and strands nothing: the next session to end releases what sandy set in its git dirs, its own .git included (mutation: the hold lists not consulted by the last holder; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (i) the registry is never written through a link: a link planted at
+# $SANDY_HOME/gitdir-holds is replaced by a directory of sandy's own, and
+# what it pointed at is left untouched.
+_S261_C=s261-link; _s261_fix "$_S261_C"; mkdir -p "$_A6_DIR/$_S261_C/sh" "$_A6_DIR/$_S261_C-elsewhere"
+ln -s "$_A6_DIR/$_S261_C-elsewhere" "$_A6_DIR/$_S261_C/sh/gitdir-holds"
+_s261_ctr "$_A6_DIR/$_S261_C/ws" > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_A6_DIR/$_S261_C/ws"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ -z "$(ls -A "$_A6_DIR/$_S261_C-elsewhere")" ] || echo "written through the link: $(ls -A "$_A6_DIR/$_S261_C-elsewhere" | tr '\n' ' ')"
+    [ -d "$_A6_DIR/$_S261_C/sh/gitdir-holds" ] && [ ! -L "$_A6_DIR/$_S261_C/sh/gitdir-holds" ] || echo "the registry is not a directory of its own"
+    [ "$(_s261_holds "$_S261_C")" != 0 ] || echo "no hold recorded (the session's container is still present)"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(i)" "$_S261_C"
+check "§261(i) a link planted at \$SANDY_HOME/gitdir-holds is replaced by sandy's own directory, never written through (mutation: the registry created with mkdir -p; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# --- The registry under contention (security review of #596) ---------------
+# The registry functions extracted from sandy, run in processes of their own
+# (each with its own $$, as two sandy sessions have).
+_S261_U="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_hex _sandy_unhex _sandy_awk_f1 _sandy_file_inode _sandy_hold_mkdir _sandy_hold_key _sandy_hold_lock \
+          _sandy_hold_take_stale _sandy_pid_start _sandy_self_start _sandy_pid_alive _sandy_hold_read_owner _sandy_hold_unlock _sandy_hold_add _sandy_hold_holder_alive _sandy_hold_list \
+          _sandy_hold_release _sandy_hold_skipset _sandy_hold_lists _sandy_hold_sync _sandy_commondir_record \
+          _sandy_commondir_unseed _sandy_commondir_is_ours _sandy_path_symlink_component _sandy_uchg_write_record; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S261_U/fns.sh"
+done
+unset _f
+printf '%s\n' 'sha256() { shasum -a 256 2>/dev/null || sha256sum; }' 'warn() { printf "WARN %s\n" "$*"; }' 'info() { :; }' >> "$_S261_U/fns.sh"
+# A lock or a holder entry counts as a session's while its pid runs and has
+# the start recorded beside it (_sandy_pid_alive), whatever it is named.
+# (j) the reviewer's e10 interleaving, made deterministic: holder C crashed
+# (its pid gone), A is ending as the last holder and asks Docker about C's
+# container, which takes 9 s (well past the old 5 s wait); B registers
+# meanwhile. B must wait for A's mutex, not register without it: then A's
+# removal of the hold cannot take B's entry along, and B registers in a hold
+# that exists.
+_S261_J="$_S261_U/j"; mkdir -p "$_S261_J/sh" "$_S261_J/g/.git" "$_S261_J/sbA" "$_S261_J/sbB" "$_S261_J/sbC"
+cat > "$_S261_J/sandy" <<'S261J'
+. "$1/fns.sh"; J="$2"; who="$3"
+SANDY_HOME="$J/sh"; SANDBOX_DIR="$J/sb$who"; CONTAINER_NAME="sandy-$who"; WORK_DIR="$J/w$who"
+_sandy_container_gone() { if [ "$1" = sandy-C ]; then sleep 9; fi; return 0; }
+_sandy_uchg_unlock() { echo "$who released the hold's locks" >> "$J/log"; }
+_sandy_commondir_unseed() { echo "$who released the hold's seeds" >> "$J/log"; rm -f "$1/.commondir-seeded"; }
+case "$4" in
+    add) _sandy_hold_add "$J/g/.git" ;;
+    release) _sandy_hold_release "$SANDBOX_DIR" "$WORK_DIR" "$CONTAINER_NAME" ;;
+esac
+S261J
+bash "$_S261_J/sandy" "$_S261_U" "$_S261_J" C add </dev/null >/dev/null 2>&1 || true
+bash "$_S261_J/sandy" "$_S261_U" "$_S261_J" A add </dev/null >/dev/null 2>&1 || true
+_S261_K="$(ls "$_S261_J/sh/gitdir-holds" 2>/dev/null | head -n 1)"; _S261_H="$_S261_J/sh/gitdir-holds/$_S261_K"
+printf 'seeded\tx\t1\n' > "$_S261_H/.commondir-seeded" 2>/dev/null || true
+bash "$_S261_J/sandy" "$_S261_U" "$_S261_J" A release </dev/null >/dev/null 2>&1 &
+_S261_PA=$!
+sleep 0.5
+bash "$_S261_J/sandy" "$_S261_U" "$_S261_J" B add </dev/null >/dev/null 2>&1 || true
+wait "$_S261_PA" 2>/dev/null || true
+_S261_R="$( { [ -n "$_S261_K" ] && [ -f "$_S261_J/sbA/.gitdir-holds" ] || echo "fixture: A did not register"
+    grep -qF "A released the hold's seeds" "$_S261_J/log" 2>/dev/null || echo "A did not release as the last holder (the race did not happen)"
+    _S261_KB="$(cut -f1 "$_S261_J/sbB/.gitdir-holds" 2>/dev/null | head -n 1)"
+    [ -n "$_S261_KB" ] || echo "B did not register at all"
+    [ -f "$_S261_J/sh/gitdir-holds/$_S261_KB/holder.sandy-B" ] || echo "B's .gitdir-holds names a hold without its entry: [$(ls "$_S261_J/sh/gitdir-holds/$_S261_KB" 2>/dev/null | tr '\n' ' ')]"; } 2>&1)" || true
+check "§261(j) a session registering while the last holder releases the hold (the release slowed to 9 s by a Docker question) waits for the mutex, and ends up registered in a hold that exists (on 646025d it registered without the lock and the release removed its entry; mutations: registering without the lock after a timeout; rm -rf of the hold; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# A stand-in for a running sandy that holds a lock and never lets go (a
+# stopped or hung session). Its locks record no start, so a live pid counts.
+printf 'sleep 300\n' > "$_S261_U/sandy"
+# (k) the three-way takeover of e14, forced: a stale lock (dead pid); A takes
+# it over and holds the lock; B, which saw the same stale lock, now runs its
+# takeover; C tries to create a lock in the gap. B reads the lock again under
+# the takeover guard, finds A's live lock and leaves it; C cannot create one.
+_S261_KD="$_S261_U/k"; mkdir -p "$_S261_KD"
+bash "$_S261_U/sandy" </dev/null >/dev/null 2>&1 &
+_S261_PL=$!
+_S261_R="$(bash -c '. "$1/fns.sh"; d="$2"
+    printf "%s\n" 2147480001 > "$d/lock"
+    _sandy_hold_take_stale "$d"; [ ! -e "$d/lock" ] || echo "A: the stale lock was not taken over"
+    printf "%s\n" "$3" > "$d/lock"                      # A now holds it (a running sandy)
+    _sandy_hold_take_stale "$d"                          # B, late, on the lock it saw stale
+    [ "$(cat "$d/lock" 2>/dev/null)" = "$3" ] || echo "B took over A'"'"'s live lock: [$(cat "$d/lock" 2>/dev/null)]"
+    if ( set -C; printf "C\n" > "$d/lock" ) 2>/dev/null; then echo "C created a second lock while A held one"; fi
+    [ ! -e "$d/takeover.d" ] || echo "the takeover guard was left"
+    mkdir "$d/takeover.d"; printf "%s\n" 2147480001 > "$d/takeover.d/pid"; printf "%s\n" 2147480001 > "$d/lock"
+    _sandy_hold_take_stale "$d"; [ ! -e "$d/takeover.d" ] || echo "a guard whose maker is gone was not removed"
+    _sandy_hold_take_stale "$d"; [ ! -e "$d/lock" ] || echo "the stale lock behind a dead guard was not taken over"' _ "$_S261_U" "$_S261_KD" "$_S261_PL" </dev/null 2>&1)" || true
+check "§261(k) the three-way takeover (e14): a session late with its takeover of a stale lock leaves the live lock another session took meanwhile, a third cannot create one beside it, and a guard whose maker died is cleared (mutation: the takeover without the guard re-reading the lock; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (q) a reused pid: the lock's pid is alive, but its recorded start is not
+# that process's (here a wrong one written for a live sleep), so it is
+# another process now: stale, taken at once.
+_S261_Q="$_S261_U/q"; mkdir -p "$_S261_Q"
+sleep 300 </dev/null >/dev/null 2>&1 &
+_S261_PQ=$!
+printf '%s\n%s\n' "$_S261_PQ" "$(_s261_wrong_start "$_S261_PQ")" > "$_S261_Q/lock"
+_S261_R="$(bash -c '. "$1/fns.sh"; t0=$SECONDS; _sandy_hold_lock "$2"; rc=$?
+    [ "$rc" = 0 ] || echo "not taken (rc $rc)"; [ $((SECONDS - t0)) -le 3 ] || echo "waited $((SECONDS - t0)) s for a reused pid"
+    [ "$(head -n 1 "$2/lock")" = "$$" ] || echo "the lock is not this session'"'"'s"
+    [ -n "$(sed -n 2p "$2/lock")" ] || echo "the lock records no start"' _ "$_S261_U" "$_S261_Q" </dev/null 2>&1)" || true
+kill "$_S261_PQ" 2>/dev/null || true; wait "$_S261_PQ" 2>/dev/null || true
+check "§261(q) a lock whose pid is alive but whose recorded start is another process's (a reused pid) is taken over at once, not waited for, and the new lock records this session's start (mutation: the start not compared; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (u) liveness is the pid and its start, never the command line: a session
+# run as a link named sb, a copy named sandy-dev, `bash -x -e /path/sandy`, a
+# path with two spaces, through PATH, and the --start re-exec (nohup env ...)
+# are each alive with the start recorded for them, on the /proc path and on
+# the ps path macOS takes; each with a wrong start is not; a pid that is gone
+# is not; a record with no start counts as alive while the pid runs.
+_S261_V="$_S261_U/v"; mkdir -p "$_S261_V/bin" "$_S261_V/a b  c"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$_S261_V/bin/sandy"; chmod +x "$_S261_V/bin/sandy"
+ln -s sandy "$_S261_V/bin/sb"; cp "$_S261_V/bin/sandy" "$_S261_V/bin/sandy-dev"; cp "$_S261_V/bin/sandy" "$_S261_V/a b  c/sandy"
+_s261_v() {   # $1 = label, then the command -> one line: label ok|<what failed>
+    local l="$1" p r=""; shift
+    "$@" </dev/null >/dev/null 2>&1 &
+    p=$!; sleep 0.3
+    r="$(bash -c '. "$1/fns.sh"; p=$2; o=""
+        for how in proc ps; do
+            if [ "$how" = ps ]; then _SANDY_PROC_FORCE_PS=1; fi
+            _sandy_pid_start "$p" st || { o="$o $how: no start read;"; continue; }
+            _sandy_pid_alive "$p" "$st" || o="$o $how: judged stale with its own start ($st);"
+            case "$st" in p*) w=p1 ;; *) w=e1 ;; esac
+            ! _sandy_pid_alive "$p" "$w" || o="$o $how: alive with a wrong start;"
+        done
+        unset _SANDY_PROC_FORCE_PS
+        _sandy_pid_alive "$p" "" || o="$o no start recorded: judged stale;"
+        printf "%s" "${o:-ok}"' _ "$_S261_U" "$p" 2>&1)" || r="probe failed"
+    kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true
+    printf '%s: %s\n' "$l" "$r"
+}
+_S261_R="$( {
+    _s261_v "via PATH" env PATH="$_S261_V/bin:$PATH" sandy
+    _s261_v "a link named sb" env PATH="$_S261_V/bin:$PATH" sb
+    _s261_v "a copy named sandy-dev" bash "$_S261_V/bin/sandy-dev"
+    _s261_v "bash -x -e" bash -x -e "$_S261_V/bin/sandy"
+    _s261_v "two spaces in the path" bash "$_S261_V/a b  c/sandy"
+    _s261_v "the --start re-exec" nohup env SANDY_DAEMON_SUPERVISOR=1 "$_S261_V/bin/sandy"
+    sleep 30 </dev/null >/dev/null 2>&1 & _S261_PG=$!; kill "$_S261_PG" 2>/dev/null; wait "$_S261_PG" 2>/dev/null
+    bash -c '. "$1/fns.sh"; ! _sandy_pid_alive "$2" "" || echo "gone: judged alive"' _ "$_S261_U" "$_S261_PG"; } 2>&1 | grep -v ': ok$' || true)"
+check "§261(u) a session is alive by its pid and recorded start whatever runs it (a link named sb, a copy sandy-dev, bash -x -e, two spaces in the path, PATH, the --start re-exec), on the /proc and the ps paths; a wrong start or a gone pid is not; no start recorded counts as alive (mutations: the start not compared; a name check; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (w) e17 part 3: a lock held by a live session run through a link named sb,
+# its start recorded, is waited for and never taken over (the wait runs out:
+# rc 2, the lock unchanged).
+_S261_W2="$_S261_U/w"; mkdir -p "$_S261_W2"
+env PATH="$_S261_V/bin:$PATH" sb </dev/null >/dev/null 2>&1 &
+_S261_PW=$!; sleep 0.3
+_S261_R="$(bash -c '. "$1/fns.sh"; d="$2"; p="$3"; _SANDY_HOLD_WAIT_S=1
+    _sandy_pid_start "$p" st; printf "%s\n%s\n" "$p" "$st" > "$d/lock"; cp "$d/lock" "$d/lock.was"
+    _sandy_hold_lock "$d"; rc=$?
+    [ "$rc" = 2 ] || echo "rc $rc (want 2: waited out)"
+    cmp -s "$d/lock" "$d/lock.was" || echo "the live session'"'"'s lock was taken over: [$(tr "\n" " " < "$d/lock")]"' _ "$_S261_U" "$_S261_W2" "$_S261_PW" </dev/null 2>&1)" || true
+kill "$_S261_PW" 2>/dev/null || true; wait "$_S261_PW" 2>/dev/null || true
+check "§261(w) a lock held by a live session run through a link named sb (start recorded) is waited for, bounded, and never taken over (on 67c48dd it was judged stale and taken mid-release; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (y) a holder entry is judged the same way: it records its launcher's
+# start, and an entry whose pid is alive with another start (a reused pid) is
+# dead once its container is gone; with its own start it is alive.
+_S261_Y="$_S261_U/y"; mkdir -p "$_S261_Y/sh" "$_S261_Y/g/.git" "$_S261_Y/sbA"
+sleep 300 </dev/null >/dev/null 2>&1 &
+_S261_PY=$!
+_S261_R="$(bash -c '. "$1/fns.sh"; Y="$2"; p="$3"; w="$4"
+    _sandy_container_gone() { return 0; }
+    SANDY_HOME="$Y/sh"; SANDBOX_DIR="$Y/sbA"; CONTAINER_NAME=sandy-A; WORK_DIR="$Y/wa"
+    _sandy_hold_add "$Y/g/.git"
+    e="$(ls "$Y"/sh/gitdir-holds/*/holder.sandy-A 2>/dev/null | head -n 1)"
+    [ -n "$e" ] || { echo "no holder entry written"; exit 0; }
+    grep -q "^start	[pe][0-9]" "$e" || echo "the holder entry records no start: [$(tr "\n" " " < "$e")]"
+    _sandy_pid_start "$p" st
+    printf "pid\t%s\nstart\t%s\nws\t00\n" "$p" "$st" > "$Y/own"; printf "pid\t%s\nstart\t%s\nws\t00\n" "$p" "$w" > "$Y/reused"
+    _sandy_hold_holder_alive "$Y/own" sandy-X || echo "a live holder with its own start judged dead"
+    ! _sandy_hold_holder_alive "$Y/reused" sandy-X || echo "a reused pid (another start, $w) judged alive"' _ "$_S261_U" "$_S261_Y" "$_S261_PY" "$(_s261_wrong_start "$_S261_PY")" </dev/null 2>&1)" || true
+kill "$_S261_PY" 2>/dev/null || true; wait "$_S261_PY" 2>/dev/null || true
+check "§261(y) a holder entry records its launcher's start; one whose pid is alive with another start is dead once its container is gone, one with its own start is alive (mutations: no start written; the start not read; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (z) the ps path (macOS) after an exec in place: a process that waits 6 s
+# and then execs a script (as `sandy --login` re-execs itself, or a wrapper
+# does setup and then execs sandy) records its own start the way another
+# session reads it (ps etime counts from the process's creation, which the
+# exec keeps), so it is alive; the time the script itself started is 6 s
+# later and would make it look dead.
+_S261_Z="$_S261_U/z"; mkdir -p "$_S261_Z"
+printf '%s\n' '_SANDY_PROC_T0="${EPOCHSECONDS:-}"' ". $(printf '%q' "$_S261_U/fns.sh")" '_SANDY_PROC_FORCE_PS=1' \
+    '_sandy_self_start st; printf "%s\n" "$st" > "$1/start.t"; mv "$1/start.t" "$1/start"; sleep 30' > "$_S261_Z/rec"
+bash -c 'sleep 6; exec bash "$1/rec" "$1"' _ "$_S261_Z" </dev/null >/dev/null 2>&1 &
+_S261_PZ=$!
+_S261_N=0; while [ ! -s "$_S261_Z/start" ] && [ "$_S261_N" -lt 150 ]; do sleep 0.1; _S261_N=$((_S261_N + 1)); done
+_S261_R="$(bash -c '. "$1/fns.sh"; st="$(cat "$2/start" 2>/dev/null)"
+    [ -n "$st" ] || { echo "no start recorded"; exit 0; }
+    case "$st" in e*) ;; *) echo "not a ps-path start: $st" ;; esac
+    _SANDY_PROC_FORCE_PS=1 _sandy_pid_alive "$3" "$st" || echo "judged dead with the start it recorded for itself ($st)"' _ "$_S261_U" "$_S261_Z" "$_S261_PZ" </dev/null 2>&1)" || true
+kill "$_S261_PZ" 2>/dev/null || true; wait "$_S261_PZ" 2>/dev/null || true
+check "§261(z) on the ps path, a session that execs in place 6 s after its process was created records its own start as others read it, and is judged alive (mutation: its start taken from the time the script started; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (x) e17 part 4: a takeover guard whose maker died before writing its pid,
+# beside a lock whose pid is gone, is cleared after about a second and the lock
+# taken; and a lock that cannot be removed (the hold dir read-only) ends in
+# the bound (rc 2), never in a busy loop. Each run is watched: killed and
+# failed after 15 s.
+_s261_bounded() {   # CMD... -> its output, or "HUNG" when it ran past 15 s
+    local o="$_S261_U/bounded.out" p n=0
+    "$@" > "$o" 2>&1 </dev/null &
+    p=$!
+    while kill -0 "$p" 2>/dev/null; do
+        n=$((n + 1)); if [ "$n" -gt 150 ]; then kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; echo HUNG; return 0; fi
+        sleep 0.1
+    done
+    wait "$p" 2>/dev/null || true
+    cat "$o"
+}
+_S261_X="$_S261_U/x"; mkdir -p "$_S261_X/g1" "$_S261_X/g2"
+mkdir "$_S261_X/g1/takeover.d"; printf '%s\n' 2147480003 > "$_S261_X/g1/lock"
+printf '%s\n' 2147480003 > "$_S261_X/g2/lock"; chmod 500 "$_S261_X/g2"
+_S261_R="$(_s261_bounded bash -c '. "$1/fns.sh"; _SANDY_HOLD_WAIT_S=3
+    t0=$SECONDS; _sandy_hold_lock "$2/g1"; rc=$?; t=$((SECONDS - t0))
+    [ "$rc" = 0 ] || echo "g1: rc $rc (want the lock taken)"; [ "$t" -le 4 ] || echo "g1: took $t s"
+    [ ! -e "$2/g1/takeover.d" ] || echo "g1: the pid-less guard was left"
+    t0=$SECONDS; _sandy_hold_lock "$2/g2"; rc=$?; t=$((SECONDS - t0))
+    [ "$rc" = 2 ] || echo "g2: rc $rc (want 2: the bound)"; [ "$t" -le 5 ] || echo "g2: took $t s"' _ "$_S261_U" "$_S261_X")" || true
+chmod 700 "$_S261_X/g2" 2>/dev/null || true
+check "§261(x) a takeover guard left with no pid is cleared within about a second and the stale lock taken; a stale lock that cannot be removed ends in the bound (rc 2), not a busy loop (on 67c48dd: an endless loop; mutation: the takeover path skipping the bound and the sleep; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (r) a lock a running sandy holds and never releases (stopped, hung): the
+# wait is bounded, and both sides fail safe. A release keeps everything and
+# says how to clear the lock; a registration refuses the launch, naming the
+# file, and writes nothing.
+_S261_RD="$_S261_U/r"; mkdir -p "$_S261_RD/sh" "$_S261_RD/g/.git" "$_S261_RD/sbA" "$_S261_RD/sbB"
+cat > "$_S261_RD/sandy" <<'S261R'
+. "$1/fns.sh"; D="$2"; who="$3"
+SANDY_HOME="$D/sh"; SANDBOX_DIR="$D/sb$who"; CONTAINER_NAME="sandy-$who"; WORK_DIR="$D/w$who"; _SANDY_HOLD_WAIT_S=2
+error_lit() { printf 'ERROR %s\n' "$*"; }; _sandy_daemon_fatal() { : > "$D/fatal"; }
+_sandy_container_gone() { return 0; }
+_sandy_uchg_unlock() { echo "released locks" >> "$D/log"; }; _sandy_commondir_unseed() { echo "released seeds" >> "$D/log"; }
+case "$4" in
+    add) _sandy_hold_add "$D/g/.git"; echo "add returned" ;;
+    release) _sandy_hold_release "$SANDBOX_DIR" "$WORK_DIR" "$CONTAINER_NAME"; printf 'KEPT %s\n' "$_SANDY_HOLD_KEPT" ;;
+esac
+S261R
+bash "$_S261_RD/sandy" "$_S261_U" "$_S261_RD" A add </dev/null >/dev/null 2>&1 || true
+_S261_K="$(ls "$_S261_RD/sh/gitdir-holds" 2>/dev/null | head -n 1)"; _S261_H="$_S261_RD/sh/gitdir-holds/$_S261_K"
+bash "$_S261_U/sandy" </dev/null >/dev/null 2>&1 &
+_S261_PL2=$!
+printf '%s\n' "$_S261_PL2" > "$_S261_H/lock" 2>/dev/null || true
+_S261_T0=$SECONDS
+_S261_O1="$(bash "$_S261_RD/sandy" "$_S261_U" "$_S261_RD" A release </dev/null 2>&1)" || true
+_S261_RC=0; _S261_O2="$(bash "$_S261_RD/sandy" "$_S261_U" "$_S261_RD" B add </dev/null 2>&1)" || _S261_RC=$?
+_S261_DT=$((SECONDS - _S261_T0))
+kill "$_S261_PL2" 2>/dev/null || true; wait "$_S261_PL2" 2>/dev/null || true
+_S261_R="$( { [ -n "$_S261_K" ] || echo "fixture: A did not register"
+    [ "$_S261_DT" -le 15 ] || echo "the two waits took $_S261_DT s (unbounded?)"
+    printf '%s\n' "$_S261_O1" | grep -qF "its hold is busy: $_S261_H/lock; if no sandy is running for it, remove that file" || echo "the release does not say the hold is busy and how to clear it: [$(printf '%s' "$_S261_O1" | tr '\n' ' ')]"
+    if grep -q released "$_S261_RD/log" 2>/dev/null; then echo "the release released something without the lock"; fi
+    [ -f "$_S261_H/holder.sandy-A" ] || echo "the release dropped its entry without the lock"
+    [ "$_S261_RC" != 0 ] || echo "the registration did not refuse (rc 0)"
+    printf '%s\n' "$_S261_O2" | grep -qF "rm $_S261_H/lock" || echo "the refusal does not name the lock file to remove: [$(printf '%s' "$_S261_O2" | tr '\n' ' ')]"
+    if printf '%s\n' "$_S261_O2" | grep -qF "add returned"; then echo "the launch went on"; fi
+    [ -e "$_S261_RD/fatal" ] || echo "no fatal marker for a daemon"
+    [ ! -e "$_S261_H/holder.sandy-B" ] && [ ! -e "$_S261_RD/sbB/.gitdir-holds" ] || echo "the refused session registered anyway"; } 2>&1)" || true
+check "§261(r) a lock a running sandy keeps (stopped, hung) is waited for a bounded time: a release then keeps the seed, locks and entry and says how to clear the lock; a registration refuses the launch (fatal marker for a daemon), naming the lock file, and registers nothing (mutations: an unbounded wait; registering as not a holder on the timeout; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (l) a session's own unseed skips a line in a held dir only when the hold
+# lists it, and releases any other one itself.
+_S261_L="$_S261_U/l"; mkdir -p "$_S261_L/sh/gitdir-holds/xa" "$_S261_L/sh/gitdir-holds/xb" "$_S261_L/sb" "$_S261_L/ga" "$_S261_L/gb"
+printf '.\n' > "$_S261_L/ga/commondir"; printf '.\n' > "$_S261_L/gb/commondir"
+_S261_R="$(bash -c '. "$1/fns.sh"; L="$2"; SANDY_HOME="$L/sh"
+    ha="$(_sandy_hex "$L/ga/commondir")"; hb="$(_sandy_hex "$L/gb/commondir")"
+    ia="$(ls -di "$L/ga/commondir" | awk "{print \$1}")"; ib="$(ls -di "$L/gb/commondir" | awk "{print \$1}")"
+    printf "xa\t%s\nxb\t%s\n" "$(_sandy_hex "$L/ga")" "$(_sandy_hex "$L/gb")" > "$L/sb/.gitdir-holds"
+    printf "seeded\t%s\t%s\nseeded\t%s\t%s\n" "$ha" "$ia" "$hb" "$ib" > "$L/sb/.commondir-seeded"
+    printf "seeded\t%s\t%s\n" "$ha" "$ia" > "$L/sh/gitdir-holds/xa/.commondir-seeded"
+    : > "$L/sh/gitdir-holds/xb/.commondir-seeded"
+    _sandy_commondir_unseed "$L/sb"
+    [ -e "$L/ga/commondir" ] || echo "a seed the hold lists was released by the session"
+    [ ! -e "$L/gb/commondir" ] || echo "a seed in a held dir that the hold does not list was left (stranded)"' _ "$_S261_U" "$_S261_L" </dev/null 2>&1)" || true
+check "§261(l) a session's own unseed leaves a seed in a held dir to the hold only when the hold lists it, and removes one the hold does not list itself (mutation: skipping every line in a held dir; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (p) a flag is copied to the hold before it is set: a record line with
+# ctime `-` (written before chflags) reaches the hold.
+_S261_P="$_S261_U/p"; mkdir -p "$_S261_P/sh/gitdir-holds/xg" "$_S261_P/sb" "$_S261_P/g"; printf '[core]\n' > "$_S261_P/g/config"
+_S261_R="$(bash -c '. "$1/fns.sh"; P="$2"; SANDY_HOME="$P/sh"
+    h="$(_sandy_hex "$P/g/config")"; i="$(ls -di "$P/g/config" | awk "{print \$1}")"
+    printf "xg\t%s\n" "$(_sandy_hex "$P/g")" > "$P/sb/.gitdir-holds"
+    printf "locked\t%s\t%s\t-\n" "$h" "$i" > "$P/sb/.uchg-locked"
+    _sandy_hold_sync "$P/sb"
+    grep -qxF "$(printf "locked\t%s\t%s\t-" "$h" "$i")" "$P/sh/gitdir-holds/xg/.uchg-locked" 2>/dev/null || echo "a flag recorded before it was set (ctime -) did not reach the hold"
+    printf "locked\t%s\t%s\t1234\n" "$h" "$i" > "$P/sb/.uchg-locked"; _sandy_hold_sync "$P/sb"
+    [ "$(grep -c . "$P/sh/gitdir-holds/xg/.uchg-locked")" = 1 ] || echo "the same flag listed twice"
+    grep -qxF "$(printf "locked\t%s\t%s\t1234" "$h" "$i")" "$P/sh/gitdir-holds/xg/.uchg-locked" || echo "the ctime, known once the flag is set, did not replace the - line: [$(cat "$P/sh/gitdir-holds/xg/.uchg-locked")]"
+    [ ! -e "$P/sh/gitdir-holds/xg/lock" ] || echo "the lock was left"' _ "$_S261_U" "$_S261_P" </dev/null 2>&1)" || true
+check "§261(p) a flag's record line with ctime - (written before chflags runs) is copied to the hold, once, so a crash between the two strands nothing, and replaced by the ctime once it is known (mutations: sync skipping - lines; the - line never replaced; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+rm -rf "$_S261_U"
+# (p2) and in a launch it is in the hold before chflags sets it: the chflags
+# stub in front of §248's notes, for each flag it sets in the shared
+# submodule gitdir, whether the hold already lists that file.
+_S261_C=s261-pre; _s261_fix "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+mkdir -p "$_A6_DIR/$_S261_C/cfbin"
+{ printf '#!/bin/sh\n'
+  printf 'case "$3" in */.git/*) held=1 ;; *) held="" ;; esac\nif [ "$1" = -h ] && [ "$2" = uchg ] && [ -n "$held" ]; then\n'
+  printf '    h="$(printf "%%s" "$3" | od -An -v -tx1 | tr -d " \\n")"\n'
+  printf '    if grep -qF "$h" %q/sh/gitdir-holds/*/.uchg-locked 2>/dev/null; then echo "listed $3"; else echo "unlisted $3"; fi >> %q\n' "$_A6_DIR/$_S261_C" "$_A6_DIR/$_S261_C/cflog"
+  printf 'fi\nexec %q "$@"\n' "$_S248_B/chflags"; } > "$_A6_DIR/$_S261_C/cfbin/chflags"
+chmod +x "$_A6_DIR/$_S261_C/cfbin/chflags"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" \
+    S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_A6_DIR/$_S261_C/cfbin:$_S261_PATH"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    grep -qxF "listed $_S261_G/config" "$_A6_DIR/$_S261_C/cflog" 2>/dev/null || echo "the submodule gitdir's config was not in its hold when its flag was set: $(tr '\n' ' ' < "$_A6_DIR/$_S261_C/cflog" 2>/dev/null)"
+    if grep -q '^unlisted ' "$_A6_DIR/$_S261_C/cflog" 2>/dev/null; then echo "a flag in a held dir was set before the hold listed it: $(grep '^unlisted ' "$_A6_DIR/$_S261_C/cflog" | tr '\n' ' ')"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(p2)" "$_S261_C"
+check "§261(p2) in a launch every flag set in a held git dir is listed in that dir's hold before chflags sets it (mutation: the hold synced only after the flags; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (m) --unlock reaches a hold no sandbox lists any more: the superproject
+# session ended while the submodule session ran (its lines left to the hold,
+# its list gone); then the submodule session crashed. --unlock of the
+# superproject finds the hold for its .git/modules/sub in the registry,
+# prunes the crashed holder and releases.
+_S261_C=s261-orph; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_s261_run "$_S261_C" "$_S261_W"
+: > "$_A6_DIR/$_S261_C/present"
+_S261_R="$( { grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "fixture: the shared config is not locked"
+    [ ! -e "$(_a6_sandbox "$_S261_C")/.gitdir-holds" ] || echo "fixture: the superproject still lists holds"; } 2>&1)" || true
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --unlock --workspace "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "--unlock rc $_A6_RC"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the shared config stayed locked (--unlock found nothing)"; fi
+    [ ! -e "$_S261_G/commondir" ] || echo "the shared seed stayed"
+    [ "$(_s261_holds "$_S261_C")" = 0 ] || echo "holds left: $(ls "$_A6_DIR/$_S261_C/sh/gitdir-holds" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(m)" "$_S261_C"
+check "§261(m) --unlock of a workspace finds a hold for its git dirs that no sandbox lists any more (its session gave up its entry while another held it, and that one crashed), prunes the dead holder and releases the seed and lock (mutation: --unlock reading only its own list; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (n) #599: a claim whose judge died mid-judgement (<id>.judging.<dead pid>)
+# goes back to <id>.snap and is judged by the next launch.
+_S261_C=s261-claim; _S261_W="$_A6_DIR/$_S261_C/ws"; mkdir -p "$_S261_W/.git/objects" "$_S261_W/.git/refs"
+printf 'ref: refs/heads/main\n' > "$_S261_W/.git/HEAD"; printf '[core]\n' > "$_S261_W/.git/config"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+_S261_S="$(_a6_sandbox "$_S261_C")"; _S261_P="$(ls "$_S261_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.2147480002"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S261_R="$( { [ -n "$_S261_P" ] || echo "fixture: no kept snapshot"
+    grep -qF "An EARLIER session's end report" "$_A6_DIR/$_S261_C/out" || echo "the stranded claim was not judged"
+    [ -z "$(ls -A "$_S261_S/.protected-provisional" 2>/dev/null)" ] || echo "left: $(ls -A "$_S261_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(n)" "$_S261_C"
+check "§261(n) a provisional snapshot claimed by a judge that died mid-judgement is given back and judged by the next launch (mutation: claims left as they are; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (t) ...and so is one whose pid has been reused (the pid alive, the start
+# in the claim another process's).
+_S261_C=s261-claim2; _S261_W="$_A6_DIR/$_S261_C/ws"; mkdir -p "$_S261_W/.git/objects" "$_S261_W/.git/refs"
+printf 'ref: refs/heads/main\n' > "$_S261_W/.git/HEAD"; printf '[core]\n' > "$_S261_W/.git/config"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+_S261_S="$(_a6_sandbox "$_S261_C")"; _S261_P="$(ls "$_S261_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+sleep 300 </dev/null >/dev/null 2>&1 &
+_S261_PT=$!
+[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.$_S261_PT.$(_s261_wrong_start "$_S261_PT")"
+_a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+kill "$_S261_PT" 2>/dev/null || true; wait "$_S261_PT" 2>/dev/null || true
+_S261_R="$( { [ -n "$_S261_P" ] || echo "fixture: no kept snapshot"
+    grep -qF "An EARLIER session's end report" "$_A6_DIR/$_S261_C/out" || echo "the claim of a reused pid was not judged"
+    [ -z "$(ls -A "$_S261_S/.protected-provisional" 2>/dev/null)" ] || echo "left: $(ls -A "$_S261_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(t)" "$_S261_C"
+check "§261(t) ...and one whose pid now belongs to another process (alive, a different start) is given back and judged too (mutation: the start not compared; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+check "§261(o) a sandbox's .gitdir-holds is never copied by --rsync and is named as regenerable by --reset-sandbox (mutation: dropped from either list)" \
+    bash -c 'grep -A3 "^_SANDY_RSY_NEVER=(" "$1" | grep -qF ".gitdir-holds" && grep -F "_rs_regen() {" "$1" | grep -qF "|.gitdir-holds|"' _ "$SANDY_SCRIPT"
+# (g) #599: a kept provisional snapshot is judged from its own path. --stop's
+# direct teardown of a supervisor-less daemon judges the pairs a provisional
+# session kept, and takes no workspace lock, so a launch of the workspace can
+# run beside it. The interleaving is made deterministic by a git stub: at the
+# judgement's core.hooksPath read (the only git call --stop makes here) it
+# plays the launch, which (g1) writes its own snapshot at the live name, or
+# (g2) sweeps that name, as a launch's stale-snapshot sweep does. Before #599
+# the judgement moved the pair to the live name, so (g1) lost the launch's own
+# snapshot to the judgement's removal and (g2) lost the judged snapshot
+# mid-report (its content check found nothing).
+_s261_599() {   # $1 = CASE  $2 = write|sweep
+    local c="$1" w="$_A6_DIR/$1/ws" sb g
+    mkdir -p "$w/.git/objects" "$w/.git/refs"; printf 'ref: refs/heads/main\n' > "$w/.git/HEAD"; printf '[core]\n' > "$w/.git/config"
+    printf 'export S261=1\n' > "$w/.envrc"
+    _a6_launch "$c" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+    sb="$(_a6_sandbox "$c")"
+    printf 'changed\n' >> "$w/.envrc"; mkdir -p "$w/.vscode"; printf '{}\n' > "$w/.vscode/tasks.json"
+    g="$_A6_DIR/$c/gitbin"; mkdir -p "$g"
+    { printf '#!/bin/sh\n'
+      printf 'case "$*" in *core.hooksPath*) if [ ! -e %q ]; then : > %q\n' "$_A6_DIR/$c/played" "$_A6_DIR/$c/played"
+      if [ "$2" = write ]; then printf "        printf '#launch-own\\\\n' > %q\n" "$sb/.protected-existed-at-launch"
+      else printf '        rm -f %q\n' "$sb/.protected-existed-at-launch"; fi
+      printf '    fi ;;\nesac\nexec %q "$@"\n' "$(command -v git)"; } > "$g/git"
+    chmod +x "$g/git"; : > "$_A6_DIR/$c/mounts"
+    _a6_launch "$c" A6_OS=Darwin S248_DPID=2147480000 S248_SESS="$(basename "$sb")" S248_MOUNTS="$_A6_DIR/$c/mounts" \
+        S248_GONE="$_A6_DIR/$c/gone" PATH="$g:$_S261_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$w"
+}
+# A daemon container of the workspace with no live supervisor, as §248's
+# daemon stub plays it: the labels --stop reads, then gone once removed.
+_S261_DB="$_A6_DIR/s261dbin"; mkdir -p "$_S261_DB"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in\n'
+  printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
+  printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
+  printf '    *sandy.session*) if [ -n "${S248_GONE:-}" ] && [ -e "$S248_GONE" ]; then echo "Error: No such object" >&2; exit 1; fi; echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
+  printf '    *State.Running*) echo true; exit 0 ;;\n'
+  printf '    "rm -f c0ffee"*) if [ -n "${S248_GONE:-}" ]; then : > "$S248_GONE"; fi; exit 0 ;;\n'
+  printf '    exec*|stop*) exit 0 ;;\n'
+  printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S261_DB/docker"
+chmod +x "$_S261_DB/docker"
+if :; then
+    _s261_599 s261-599w write
+    _S261_S="$(_a6_sandbox s261-599w)"; _S261_W="$_A6_DIR/s261-599w/ws"
+    _S261_R="$( { [ -e "$_A6_DIR/s261-599w/played" ] || echo "the interleaving did not happen (no core.hooksPath read during the judgement; rc $_A6_RC)"
+        [ "$(cat "$_S261_S/.protected-existed-at-launch" 2>/dev/null)" = '#launch-own' ] || echo "the concurrent launch's own snapshot was lost: [$(cat "$_S261_S/.protected-existed-at-launch" 2>/dev/null | head -c 80)]"
+        grep -qF "$_S261_W/.vscode/" "$_S261_S/.session-end-report" 2>/dev/null || echo "the judgement does not name the .vscode/ written after the provisional report"
+        [ -z "$(ls -A "$_S261_S/.protected-provisional" 2>/dev/null)" ] || echo "left: $(ls -A "$_S261_S/.protected-provisional")"; } 2>&1)" || true
+    [ -z "$_S261_R" ] || _a6_diag "§261(g1)" s261-599w
+    check "§261(g1) --stop's judgement of a kept provisional snapshot, with a launch writing its own snapshot meanwhile: the launch's snapshot survives and the judgement still reports the earlier session (mutation: the pair moved to the live name and removed from there, as before #599; ${_S261_R:-ok})" \
+        test -z "$_S261_R"
+    _s261_599 s261-599s sweep
+    _S261_S="$(_a6_sandbox s261-599s)"; _S261_W="$_A6_DIR/s261-599s/ws"
+    _S261_R="$( { [ -e "$_A6_DIR/s261-599s/played" ] || echo "the interleaving did not happen (rc $_A6_RC)"
+        awk '/Protected files CHANGED during this session/ { on = 1 } on' "$_S261_S/.session-end-report" 2>/dev/null | grep -qF "$_S261_W/.envrc" || echo "the content check of the judged snapshot found nothing: it was swept mid-judgement"; } 2>&1)" || true
+    [ -z "$_S261_R" ] || _a6_diag "§261(g2)" s261-599s
+    check "§261(g2) ...and with a launch sweeping the live snapshot name meanwhile, the judgement still completes: its content check names the changed .envrc (mutation: judged from the live name; ${_S261_R:-ok})" \
+        test -z "$_S261_R"
+    # (h) --stop's own report of the live snapshot leaves it alone while a
+    # live launch holds the workspace lock: it is that launch's.
+    _S261_C=s261-599l; _S261_W="$_A6_DIR/$_S261_C/ws"; mkdir -p "$_S261_W"; _S261_S="$(_a6_sandbox "$_S261_C")"; mkdir -p "$_S261_S"
+    printf '%s\n' '#launch-own' '#gitdirs-recorded' > "$_S261_S/.protected-existed-at-launch"; : > "$_A6_DIR/$_S261_C/mounts"
+    sleep 60 </dev/null >/dev/null 2>&1 &
+    _S261_P=$!
+    mkdir -p "${_S261_S%/*}/.${_S261_S##*/}.lock"; printf '%s\n' "$_S261_P" > "${_S261_S%/*}/.${_S261_S##*/}.lock/pid"
+    _a6_launch "$_S261_C" S248_DPID=2147480000 S248_SESS="$(basename "$_S261_S")" S248_MOUNTS="$_A6_DIR/$_S261_C/mounts" \
+        S248_GONE="$_A6_DIR/$_S261_C/gone" PATH="$_S261_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S261_W"
+    kill "$_S261_P" 2>/dev/null || true; wait "$_S261_P" 2>/dev/null || true
+    _S261_R="$( { [ "$(head -n 1 "$_S261_S/.protected-existed-at-launch" 2>/dev/null)" = '#launch-own' ] || echo "the live snapshot of the running launch was taken"
+        grep -qF "A launch of this workspace is running (pid $_S261_P)" "$_A6_DIR/$_S261_C/out" || echo "not said"; } 2>&1)" || true
+    [ -z "$_S261_R" ] || _a6_diag "§261(h)" "$_S261_C"
+    check "§261(h) --stop's direct teardown leaves the live snapshot alone while a live launch holds the workspace lock, and says so (mutation: no lock check; ${_S261_R:-ok})" \
+        test -z "$_S261_R"
+fi
+_a6_done
+unset -f _s261_gd _s261_fix _s261_ctr _s261_run _s261_holds _s261_both _s261_599 _s261_wrong_start _sandy_pid_start
+unset _S261_B _S261_PATH _S261_C _S261_W _S261_G _S261_R _S261_RC1 _S261_RC2 _S261_S _S261_DB _S261_P _S261_U _S261_J _S261_K _S261_H _S261_PA _S261_KB _S261_KD _S261_PL _S261_I0 _S261_L _S261_Q _S261_PQ _S261_RD _S261_PL2 _S261_T0 _S261_O1 _S261_O2 _S261_RC _S261_DT _S261_PT
+echo ""
+
+# ============================================================
+section "§262: a session of a main checkout cannot delete its linked worktrees' admin dirs: each is mounted :ro, a removal is reported at session end (the provisional re-judgement and --stop's teardown included), and git gc in the container never prunes worktrees (#597)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. Every .git/worktrees/<name>/gitdir names a host path, which does not
+# exist under the container's $HOME mapping, so git in a session of the main
+# checkout sees every linked worktree as gone: `git worktree prune` deleted
+# all their admin dirs, and `git gc` the ones idle for three months. On the
+# host those worktrees then failed with `fatal: not a git repository`, and
+# the session-end sweep, which reported only admin dirs CREATED in-session,
+# said nothing. Now (1) each admin dir is mounted :ro (worktrees/ stays
+# writable, for git worktree add), (2) one recorded at launch and gone at
+# session end is reported, and (3) the container's git has
+# gc.worktreePruneExpire=never.
+_s262_git() { git -c user.name=s262 -c user.email=s262@example.invalid -c init.defaultBranch=main -c core.hooksPath= "$@"; }
+_s262_fix() {   # $1 = CASE: CASE/ws a repository with linked worktrees CASE/wt1, CASE/wt2
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h"
+    _s262_git init -q "$h/ws" && _s262_git -C "$h/ws" commit -q --allow-empty -m init \
+        && _s262_git -C "$h/ws" worktree add -q "$h/wt1" -b wt1 >/dev/null 2>&1 \
+        && _s262_git -C "$h/ws" worktree add -q "$h/wt2" -b wt2 >/dev/null 2>&1
+}
+# (a)+(c) a plain launch of the main checkout.
+_S262_C=s262-ro; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S262_A="$(_a6_agent_args "$_S262_C")"
+_S262_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S262_A" ] || echo "launch rc $_A6_RC"
+    [ -f "$_S262_W/.git/worktrees/wt1/gitdir" ] && [ -f "$_S262_W/.git/worktrees/wt2/gitdir" ] || echo "fixture: no linked worktrees"
+    for _S262_N in wt1 wt2; do
+        _a6_pair "$_S262_A" -v "$_S262_W/.git/worktrees/$_S262_N:/home/sandy/ws/.git/worktrees/$_S262_N:ro" || echo "no :ro mount of the $_S262_N admin dir"
+        _a6_pair "$_S262_A" -v "$_S262_W/.git/worktrees/$_S262_N/commondir:/home/sandy/ws/.git/worktrees/$_S262_N/commondir:ro" || echo "the $_S262_N commondir mount went"
+    done
+    # (worktrees/ itself is pinned onto itself, read-write: an ancestor pin)
+    if grep -qxF -- "$_S262_W/.git/worktrees:/home/sandy/ws/.git/worktrees:ro" "$_S262_A"; then echo "worktrees/ itself is mounted :ro (it must stay writable)"; fi
+    _S262_D="$(awk 'p=="-v" { n=split($0,a,":"); print a[2] } {p=$0}' "$_S262_A" | LC_ALL=C sort | uniq -d)"
+    [ -z "$_S262_D" ] || echo "duplicate mount destinations: $(printf '%s' "$_S262_D" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(a)" "$_S262_C"
+check "§262(a) a launch of a main checkout with two linked worktrees mounts each worktree's admin dir .git/worktrees/<name> :ro (its commondir mount kept inside it), leaves worktrees/ writable, and repeats no mount destination (mutation: no admin-dir mount; ${_S262_R:-ok})" \
+    test -z "$_S262_R"
+check "§262(c) the container's generated git setup sets gc.worktreePruneExpire=never, and gc.reflogExpire and gc.reflogExpireUnreachable never (gc's reflog expire --all would write the other worktrees' read-only logs/HEAD), beside safe.directory (mutation: a line dropped)" \
+    bash -c 'grep -qxF "git config --global gc.worktreePruneExpire never" "$1" && grep -qxF "git config --global gc.reflogExpire never" "$1" \
+             && grep -qxF "git config --global gc.reflogExpireUnreachable never" "$1" && grep -qF "safe.directory" "$1"' _ "$_A6_DIR/$_S262_C/sh/user-setup.sh"
+# (b) the "container" removes an admin dir during the session (a git worktree
+# prune that the :ro mount would refuse; here the stub plays it on the host):
+# the session-end report names it.
+_S262_C=s262-rm; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='rm -rf .git/worktrees/wt2' PATH="$_S248_PATH"
+_S262_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S262_W/.git/worktrees/wt2" ] || echo "fixture: wt2 was not removed"
+    awk '/Linked worktree admin dir removed while this session ran \(in the session or on the host\)/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt2" || echo "the removal is not reported"
+    if awk '/Linked worktree admin dir removed while this session ran \(in the session or on the host\)/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt1"; then echo "wt1, still there, is reported"; fi; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(b)" "$_S262_C"
+check "§262(b) a linked worktree admin dir removed during the session is reported at its end, by name, and one still there is not (mutation: no check of the recorded admin dirs; ${_S262_R:-ok})" \
+    test -z "$_S262_R"
+# (d) the provisional re-judgement: the container outlives its session, then
+# removes an admin dir; the next launch's judgement of the kept snapshot names
+# it.
+_S262_C=s262-prov; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+rm -rf "$_S262_W/.git/worktrees/wt1"
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
+_S262_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_A6_DIR/$_S262_C/out" \
+        | awk '/Linked worktree admin dir removed while this session ran \(in the session or on the host\)/ { on = 1 } on' | grep -qF ".git/worktrees/wt1" || echo "the re-judgement does not name the removed admin dir"; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(d)" "$_S262_C"
+check "§262(d) ...and an admin dir removed after a provisional session-end report is named by the re-judgement of its kept snapshot (${_S262_R:-ok})" \
+    test -z "$_S262_R"
+# (e) --stop's direct teardown of a supervisor-less daemon reports it too.
+_S262_DB="$_A6_DIR/s262dbin"; mkdir -p "$_S262_DB"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in\n'
+  printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
+  printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
+  printf '    *sandy.session*) if [ -n "${S248_GONE:-}" ] && [ -e "$S248_GONE" ]; then echo "Error: No such object" >&2; exit 1; fi; echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
+  printf '    *State.Running*) echo true; exit 0 ;;\n'
+  printf '    "rm -f c0ffee"*) if [ -n "${S248_GONE:-}" ]; then : > "$S248_GONE"; fi; exit 0 ;;\n'
+  printf '    exec*|stop*) exit 0 ;;\n'
+  printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S262_DB/docker"
+chmod +x "$_S262_DB/docker"
+_S262_C=s262-stop; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"; _S262_S="$(_a6_sandbox "$_S262_C")"
+# The daemon's launch snapshot, as its launch left it (taken here by a plain
+# launch whose cleanup is told to keep it: its container "survives").
+_a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+_S262_P="$(ls "$_S262_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+[ -z "$_S262_P" ] || mv "$_S262_P" "$_S262_S/.protected-existed-at-launch"
+rm -rf "$_S262_S/.protected-provisional"; rm -rf "$_S262_W/.git/worktrees/wt2"; : > "$_A6_DIR/$_S262_C/mounts"
+_a6_launch "$_S262_C" S248_DPID=2147480000 S248_SESS="$(basename "$_S262_S")" S248_MOUNTS="$_A6_DIR/$_S262_C/mounts" \
+    S248_GONE="$_A6_DIR/$_S262_C/gone" PATH="$_S262_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S262_W"
+_S262_R="$( { [ -n "$_S262_P" ] || echo "fixture: no snapshot"
+    grep -qF "Linked worktree admin dir removed while this session ran (in the session or on the host)" "$_S262_S/.session-end-report" 2>/dev/null || echo "the --stop report does not name a removal"
+    grep -qF ".git/worktrees/wt2" "$_S262_S/.session-end-report" 2>/dev/null || echo "the removed admin dir is not named"; } 2>&1)" || true
+[ -z "$_S262_R" ] || _a6_diag "§262(e)" "$_S262_C"
+check "§262(e) ...and --stop's direct teardown of a supervisor-less daemon records the removal in its report (rc ${_A6_RC:-none}; ${_S262_R:-ok})" \
+    test -z "$_S262_R"
+_a6_done
+unset -f _s262_git _s262_fix
+unset _S262_C _S262_W _S262_A _S262_R _S262_N _S262_D _S262_DB _S262_S _S262_P
+echo ""
+
+# ============================================================
+section "§263: nothing sandy mounts from a gitdir outside the workspace (a submodule gitdir, or an approved one) is a link or reached through one: the launch refuses, with no approval, and a superproject session's end report names such a link it created (#598 review)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. The gitdir a .git file names outside the workspace is mounted with its
+# config, hooks, info, commondir and config.worktree :ro, and those of every
+# submodule gitdir and worktree admin dir below it. The mount code tests them
+# with -f/-d, which follow links, and none of them is a workspace path, so
+# neither the dangerous-symlink gate nor the -v check judged them; Docker
+# follows a link at a -v source. A superproject shipped with its .git (a
+# tarball) whose modules/lib/config is a link to ~/.ssh/id_rsa launched its
+# submodule `lib` headless with rc 0, no prompt, and the key in the container
+# (verifier repro e13, reproduced on main). Second vector, no tarball: an
+# agent in a superproject session plants a link at such a path absent at its
+# launch; the next session of the submodule mounted it. Now every -v source
+# under that gitdir is walked from the gitdir and a link on it refuses the
+# launch (_sandy_gitdir_check_mounts), and the superproject's session-end
+# report names a link created there.
+_S263_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_S263_MSG="is a link, or is reached through one:"
+_s263_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
+_s263_git() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+        GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
+        git -c protocol.file.allow=always -c init.defaultBranch=main "$@" >/dev/null 2>&1
+}
+# (a) e13: $HOME (CASE) is a superproject delivered with its .git, lib at
+# path ws; CASE-out holds the targets. One link per case, in .git/modules/lib:
+# config -> a key, hooks -> a directory, worktrees/x/commondir -> a file,
+# and modules/sub/info (a nested submodule gitdir) -> a directory.
+_s263_e13() {   # $1 = kind -> the link, as named
+    local c="$_A6_DIR/s263-$1" o="$_A6_DIR/s263-$1-out" g
+    g="$c/.git/modules/lib"
+    mkdir -p "$o/dir" "$c/ws"; printf 'PRIVATE KEY\n' > "$o/id_rsa"; printf 'SECRET\n' > "$o/secret"
+    _s263_gd "$c/.git"; _s263_gd "$g"; printf '[submodule "lib"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../.git/modules/lib\n' > "$c/ws/.git"
+    case "$1" in
+        config) rm -f "$g/config"; ln -s "$o/id_rsa" "$g/config"; echo "$g/config -> $o/id_rsa" ;;
+        hooks) ln -s "$o/dir" "$g/hooks"; echo "$g/hooks -> $o/dir" ;;
+        wtcd) mkdir -p "$g/worktrees/x"; printf 'ref: refs/heads/x\n' > "$g/worktrees/x/HEAD"; ln -s "$o/secret" "$g/worktrees/x/commondir"; echo "$g/worktrees/x/commondir -> $o/secret" ;;
+        nested) _s263_gd "$g/modules/sub"; ln -s "$o/dir" "$g/modules/sub/info"; echo "$g/modules/sub/info -> $o/dir" ;;
+        clean) mkdir -p "$g/hooks" "$g/info"; echo "" ;;
+    esac
+}
+for _S263_N in config hooks wtcd nested clean; do
+    _s263_e13 "$_S263_N" > "$_A6_DIR/s263-$_S263_N.link"
+    _a6_bg "s263-$_S263_N" _a6_launch "s263-$_S263_N" "${_S263_K[@]}"
+done
+# (b) the plant-then-launch vector. s263-plant/ws is a real superproject with
+# a real submodule lib at ws (so the submodule checkout is s263-plant/ws/ws,
+# launched as CASE s263-plant/ws). The superproject session's "container"
+# plants info and config.worktree links in .git/modules/lib, where none
+# existed at launch, and a new worktree admin dir n with a commondir link.
+_S263_O="$_A6_DIR/s263-plant-out"; mkdir -p "$_S263_O/dir"; printf 'SECRET\n' > "$_S263_O/secret"
+_S263_W="$_A6_DIR/s263-plant/ws"; _s263_git init -q "$_A6_DIR/s263-src" && _s263_git -C "$_A6_DIR/s263-src" commit -q --allow-empty -m s
+_s263_git init -q "$_S263_W" && _s263_git -C "$_S263_W" commit -q --allow-empty -m s && _s263_git -C "$_S263_W" submodule add -q --name lib "$_A6_DIR/s263-src" ws
+rm -rf "$_S263_W/.git/modules/lib/info"; rm -f "$_S263_W/.git/modules/lib/config.worktree"
+_S263_RUN="ln -s '$_S263_O/dir' .git/modules/lib/info; ln -s '$_S263_O/secret' .git/modules/lib/config.worktree; mkdir -p .git/modules/lib/worktrees/n; printf 'ref: refs/heads/n\\n' > .git/modules/lib/worktrees/n/HEAD; ln -s '$_S263_O/secret' .git/modules/lib/worktrees/n/commondir"
+_s263_plant() {
+    local c="$_A6_DIR/s263-plant"
+    _a6_launch s263-plant SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S263_RUN" PATH="$_S248_PATH"
+    cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"
+    _a6_launch s263-plant/ws "${_S263_K[@]}"
+}
+_a6_bg s263-plant _s263_plant
+
+for _S263_N in config hooks wtcd nested; do
+    _a6_join "s263-$_S263_N"; _S263_C="$_A6_DIR/s263-$_S263_N"; _S263_L="$(cat "$_A6_DIR/s263-$_S263_N.link")"
+    _S263_OK=0
+    { [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args "s263-$_S263_N")" ] && grep -qF -- "$_S263_MSG" "$_S263_C/out" \
+      && grep -qF -- "$_S263_L" "$_S263_C/out" && ! grep -qF "[y/N]" "$_S263_C/out" \
+      && ! grep -rqsF -- "$_A6_DIR/s263-$_S263_N-out" "$_S263_C/runs"; } || _S263_OK=$?
+    [ "$_S263_OK" = 0 ] || _a6_diag "§263(a) $_S263_N" "s263-$_S263_N"
+    _S263_R="${_S263_L%% -> *}"; _S263_R="${_S263_R#"$_S263_C/"}"
+    check "§263(a) $_S263_N: a recognized submodule with $_S263_R a link out of its gitdir is refused headless with no approval offered, the link named, nothing of its target in any docker argv (mutation: _sandy_gitdir_check_mounts not called; rc ${_A6_RC:-none})" \
+        test "$_S263_OK" = 0
+done
+_a6_join s263-clean; _S263_C="$_A6_DIR/s263-clean"; _S263_A="$(_a6_agent_args s263-clean)"
+_S263_OK=0
+{ [ "$_A6_RC" = 0 ] && _a6_pair "$_S263_A" -v "$_S263_C/.git/modules/lib/config:/home/sandy/.git/modules/lib/config:ro" \
+  && _a6_pair "$_S263_A" -v "$_S263_C/.git/modules/lib/hooks:/home/sandy/.git/modules/lib/hooks:ro" && ! grep -qF "[y/N]" "$_S263_C/out"; } || _S263_OK=$?
+[ "$_S263_OK" = 0 ] || _a6_diag "§263(a) clean" s263-clean
+check "§263(a) clean: the same layout with no link launches headless with no prompt, its config and hooks mounted :ro (mutation: every source under the gitdir refused; rc ${_A6_RC:-none})" \
+    test "$_S263_OK" = 0
+_a6_join s263-plant; _S263_C="$_A6_DIR/s263-plant"; _S263_G="$_S263_W/.git/modules/lib"
+_S263_R="$( { [ "$(cat "$_S263_C/rc.1")" = 0 ] || echo "superproject launch rc $(cat "$_S263_C/rc.1")"
+    for _S263_N in info config.worktree worktrees/n/commondir; do
+        grep -F -- ".git/modules/lib/$_S263_N -> " "$_S263_C/out.1" | grep -qF "(a symbolic link created during this session)" \
+            || echo "the session-end report does not name .git/modules/lib/$_S263_N"
+    done; } 2>&1)" || true
+[ -z "$_S263_R" ] || _a6_diag "§263(b1)" s263-plant
+check "§263(b1) a superproject session that creates links at its submodule gitdir's info and config.worktree, and a worktree admin dir there with a commondir link, has each named at session end as a link created during the session (mutation: only worktrees/ and modules/ entries listed; ${_S263_R:-ok})" \
+    test -z "$_S263_R"
+_S263_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s263-plant/ws)" ] && grep -qF -- "$_S263_MSG" "$_A6_DIR/s263-plant/ws/out" \
+  && grep -qF -- "$_S263_G/info -> $_S263_O/dir" "$_A6_DIR/s263-plant/ws/out" \
+  && ! grep -rqsF -- "$_S263_O" "$_A6_DIR/s263-plant/ws/runs"; } || _S263_OK=$?
+[ "$_S263_OK" = 0 ] || _a6_diag "§263(b2)" s263-plant/ws
+check "§263(b2) ...and the next session of that submodule (headless) refuses, naming them, with nothing of their targets mounted (mutation: _sandy_gitdir_check_mounts not called; rc ${_A6_RC:-none})" \
+    test "$_S263_OK" = 0
+# (c) Today's mount sites never reach a source through a linked directory
+# (the walkers skip links), but the check is derived from the argv, so a new
+# site would be judged too: a source below a linked directory under the
+# gitdir, and one with a `..` component, are refused; a plain one passes.
+_S263_D="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^_sandy_gitdir_check_mounts() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S263_D/fns.sh"
+mkdir -p "$_S263_D/g/modules/real/hooks" "$_S263_D/out/hooks"; ln -s "$_S263_D/out" "$_S263_D/g/modules/lnk"
+_s263_probe() {   # $1 = source under g -> "refused <output>" or "passed"
+    bash -c 'trap - ERR; set +e
+             error() { printf "%s\n" "$*"; }; error_lit() { error "$@"; }; _sandy_daemon_fatal() { :; }
+             . "$1/fns.sh"; GITDIR_HOST="$1/g"; _SANDY_GD_PHYS="$1/g"
+             RUN_FLAGS=(-v "$GITDIR_HOST:/c" -v "$GITDIR_HOST/$2:/c/$2:ro")
+             o="$(_sandy_gitdir_check_mounts 2>&1)" && echo passed || printf "refused %s\n" "$o"' _ "$_S263_D" "$1"
+}
+_S263_R=""
+case "$(_s263_probe modules/lnk/hooks)" in "refused "*"$_S263_D/g/modules/lnk -> $_S263_D/out"*) ;; *) _S263_R="$_S263_R through a link: $(_s263_probe modules/lnk/hooks | head -c 200);" ;; esac
+case "$(_s263_probe modules/real/../lnk/hooks)" in "refused "*"a '..' component"*) ;; *) _S263_R="$_S263_R a .. component: $(_s263_probe modules/real/../lnk/hooks | head -c 200);" ;; esac
+[ "$(_s263_probe modules/real/hooks)" = passed ] || _S263_R="$_S263_R plain: $(_s263_probe modules/real/hooks | head -c 200);"
+check "§263(c) a -v source under the gitdir reached through a linked directory, or holding a .. component, is refused, and a plain one passes (mutation: only the last component judged; ${_S263_R:-ok})" \
+    test -z "$_S263_R"
+rm -rf "$_S263_D"
+# (d) V3: a gitdir reached through an APPROVED workspace link: vendor ->
+# CASE/other (approved, as a "y" writes it), .git = `gitdir: vendor/.git`,
+# and CASE/other/.git/config a link to a key. The approval named
+# CASE/other, never the key: refused headless, the inner link named.
+# (e) the same with no inner link launches, mounting vendor/.git's config :ro.
+_fx_s236
+_s263_via() {   # $1 = CASE  $2 = "link" to make other/.git/config a link
+    local c="$_A6_DIR/$1"
+    mkdir -p "$c/ws" "$c/keys"; printf 'PRIVATE KEY\n' > "$c/keys/id_rsa"; _s263_gd "$c/other/.git"
+    if [ "${2:-}" = link ]; then rm -f "$c/other/.git/config"; ln -s "$c/keys/id_rsa" "$c/other/.git/config"; fi
+    ln -s "$c/other" "$c/ws/vendor"; printf 'gitdir: vendor/.git\n' > "$c/ws/.git"
+    _s236_seed "$1" "vendor -> $c/other"
+}
+_s263_via s263-via link; _a6_bg s263-via _a6_launch s263-via "${_S263_K[@]}"
+_s263_via s263-viaok; _a6_bg s263-viaok _a6_launch s263-viaok "${_S263_K[@]}"
+_a6_join s263-via; _S263_C="$_A6_DIR/s263-via"
+_S263_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s263-via)" ] && grep -qF -- "$_S263_MSG" "$_S263_C/out" \
+  && grep -qF -- "$_S263_C/ws/vendor/.git/config -> $_S263_C/keys/id_rsa" "$_S263_C/out" && ! grep -qF "[y/N]" "$_S263_C/out" \
+  && ! grep -rqsF -- "vendor/.git/config" "$_S263_C/runs"; } || _S263_OK=$?
+[ "$_S263_OK" = 0 ] || _a6_diag "§263(d)" s263-via
+check "§263(d) a gitdir reached through an approved workspace link (vendor -> other, gitdir: vendor/.git) whose config is a link to a key is refused headless, the inner link named, nothing of it mounted (mutation: the via-link gitdir not walked; rc ${_A6_RC:-none})" \
+    test "$_S263_OK" = 0
+_a6_join s263-viaok; _S263_C="$_A6_DIR/s263-viaok"
+_S263_R="$(_s236_unmet s263-viaok "$_S263_C" "vendor -> $_S263_C/other" "")"
+if [ -z "$_S263_R" ] && ! _a6_pair "$(_a6_agent_args s263-viaok)" -v "$_S263_C/ws/vendor/.git/config:/home/sandy/ws/vendor/.git/config:ro"; then _S263_R="no :ro mount of vendor/.git/config"; fi
+[ -z "$_S263_R" ] || _a6_diag "§263(e)" s263-viaok
+check "§263(e) ...and the same approved link with no link inside the git directory launches (rc 0, the list unchanged) and mounts its config :ro (mutation: every via-link source refused; ${_S263_R:-ok})" \
+    test -z "$_S263_R"
+_a6_done
+unset -f _s263_gd _s263_git _s263_e13 _s263_plant _s263_probe _s263_via
+unset _S263_K _S263_MSG _S263_N _S263_C _S263_L _S263_OK _S263_A _S263_O _S263_W _S263_RUN _S263_G _S263_R _S263_D
+echo ""
+
+# ============================================================
+section "§264: a linked worktree (git worktree add) launches with no prompt: its common dir is mounted and protected like the gitdir of any .git file, shared safely with the main checkout's and other worktrees' sessions, its own admin dir writable and its siblings' :ro, and git in the container finds it through a translated .git file (#582)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. A linked worktree's .git file names <main>/.git/worktrees/<name>,
+# which has HEAD and commondir but no objects/ or refs/, so the R5a
+# structural check refused every linked worktree. Now an admin dir whose
+# commondir names a git directory that physically holds it as
+# worktrees/<name>, and whose gitdir back-pointer names THIS workspace's .git,
+# is a recognized relationship (no prompt, #598's hook); that common dir is
+# mounted (read-write, config/hooks/info/commondir/config.worktree/
+# packed-refs :ro), held in the #596 registry, its other admin dirs :ro
+# (#597) but this one's, and the container gets read-only translated copies
+# of the .git file and this admin dir's gitdir back-pointer, spelled as it
+# sees them (git writes absolute host paths, which do not exist there).
+_s264_git() { git -c user.name=s264 -c user.email=s264@example.invalid -c init.defaultBranch=main -c core.hooksPath= "$@"; }
+_s264_fix() {   # $1 = CASE: CASE/main with one commit and packed refs; CASE/ws its worktree, CASE/wt2 another
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h"
+    _s264_git init -q "$h/main" && _s264_git -C "$h/main" commit -q --allow-empty -m init \
+        && _s264_git -C "$h/main" worktree add -q "$h/ws" -b wt >/dev/null 2>&1 \
+        && _s264_git -C "$h/main" worktree add -q "$h/wt2" -b wt2 >/dev/null 2>&1 \
+        && _s264_git -C "$h/main" pack-refs --all >/dev/null 2>&1
+}
+_s264_ctr() {   # $1 = workspace -> its container name
+    local x b
+    x="$(printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; })"; x="${x%% *}"
+    b="$(basename "$1" | tr -cd 'a-zA-Z0-9._-')"
+    printf 'sandy-%s-%s\n' "${b:-project}" "${x:0:8}"
+}
+# A stub in front of §248's answers inspect -f {{.Id}} NAME as present for a
+# NAME listed in CASE/present (a session still running), gone otherwise.
+_S264_B="$_A6_DIR/s264bin"; mkdir -p "$_S264_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "inspect -f {{.Id}} "*) for n do :; done; if grep -qxF "$n" "$A6_LOG/present" 2>/dev/null; then echo deadbeef; fi; exit 0 ;; esac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S264_B/docker"
+chmod +x "$_S264_B/docker"
+_S264_PATH="$_S264_B:$_S248_PATH"
+_s264_run() {   # $1 = CASE  $2 = workspace  [VAR=value ...]
+    local c="$1" w="$2"; shift 2
+    _a6_launch "$c" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S264_PATH" "$@" -- --workspace "$w" -p fixture
+}
+# (a) a real `git worktree add` (absolute paths, git's default), headless.
+_S264_C=s264-wt; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_G0="$(cat "$_S264_H/ws/.git")"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_A="$(_a6_agent_args "$_S264_C")"
+_S264_L="$(awk -v d=/home/sandy/ws/.git 'p=="-v" { n=split($0,a,":"); if (a[2]==d) print a[1] } {p=$0}' "$_S264_A" 2>/dev/null | head -n 1)"
+_S264_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S264_A" ] || echo "launch rc $_A6_RC"
+    case "$_S264_G0" in "gitdir: /"*) ;; *) echo "fixture: the .git file is not absolute: $_S264_G0" ;; esac
+    if grep -qF "needs a one-time approval" "$_A6_DIR/$_S264_C/out"; then echo "it asked for an approval"; fi
+    _a6_pair "$_S264_A" -v "$_S264_H/main/.git:/home/sandy/main/.git" || echo "the common dir is not mounted read-write"
+    for _S264_P in config hooks info commondir packed-refs; do
+        _a6_pair "$_S264_A" -v "$_S264_H/main/.git/$_S264_P:/home/sandy/main/.git/$_S264_P:ro" || echo "no :ro mount of the common dir's $_S264_P"
+    done
+    _a6_pair "$_S264_A" -v "$_S264_H/main/.git/worktrees/wt2:/home/sandy/main/.git/worktrees/wt2:ro" || echo "the sibling worktree's admin dir is not :ro"
+    if grep -qxF "$_S264_H/main/.git/worktrees/ws:/home/sandy/main/.git/worktrees/ws:ro" "$_S264_A"; then echo "this worktree's own admin dir is :ro"; fi
+    [ -n "$_S264_L" ] && case "$_S264_L" in "$(_a6_sandbox "$_S264_C")/launch/"*) true ;; *) false ;; esac || echo "the .git mount is not a launch copy: [$_S264_L]"
+    [ "$(cat "$_S264_L" 2>/dev/null)" = "gitdir: /home/sandy/main/.git/worktrees/ws" ] || echo "the container's .git: [$(cat "$_S264_L" 2>/dev/null)]"
+    grep -qxF "$_S264_L:/home/sandy/ws/.git:ro" "$_S264_A" || echo "the translated .git is not :ro"
+    _S264_P="$(awk -v d=/home/sandy/main/.git/worktrees/ws/gitdir 'p=="-v" { n=split($0,a,":"); if (a[2]==d && a[3]=="ro") print a[1] } {p=$0}' "$_S264_A" | head -n 1)"
+    [ "$(cat "$_S264_P" 2>/dev/null)" = /home/sandy/ws/.git ] || echo "the container's gitdir back-pointer: [$(cat "$_S264_P" 2>/dev/null)]"
+    [ "$(cat "$_S264_H/ws/.git")" = "$_S264_G0" ] || echo "the host .git file was changed"
+    [ "$(cat "$_S264_H/main/.git/worktrees/ws/gitdir")" = "$_S264_H/ws/.git" ] || echo "the host back-pointer was changed"
+    _S264_D="$(awk 'p=="-v" { n=split($0,a,":"); print a[2] } {p=$0}' "$_S264_A" | LC_ALL=C sort | uniq -d)"
+    [ -z "$_S264_D" ] || echo "duplicate mount destinations: $(printf '%s' "$_S264_D" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(a)" "$_S264_C"
+check "§264(a) a linked worktree made by git worktree add (absolute paths) launches headless with no prompt: the main .git read-write with config, hooks, info, commondir and packed-refs :ro, the sibling worktree's admin dir :ro but this one's writable, and the container's .git and gitdir back-pointer are read-only launch copies naming the container's paths; the host files are unchanged (mutations: the admin dir not recognized; no translation; own admin dir :ro; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (b) a relative .git file and back-pointer (written by hand): the same.
+_S264_C=s264-rel; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+printf 'gitdir: ../main/.git/worktrees/ws\n' > "$_S264_H/ws/.git"; printf '../../../../ws/.git\n' > "$_S264_H/main/.git/worktrees/ws/gitdir"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_A="$(_a6_agent_args "$_S264_C")"
+_S264_L="$(awk -v d=/home/sandy/ws/.git 'p=="-v" { n=split($0,a,":"); if (a[2]==d) print a[1] } {p=$0}' "$_S264_A" 2>/dev/null | head -n 1)"
+_S264_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S264_A" ] || echo "launch rc $_A6_RC"
+    _a6_pair "$_S264_A" -v "$_S264_H/main/.git:/home/sandy/main/.git" || echo "the common dir is not mounted"
+    [ "$(cat "$_S264_L" 2>/dev/null)" = "gitdir: /home/sandy/main/.git/worktrees/ws" ] || echo "the container's .git: [$(cat "$_S264_L" 2>/dev/null)]"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(b)" "$_S264_C"
+check "§264(b) a relative-path worktree (a hand-written relative .git file and back-pointer) launches the same, translated (${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (c) tampered admin dirs, each with a back-pointer naming this workspace,
+# refused: (c1) commondir names ~/.ssh (no git dir); (c2) an admin dir the
+# repository plants in the workspace whose commondir names a real git dir
+# elsewhere (which does not hold it); (c3) commondir is a
+# link; (c4) the admin dir's "common dir" has HEAD but no objects/ or refs/;
+# (c5) a sound admin dir of ANOTHER worktree (its back-pointer names that one).
+_S264_C=s264-c1; _S264_H="$_A6_DIR/$_S264_C"; mkdir -p "$_S264_H/ws" "$_S264_H/.ssh/worktrees/x"; printf 'S263-KEY\n' > "$_S264_H/.ssh/id_ed25519"
+printf 'ref: refs/heads/x\n' > "$_S264_H/.ssh/worktrees/x/HEAD"; printf '../..\n' > "$_S264_H/.ssh/worktrees/x/commondir"; printf 'gitdir: ../.ssh/worktrees/x\n' > "$_S264_H/ws/.git"
+printf '%s\n' "$_S264_H/ws/.git" > "$_S264_H/.ssh/worktrees/x/gitdir"
+_S264_C=s264-c2; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; rm -f "$_S264_H/ws/.git"; mkdir -p "$_S264_H/ws/adm/x"
+printf 'ref: refs/heads/x\n' > "$_S264_H/ws/adm/x/HEAD"; printf '%s\n' "$_S264_H/main/.git" > "$_S264_H/ws/adm/x/commondir"; printf '../../.git\n' > "$_S264_H/ws/adm/x/gitdir"; printf 'gitdir: adm/x\n' > "$_S264_H/ws/.git"
+_S264_C=s264-c3; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+printf '../..\n' > "$_S264_H/cd"; rm -f "$_S264_H/main/.git/worktrees/ws/commondir"; ln -s "$_S264_H/cd" "$_S264_H/main/.git/worktrees/ws/commondir"
+_S264_C=s264-c4; _S264_H="$_A6_DIR/$_S264_C"; mkdir -p "$_S264_H/ws" "$_S264_H/half/worktrees/x"; printf 'ref: refs/heads/main\n' > "$_S264_H/half/HEAD"
+printf 'ref: refs/heads/x\n' > "$_S264_H/half/worktrees/x/HEAD"; printf '../..\n' > "$_S264_H/half/worktrees/x/commondir"; printf 'gitdir: ../half/worktrees/x\n' > "$_S264_H/ws/.git"
+printf '%s\n' "$_S264_H/ws/.git" > "$_S264_H/half/worktrees/x/gitdir"
+_S264_C=s264-c5; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+printf 'gitdir: %s\n' "$_S264_H/main/.git/worktrees/wt2" > "$_S264_H/ws/.git"
+for _S264_N in c1 c2 c3 c4 c5; do
+    _S264_C="s264-$_S264_N"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_H/ws"
+    case "$_S264_N" in c1) _S264_P="$_S264_H/.ssh" ;; c4) _S264_P="$_S264_H/half" ;; *) _S264_P="$_S264_H/main/.git" ;; esac
+    _S264_OK=0
+    { [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S264_C")" ] \
+      && grep -qE "names a gitdir that is not a git directory|whose gitdir file names another worktree" "$_A6_DIR/$_S264_C/out" \
+      && ! grep -rqsF -- "$_S264_P:" "$_A6_DIR/$_S264_C/runs"; } || _S264_OK=$?
+    [ "$_S264_OK" = 0 ] || _a6_diag "§264($_S264_N)" "$_S264_C"
+    case "$_S264_N" in
+        c1) _S264_D="whose commondir names a directory that is not a git directory (~/.ssh)" ;;
+        c2) _S264_D="planted in the workspace, whose commondir names a real git directory elsewhere that does not hold it under worktrees/" ;;
+        c3) _S264_D="whose commondir is a link" ;;
+        c4) _S264_D="under a directory with HEAD but no objects/ or refs/" ;;
+        c5) _S264_D="of ANOTHER worktree of the repository (its back-pointer names that one)" ;;
+    esac
+    check "§264($_S264_N) a linked-worktree admin dir $_S264_D is refused: no agent run, nothing of it mounted (mutations: the admin dir not required under worktrees/ of the common dir; the common dir not required to be a git directory; a commondir link followed; the back-pointer not checked; rc ${_A6_RC:-none})" \
+        test "$_S264_OK" = 0
+done
+# (d) the review's link case: node_modules/v -> another repository's .git
+# (outside $HOME here, with a worktree of its own), and `gitdir:
+# node_modules/v/worktrees/feat`: refused (feat names that repository's own
+# worktree, not this workspace).
+_S264_C=s264-nm; _S264_H="$_A6_DIR/$_S264_C"; mkdir -p "$_S264_H/ws/node_modules" "$_S264_H-out"
+_s264_git init -q "$_S264_H-out/victim" && _s264_git -C "$_S264_H-out/victim" commit -q --allow-empty -m init \
+    && _s264_git -C "$_S264_H-out/victim" worktree add -q "$_S264_H-out/feat" -b feat >/dev/null 2>&1 || true
+ln -s "$_S264_H-out/victim/.git" "$_S264_H/ws/node_modules/v"; printf 'gitdir: node_modules/v/worktrees/feat\n' > "$_S264_H/ws/.git"; : > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_OK=0
+{ [ -d "$_S264_H-out/victim/.git/worktrees/feat" ] && [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S264_C")" ] \
+  && ! grep -rqsF -- "$_S264_H-out/victim/.git:" "$_A6_DIR/$_S264_C/runs"; } || _S264_OK=$?
+[ "$_S264_OK" = 0 ] || _a6_diag "§264(d)" "$_S264_C"
+check "§264(d) node_modules/v -> another repository's .git plus gitdir: node_modules/v/worktrees/feat is refused: that admin dir is the other repository's own worktree's, and nothing of the repository is mounted (mutation: the back-pointer not checked; rc ${_A6_RC:-none})" \
+    test "$_S264_OK" = 0
+# (e) the main checkout's session and a worktree's run together: the main
+# session ends first (its container gone) while the worktree's runs: the
+# common dir's seed and lock stay; then the worktree session ends: released.
+# (f) the same for two worktrees.
+for _S264_N in e f; do
+    _S264_C="s264-$_S264_N"; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+    if [ "$_S264_N" = e ]; then _S264_W1="$_S264_H/main"; else _S264_W1="$_S264_H/wt2"; fi
+    _S264_W2="$_S264_H/ws"
+    _s264_ctr "$_S264_W1" > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W1"
+    _s264_ctr "$_S264_W2" >> "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W2"
+    _S264_R="$( { [ "$(cat "$_S264_H/main/.git/commondir" 2>/dev/null)" = . ] && grep -qxF "$_S264_H/main/.git/config" "$_S264_H/flags" 2>/dev/null || echo "fixture: the first session did not seed and lock the common dir"; } 2>&1)" || true
+    _s264_ctr "$_S264_W2" > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W1"
+    _S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+        [ "$(cat "$_S264_H/main/.git/commondir" 2>/dev/null)" = . ] || echo "the common dir's seed went while the other session runs"
+        grep -qxF "$_S264_H/main/.git/config" "$_S264_H/flags" 2>/dev/null || echo "the common dir's config was unlocked while the other session runs"; } 2>&1)" || true
+    : > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W2"
+    _S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+        [ ! -e "$_S264_H/main/.git/commondir" ] || echo "the seed outlived both sessions"
+        if grep -qxF "$_S264_H/main/.git/config" "$_S264_H/flags" 2>/dev/null; then echo "the lock outlived both sessions"; fi; } 2>&1)" || true
+    [ -z "$_S264_R" ] || _a6_diag "§264($_S264_N)" "$_S264_C"
+    if [ "$_S264_N" = e ]; then _S264_D="the main checkout's session and a worktree's"; else _S264_D="two worktrees' sessions"; fi
+    check "§264($_S264_N) $_S264_D share the common dir: the first to end leaves its seed and macOS lock to the one still running, and the last releases them (mutation: the common dir not registered in the hold; ${_S264_R:-ok})" \
+        test -z "$_S264_R"
+done
+# (g) what the common dir lacked at launch and has at the end is reported
+# (hooks/<hook>, config.worktree, info), and so is a switch of the main
+# checkout's HEAD.
+_S264_C=s264-new; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+rm -rf "$_S264_H/main/.git/hooks" "$_S264_H/main/.git/info"
+_S264_RUN="mkdir -p '$_S264_H/main/.git/hooks' && printf '#!/bin/sh\n' > '$_S264_H/main/.git/hooks/post-checkout'; printf '[core]\n' > '$_S264_H/main/.git/config.worktree'; mkdir -p '$_S264_H/main/.git/info' && printf '* filter=x\n' > '$_S264_H/main/.git/info/attributes'; printf 'ref: refs/heads/wt2\n' > '$_S264_H/main/.git/HEAD'"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="$_S264_RUN"
+_S264_O="$_A6_DIR/$_S264_C/out"
+_S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    for _S264_P in hooks config.worktree info; do
+        awk '/Git files appeared during this session in the git directory/ { on = 1 } on' "$_S264_O" | grep -qF "$_S264_H/main/.git/$_S264_P" || echo "the created $_S264_P is not reported"
+    done
+    grep -qF "The main checkout's HEAD was switched during this session" "$_S264_O" || echo "the main checkout's HEAD switch is not reported"
+    grep -qF "ref: refs/heads/main -> ref: refs/heads/wt2" "$_S264_O" || echo "the HEAD switch does not name both refs"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(g)" "$_S264_C"
+check "§264(g) in a worktree session, hooks/<hook>, config.worktree and info created in the common dir (absent at launch, so not mounted :ro) are reported at session end, and so is a switch of the main checkout's HEAD (mutations: no #gdabsent record; no #mainhead record; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h) the session's OWN admin dir is writable (git writes HEAD, index, logs
+# there), and with extensions.worktreeConfig git in this worktree reads its
+# config.worktree as config: one created in the session (core.fsmonitor)
+# would run on the host's next git here. So an empty one is seeded and
+# mounted :ro, released like a commondir seed (through the hold), never one
+# the user made; and, as a backstop, reported when it appears unseeded.
+_s264_cwfix() {   # $1 = CASE
+    _s264_fix "$1" && _s264_git -C "$_A6_DIR/$1/main" config extensions.worktreeConfig true
+}
+_S264_CWM() { printf '%s' "$_A6_DIR/$1/main/.git/worktrees/ws/config.worktree"; }
+# (h1) seeded, :ro, removed at the end.
+_S264_C=s264-cw; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="if [ -f '$_S264_P' ] && [ ! -L '$_S264_P' ] && [ ! -s '$_S264_P' ]; then echo seeded > '$_S264_H/cwseen'; fi"
+_S264_A="$(_a6_agent_args "$_S264_C")"
+_S264_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S264_A" ] || echo "launch rc $_A6_RC"
+    [ "$(cat "$_S264_H/cwseen" 2>/dev/null)" = seeded ] || echo "no empty config.worktree in the own admin dir while the session ran"
+    _a6_pair "$_S264_A" -v "$_S264_P:/home/sandy/main/.git/worktrees/ws/config.worktree:ro" || echo "the own admin dir's config.worktree is not mounted :ro"
+    [ ! -e "$_S264_P" ] || echo "the seed outlived the session"
+    if grep -qF "CHANGED during this session" "$_A6_DIR/$_S264_C/out"; then echo "a change was reported"; fi; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h1)" "$_S264_C"
+check "§264(h1) with extensions.worktreeConfig, the session's own (writable) admin dir gets an empty config.worktree seeded and mounted :ro, so the agent cannot plant one there (core.fsmonitor), and sandy removes it at the end (mutations: not seeded; not unseeded; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h2) written over during the session (the stub's write lands on the host,
+# as a host-side write would): reported, and kept.
+_S264_C=s264-cw2; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="printf '[core]\n\tfsmonitor = /tmp/s264\n' > '$_S264_P'"
+_S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    awk '/Protected files CHANGED during this session/ { on = 1 } on' "$_A6_DIR/$_S264_C/out" | grep -qF "$_S264_P" || echo "the changed config.worktree is not reported"
+    grep -qF "fsmonitor = /tmp/s264" "$_S264_P" 2>/dev/null || echo "the changed file was removed"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h2)" "$_S264_C"
+check "§264(h2) the seeded config.worktree written during the session is reported as a protected file that changed, and is not removed (mutation: any file at a seededcw record removed; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h3) the user's own (empty) config.worktree: mounted :ro, never removed.
+_S264_C=s264-cw3; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"; : > "$_S264_P"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    _a6_pair "$(_a6_agent_args "$_S264_C")" -v "$_S264_P:/home/sandy/main/.git/worktrees/ws/config.worktree:ro" || echo "not mounted :ro"
+    [ -f "$_S264_P" ] || echo "the user's own config.worktree was removed"
+    [ ! -e "$(_a6_sandbox "$_S264_C")/.commondir-seeded" ] || ! grep -q seededcw "$(_a6_sandbox "$_S264_C")/.commondir-seeded" || echo "recorded as seeded"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h3)" "$_S264_C"
+check "§264(h3) a config.worktree the user made (empty, as sandy's would be) is mounted :ro and never removed (mutation: seeded over or recorded when present; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h4) a worktree session seeds it, a main-checkout session shares the
+# repository; the worktree session ends first: the seed stays (the main
+# session's container has it mounted :ro); the main session ends: removed.
+_S264_C=s264-cw4; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_s264_ctr "$_S264_H/ws" > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_s264_ctr "$_S264_H/main" >> "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/main"
+_S264_R="$( { [ -f "$_S264_P" ] && [ ! -s "$_S264_P" ] || echo "fixture: the worktree session did not seed it"; } 2>&1)" || true
+_s264_ctr "$_S264_H/main" > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ -f "$_S264_P" ] || echo "the seed went while the main checkout's session runs"; } 2>&1)" || true
+: > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/main"
+_S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S264_P" ] || echo "the seed outlived both sessions"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h4)" "$_S264_C"
+check "§264(h4) the worktree session's config.worktree seed stays while a main-checkout session of the repository runs, and the last session to end removes it (mutation: the seed not copied into the hold; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h5) the backstop: with seeding off (a copy of sandy whose switch returns
+# 1), one created in the session is reported at the end.
+_S264_C=s264-cw5; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_S264_M="$_A6_DIR/s264-noseed-sandy"
+awk '$0 == "_sandy_commondir_seed_enabled() { return 0; }" { print "_sandy_commondir_seed_enabled() { return 1; }"; n++; next } { print } END { exit n == 1 ? 0 : 1 }' "$SANDY_SCRIPT" > "$_S264_M" && _S264_OK=1 || _S264_OK=0
+_S264_SAVED="$_A6_SCRIPT"; _A6_SCRIPT="$_S264_M"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="printf '[core]\n\tfsmonitor = /tmp/s264\n' > '$_S264_P'"
+_A6_SCRIPT="$_S264_SAVED"
+_S264_R="$( { [ "$_S264_OK" = 1 ] || echo "the switch was not found"
+    [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    awk '/Git files appeared during this session in the git directory/ { on = 1 } on' "$_A6_DIR/$_S264_C/out" | grep -qF "$_S264_P" || echo "the created config.worktree is not reported"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h5)" "$_S264_C"
+check "§264(h5) backstop: with seeding off, a config.worktree created in the own admin dir during the session is reported at session end (mutation: the own admin dir left out of the #gdabsent records; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+unset -f _s264_cwfix _S264_CWM
+unset _S264_M _S264_SAVED
+_a6_done
+unset -f _s264_git _s264_fix _s264_ctr _s264_run
+unset _S264_C _S264_H _S264_A _S264_L _S264_R _S264_P _S264_D _S264_G0 _S264_N _S264_OK _S264_B _S264_PATH _S264_W1 _S264_W2 _S264_RUN _S264_O
+echo ""
+
+# ============================================================
+section "§265: under bash < 5 sandy re-runs itself under a bash 5 or newer (/opt/homebrew/bin, /usr/local/bin, then PATH), once, with its arguments, environment and stdin; with none it names the bash it runs under and gives this machine's install advice (the doctor's), and exits 1 (decision 2026-11-24)"
+# ============================================================
+# WHY. sandy no longer parses under bash 3.2 (macOS /bin/bash): a run under it
+# died with `syntax error near unexpected token` hundreds of lines in, before
+# anything (even --doctor) could say why, and every section that runs sandy
+# under `env -i PATH=...:/usr/bin:/bin` failed on the maintainer's Mac. The
+# guard at the top of sandy runs before bash parses the rest of the file.
+# Here it is extracted (BEGIN/END markers) and run under this bash with its
+# version test, its two fixed candidates and /etc/os-release pointed at test
+# stand-ins (each rewrite checked to have matched, so no case goes vacuous).
+_S265_D="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^# BEGIN bash5 guard$/,/^# END bash5 guard$/p' "$SANDY_SCRIPT" > "$_S265_D/guard.orig"
+sed -e 's|\[ "${BASH_VERSINFO\[0\]:-0}" -lt 5 \]|[ "${S265_MAJOR:-4}" -lt 5 ]|' \
+    -e "s|/opt/homebrew/bin/bash /usr/local/bin/bash|$_S265_D/hb/bash $_S265_D/ul/bash|" \
+    -e "s|/etc/os-release|$_S265_D/os-release|g" "$_S265_D/guard.orig" > "$_S265_D/guard.sh"
+_S265_R=""
+grep -qF 'S265_MAJOR' "$_S265_D/guard.sh" || _S265_R="$_S265_R the version test was not found;"
+grep -qF "$_S265_D/hb/bash $_S265_D/ul/bash" "$_S265_D/guard.sh" || _S265_R="$_S265_R the candidate list was not found;"
+grep -qF "$_S265_D/os-release" "$_S265_D/guard.sh" || _S265_R="$_S265_R the os-release path was not found;"
+check "§265(pre) the guard is extracted and each test rewrite matched (${_S265_R:-ok})" test -z "$_S265_R"
+# The guard is the first command: everything between `set -euo pipefail` and
+# its BEGIN line is comments, and it ends before the first other function.
+check "§265(top) the guard is the first thing sandy runs after set -euo pipefail, before any other function definition (mutation: the guard moved below code bash 3.2 cannot parse)" \
+    awk 'NR == 2 && $0 != "set -euo pipefail" { exit 1 }
+         NR > 2 && !b && /^# BEGIN bash5 guard$/ { b = NR; next }
+         NR > 2 && !b && $0 !~ /^#/ && $0 !~ /^[[:space:]]*$/ { exit 1 }
+         b && /^# END bash5 guard$/ { e = NR; next }
+         e && /^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/ { f = 1; exit }
+         END { exit (b && e && f) ? 0 : 1 }' "$SANDY_SCRIPT"
+# The probe script: the guard, then a line saying it got past.
+{ printf '#!/usr/bin/env bash\nset -euo pipefail\n'; cat "$_S265_D/guard.sh"; printf 'echo "PASSED marker=${SANDY_BASH5_REEXEC-unset}"\n'; } > "$_S265_D/probe"
+# A stand-in bash: `-c` answers the version probe with S265_RC_<dir> (0 = 5
+# or newer); run with a script, it records its argv, the marker and stdin.
+_s265_stub() {   # $1 = dir  $2 = rc for -c
+    mkdir -p "$_S265_D/$1"
+    printf '#!/bin/sh\nif [ "$1" = -c ]; then exit %s; fi\nprintf "%%s\\n" "$0" "$@" > %q\nprintf "%%s\\n" "${SANDY_BASH5_REEXEC:-}" > %q\n%q > %q\n' \
+        "$2" "$_S265_D/$1.argv" "$_S265_D/$1.marker" "$(command -v cat)" "$_S265_D/$1.stdin" > "$_S265_D/$1/bash"
+    chmod +x "$_S265_D/$1/bash"
+}
+mkdir -p "$_S265_D/tools"; ln -s "$(command -v uname)" "$_S265_D/tools/uname"
+_s265_run() {   # [VAR=value ...] -> output and rc ("rc=N" last), stdin "hello"
+    local o rc=0
+    o="$(printf 'hello\n' | env -u SANDY_BASH5_REEXEC "$@" "$BASH" "$_S265_D/probe" one "two words" "" 2>&1)" || rc=$?
+    printf '%s\nrc=%s\n' "$o" "$rc"
+}
+# (a1) bash 4, a bash 5 at the first fixed place: re-run there, argv, marker
+# and stdin intact.
+_s265_stub hb 0; _s265_stub ul 0
+_S265_O="$(_s265_run PATH="$_S265_D/tools")"
+_S265_R=""
+[ "$(cat "$_S265_D/hb.argv" 2>/dev/null || true)" = "$(printf '%s\n' "$_S265_D/hb/bash" "$_S265_D/probe" one "two words" "")" ] || _S265_R="$_S265_R argv: [$(tr '\n' '|' < "$_S265_D/hb.argv" 2>/dev/null || true)];"
+[ "$(cat "$_S265_D/hb.marker" 2>/dev/null || true)" = 1 ] || _S265_R="$_S265_R no SANDY_BASH5_REEXEC=1 in the re-run;"
+[ "$(cat "$_S265_D/hb.stdin" 2>/dev/null || true)" = hello ] || _S265_R="$_S265_R stdin not passed on;"
+[ ! -e "$_S265_D/ul.argv" ] || _S265_R="$_S265_R the second candidate ran too;"
+check "§265(a1) under bash 4 with a bash 5 at /opt/homebrew/bin, sandy re-runs itself there with the same arguments (an empty one and one with a space included), stdin, and SANDY_BASH5_REEXEC=1 (mutation: no guard; ${_S265_R:-ok})" \
+    test -z "$_S265_R"
+# (a2) the first candidate is too old: the next one is used.
+rm -f "$_S265_D"/*.argv; _s265_stub hb 1; _s265_stub ul 0
+_S265_O="$(_s265_run PATH="$_S265_D/tools")"
+check "§265(a2) a candidate whose version probe fails is skipped and the next (/usr/local/bin) is used (got: $( { tr '\n' '|' < "$_S265_D/ul.argv" 2>/dev/null || true; } | cut -c1-120))" \
+    bash -c '[ -f "$1/ul.argv" ] && [ ! -f "$1/hb.argv" ]' _ "$_S265_D"
+# (a3) none at the fixed places, one on PATH.
+rm -f "$_S265_D"/*.argv; _s265_stub hb 1; _s265_stub ul 1; _s265_stub pathbash 0
+_S265_O="$(_s265_run PATH="$_S265_D/pathbash:$_S265_D/tools")"
+check "§265(a3) ...and a bash 5 found only on PATH is used" \
+    test -f "$_S265_D/pathbash.argv"
+# (a4) the re-run is tried once: with the marker set and still bash 4, no
+# re-exec; the message and exit 1.
+rm -f "$_S265_D"/*.argv; _s265_stub hb 0
+_S265_O="$(printf 'hello\n' | env SANDY_BASH5_REEXEC=1 PATH="$_S265_D/tools" "$BASH" "$_S265_D/probe" 2>&1)" && _S265_RC=0 || _S265_RC=$?
+check "§265(a4) with SANDY_BASH5_REEXEC already set and still under bash 4, no second re-run: the advice and exit 1 (mutation: the marker not checked: it loops; rc $_S265_RC)" \
+    bash -c '[ "$1" = 1 ] && [ ! -f "$2/hb.argv" ] && printf "%s\n" "$3" | grep -qF "sandy requires bash 5 or newer"' _ "$_S265_RC" "$_S265_D" "$_S265_O"
+# (a5) under bash 5 the guard lets sandy run and drops the marker.
+_S265_O="$(_s265_run S265_MAJOR=5 SANDY_BASH5_REEXEC=1 PATH="$_S265_D/tools")"
+check "§265(a5) under bash 5 the guard passes and unsets SANDY_BASH5_REEXEC, so nothing after it sees the marker (got: $(printf '%s' "$_S265_O" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "PASSED marker=unset" && printf "%s\n" "$1" | grep -qx "rc=0"' _ "$_S265_O"
+# (b) no bash 5 anywhere: the message names the running bash, gives this
+# machine's advice, exits 1. uname, brew, port and os-release are stand-ins.
+_s265_os() {   # $1 = Darwin|Linux  $2 = brew|port|none  $3 = os-release ID line or "" -> the output
+    local t="$_S265_D/os-$1-$2"
+    rm -rf "$t"; mkdir -p "$t"
+    printf '#!/bin/sh\necho %s\n' "$1" > "$t/uname"; chmod +x "$t/uname"
+    case "$2" in brew|port) printf '#!/bin/sh\nexit 0\n' > "$t/$2"; chmod +x "$t/$2" ;; esac
+    if [ -n "$3" ]; then printf '%s\nNAME=x\n' "$3" > "$_S265_D/os-release"; else rm -f "$_S265_D/os-release"; fi
+    _s265_stub hb 1; _s265_stub ul 1
+    env -u SANDY_BASH5_REEXEC PATH="$t" "$BASH" "$_S265_D/probe" </dev/null 2>&1 || true
+}
+_S265_V="bash ${BASH_VERSION%%(*} at $BASH"
+_S265_R=""
+_s265_has() {   # $1 = output  $2 = label  then fixed strings that must appear ("!x": must not)
+    local o="$1" l="$2" w; shift 2
+    printf '%s\n' "$o" | grep -qF "this is $_S265_V." || _S265_R="$_S265_R $l: the running bash not named;"
+    for w in "$@"; do
+        case "$w" in
+            !*) if printf '%s\n' "$o" | grep -qF -- "${w#!}"; then _S265_R="$_S265_R $l: has [${w#!}];"; fi ;;
+            *) printf '%s\n' "$o" | grep -qF -- "$w" || _S265_R="$_S265_R $l: no [$w];" ;;
+        esac
+    done
+}
+_s265_has "$(_s265_os Darwin brew "")" mac-brew "To install one: brew install bash" 'eval "$(/opt/homebrew/bin/brew shellenv)"' "Intel Macs: /usr/local/bin/brew" "bash --version" "!MacPorts"
+_s265_has "$(_s265_os Darwin port "")" mac-port "Install Homebrew from https://brew.sh, then: brew install bash" "sudo port install bash" "brew shellenv"
+_s265_has "$(_s265_os Darwin none "")" mac-bare "Install Homebrew from https://brew.sh, then: brew install bash" "!MacPorts"
+_s265_has "$(_s265_os Linux none ID=debian)" debian "sudo apt update && sudo apt install -y bash" "Most Linux distributions already ship bash 5" "bash --version" "!brew install" "!brew shellenv"
+_s265_has "$(_s265_os Linux none 'ID="fedora"')" fedora "sudo dnf install -y bash"
+_s265_has "$(_s265_os Linux none ID=alpine)" alpine "sudo apk add bash"
+_s265_has "$(_s265_os Linux none ID=arch)" arch "sudo pacman -S --needed bash"
+_s265_has "$(_s265_os Linux none 'ID="opensuse-leap"')" opensuse "sudo zypper install -y bash"
+_s265_has "$(_s265_os Linux none ID=gentoo)" other-linux "Install bash via your distro's package manager"
+_s265_has "$(_s265_os Linux none "")" no-os-release "Install bash via your distro's package manager"
+check "§265(b) with no bash 5 to be found, sandy names the bash it runs under and gives this machine's advice: macOS with Homebrew, with MacPorts only, with neither; Linux by distribution (apt, dnf, apk, pacman, zypper, other, no os-release); then the PATH step on macOS and a bash --version check (mutations: a branch dropped; ${_S265_R:-ok})" \
+    test -z "$_S265_R"
+# (c) the install line is the doctor's: the guard's _sandy_bash5_pkg_hint
+# and the doctor's pkg_hint (doctor.sh, generated from the same heredoc
+# sandy --doctor runs) agree for every OS, distribution and brew state.
+sed -n '/^pkg_hint() {/,/^}$/p' "$SANDY_SCRIPT" | head -n 40 > "$_S265_D/doc.sh"
+sed -n '/^_sandy_bash5_pkg_hint() {/,/^}$/p' "$_S265_D/guard.orig" > "$_S265_D/g.sh"
+mkdir -p "$_S265_D/withbrew"; printf '#!/bin/sh\nexit 0\n' > "$_S265_D/withbrew/brew"; chmod +x "$_S265_D/withbrew/brew"
+_S265_R="$(bash -c '. "$1/doc.sh"; . "$1/g.sh"; n=0
+    for b in withbrew nobrew; do
+        for od in macos:x linux:debian linux:ubuntu linux:raspbian linux:pop linux:linuxmint linux:fedora linux:rhel linux:centos linux:rocky \
+                  linux:almalinux linux:arch linux:manjaro linux:endeavouros linux:alpine linux:opensuse-leap linux:opensuse-tumbleweed linux:sles \
+                  linux:gentoo linux:unknown unknown:x; do
+            OS="${od%%:*}"; DISTRO="${od#*:}"
+            d="$(PATH="$1/$b" pkg_hint bash)"; g="$(PATH="$1/$b" _sandy_bash5_pkg_hint "$OS" "$DISTRO")"
+            n=$((n + 1)); [ "$d" = "$g" ] || echo "$b $od: doctor [$d], guard [$g];"
+        done
+    done
+    [ "$n" = 42 ] || echo "only $n cases ran"' _ "$_S265_D" 2>&1)" || true
+check "§265(c) the guard's install advice is the doctor's (pkg_hint bash) for macOS with and without Homebrew, every Linux distribution the doctor knows and an unknown one (mutation: a mapping changed in one copy; ${_S265_R:-ok})" \
+    test -z "$_S265_R"
+# (d) on a Mac whose /bin/bash is older than 5, with a bash 5 installed: the
+# real sandy, run by /bin/bash with a PATH of /usr/bin:/bin only (as the
+# env -i sections run it), re-runs itself and answers --print-version.
+if [ "$(uname -s)" != Darwin ]; then
+    skip "§265(d) macOS only: /bin/bash there is bash 3.2 (here: $(uname -s))"
+elif /bin/bash -c '[ "${BASH_VERSINFO[0]}" -ge 5 ]' 2>/dev/null; then
+    skip "§265(d) this Mac's /bin/bash is already bash 5 or newer"
+elif ! { [ -x /opt/homebrew/bin/bash ] || [ -x /usr/local/bin/bash ]; }; then
+    skip "§265(d) no bash 5 at /opt/homebrew/bin or /usr/local/bin to re-run under"
+else
+    _S265_O="$(cd "$_S265_D" && env -i PATH=/usr/bin:/bin HOME="$_S265_D" SANDY_HOME="$_S265_D/sh" /bin/bash "$SANDY_SCRIPT" --print-version 2>&1)" && _S265_RC=0 || _S265_RC=$?
+    check "§265(d) on this Mac, env -i PATH=/usr/bin:/bin /bin/bash sandy --print-version re-runs under bash 5 and prints the version (rc $_S265_RC; got: $(printf '%s' "$_S265_O" | head -c 200 | tr '\n' ' '))" \
+        bash -c '[ "$1" = 0 ] && printf "%s\n" "$2" | grep -qF "\"schema_version\""' _ "$_S265_RC" "$_S265_O"
+fi
+rm -rf "$_S265_D"
+unset -f _s265_stub _s265_run _s265_os _s265_has
+unset _S265_D _S265_R _S265_O _S265_RC _S265_V
+echo ""
+
+# ============================================================
+section "§266: SANDY_PIDS_LIMIT sets the agent's --pids-limit (default 4096), a bad value refuses the launch, a workspace may lower it but raising it is gated, and the agent view's pane reports its exit at every verbosity (#603)"
 # ============================================================
 _fx_a6
 # The fixed --pids-limit 512 counted threads, and a multi-session sandbox
@@ -34601,69 +36340,69 @@ _fx_a6
 # real headless launch through the §215 stubs and read the argv the agent's
 # docker run received, so the value, not only the flag, is asserted.
 # $1 = CASE -> the value after --pids-limit in the agent's run, or nothing.
-_s260_pids() {
+_s266_pids() {
     local a
     a="$(_a6_agent_args "$1")"
     [ -n "$a" ] && awk 'p=="--pids-limit" {print; exit} {p=$0}' "$a"
 }
 _a6_launch pids-env SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_PIDS_LIMIT=2000
-_S260_V="$(_s260_pids pids-env || true)"
-check "§260(1) SANDY_PIDS_LIMIT=2000 from the environment: the agent's docker run carries --pids-limit 2000 (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
-    bash -c 'test "$1" = 0 && test "$2" = 2000' _ "$_A6_RC" "$_S260_V"
-for _S260_BAD in abc 0 -1 08 1234567890 '4096 '; do
-    _S260_C="pids-bad-$(printf '%s' "$_S260_BAD" | tr -c 'A-Za-z0-9' '_')"
-    _a6_launch "$_S260_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 "SANDY_PIDS_LIMIT=$_S260_BAD"
-    check "§260(2) SANDY_PIDS_LIMIT='$_S260_BAD' refuses the launch with a message naming the key, and no agent container is run (rc ${_A6_RC:-none})" \
-        bash -c 'test "$1" = 1 && grep -qF "SANDY_PIDS_LIMIT must be a positive integer" "$2/out" && test -z "$3"' _ "$_A6_RC" "$_A6_DIR/$_S260_C" "$(_a6_agent_args "$_S260_C")"
+_S266_V="$(_s266_pids pids-env || true)"
+check "§266(1) SANDY_PIDS_LIMIT=2000 from the environment: the agent's docker run carries --pids-limit 2000 (rc ${_A6_RC:-none}; got ${_S266_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 2000' _ "$_A6_RC" "$_S266_V"
+for _S266_BAD in abc 0 -1 08 1234567890 '4096 '; do
+    _S266_C="pids-bad-$(printf '%s' "$_S266_BAD" | tr -c 'A-Za-z0-9' '_')"
+    _a6_launch "$_S266_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 "SANDY_PIDS_LIMIT=$_S266_BAD"
+    check "§266(2) SANDY_PIDS_LIMIT='$_S266_BAD' refuses the launch with a message naming the key, and no agent container is run (rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 1 && grep -qF "SANDY_PIDS_LIMIT must be a positive integer" "$2/out" && test -z "$3"' _ "$_A6_RC" "$_A6_DIR/$_S266_C" "$(_a6_agent_args "$_S266_C")"
 done
 # The ordered gate: from a workspace .sandy/config a value at or below the
 # baseline is passive; a higher one needs approval, which a headless launch
 # cannot give, so it is dropped with the usual notice and the baseline holds.
 # $1 = CASE  $2 = workspace value  $3 = host config value or ""
-_s260_ws() {
+_s266_ws() {
     mkdir -p "$_A6_DIR/$1/ws/.sandy" "$_A6_DIR/$1/sh"
     printf 'SANDY_PIDS_LIMIT=%s\n' "$2" > "$_A6_DIR/$1/ws/.sandy/config"
     if [ -n "$3" ]; then printf 'SANDY_PIDS_LIMIT=%s\n' "$3" > "$_A6_DIR/$1/sh/config"; fi
 }
-_s260_ws pids-ws-lower 1000 ""
+_s266_ws pids-ws-lower 1000 ""
 _a6_launch pids-ws-lower SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S260_V="$(_s260_pids pids-ws-lower || true)"
-check "§260(3) a workspace SANDY_PIDS_LIMIT=1000, below the default, is honoured with no approval (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
-    bash -c 'test "$1" = 0 && test "$2" = 1000 && ! grep -qF "wants to set privileged keys" "$3/out"' _ "$_A6_RC" "$_S260_V" "$_A6_DIR/pids-ws-lower"
-_s260_ws pids-ws-higher 8192 ""
+_S266_V="$(_s266_pids pids-ws-lower || true)"
+check "§266(3) a workspace SANDY_PIDS_LIMIT=1000, below the default, is honoured with no approval (rc ${_A6_RC:-none}; got ${_S266_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 1000 && ! grep -qF "wants to set privileged keys" "$3/out"' _ "$_A6_RC" "$_S266_V" "$_A6_DIR/pids-ws-lower"
+_s266_ws pids-ws-higher 8192 ""
 _a6_launch pids-ws-higher SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S260_V="$(_s260_pids pids-ws-higher || true)"
-check "§260(4) a workspace SANDY_PIDS_LIMIT=8192, above the default, is approval-gated: headless drops it and the default 4096 holds (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
-    bash -c 'test "$1" = 0 && test "$2" = 4096 && grep -qF "wants to set privileged keys" "$3/out" && grep -qF "Non-interactive session" "$3/out"' _ "$_A6_RC" "$_S260_V" "$_A6_DIR/pids-ws-higher"
-_s260_ws pids-ws-host 8192 10000
+_S266_V="$(_s266_pids pids-ws-higher || true)"
+check "§266(4) a workspace SANDY_PIDS_LIMIT=8192, above the default, is approval-gated: headless drops it and the default 4096 holds (rc ${_A6_RC:-none}; got ${_S266_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 4096 && grep -qF "wants to set privileged keys" "$3/out" && grep -qF "Non-interactive session" "$3/out"' _ "$_A6_RC" "$_S266_V" "$_A6_DIR/pids-ws-higher"
+_s266_ws pids-ws-host 8192 10000
 _a6_launch pids-ws-host SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_S260_V="$(_s260_pids pids-ws-host || true)"
-check "§260(5) the gate compares against the host config: workspace 8192 under a host 10000 is a lowering, honoured with no approval (rc ${_A6_RC:-none}; got ${_S260_V:-none})" \
-    bash -c 'test "$1" = 0 && test "$2" = 8192 && ! grep -qF "wants to set privileged keys" "$3/out"' _ "$_A6_RC" "$_S260_V" "$_A6_DIR/pids-ws-host"
+_S266_V="$(_s266_pids pids-ws-host || true)"
+check "§266(5) the gate compares against the host config: workspace 8192 under a host 10000 is a lowering, honoured with no approval (rc ${_A6_RC:-none}; got ${_S266_V:-none})" \
+    bash -c 'test "$1" = 0 && test "$2" = 8192 && ! grep -qF "wants to set privileged keys" "$3/out"' _ "$_A6_RC" "$_S266_V" "$_A6_DIR/pids-ws-host"
 # The agent view (the claude pane with named sessions) fronts every background
 # session; when its daemon died the pane sat in a bare `read` for hours. Its
 # command string is RUN: a pane whose command exits 3 must print the label and
 # the code at SANDY_VERBOSE=0. The control is an ordinary pane at verbosity 0,
 # which still pauses silently.
-_S260_T="$(dirname "$SANDY_SCRIPT")/templates/user-setup.sh.tmpl"
-_S260_D="$(mktemp -d "${TMPDIR:-/tmp}/s260.XXXXXX")"
-awk '/^_sandy_wrap_cmd_exit_pause\(\) \{/ {on=1} on {print} on && /^\}/ {exit}' "$_S260_T" > "$_S260_D/wrap.sh"
-_S260_BODY="$(awk '/^build_claude_agents_cmd\(\) \{/ {on=1} on {print} on && /^\}/ {exit}' "$_S260_T")"
-check "§260(6) build_claude_agents_cmd asks the exit pause to report at every verbosity" \
-    bash -c 'printf "%s\n" "$1" | grep -qE "^[[:space:]]*_sandy_wrap_cmd_exit_pause \"Claude Code agent view\" \"\\\$cmd\" report\$"' _ "$_S260_BODY"
-check "§260(7) the agent view's pane, its command exiting 3 at SANDY_VERBOSE=0, prints [sandy] Claude Code agent view exited (code: 3)" \
+_S266_T="$(dirname "$SANDY_SCRIPT")/templates/user-setup.sh.tmpl"
+_S266_D="$(mktemp -d "${TMPDIR:-/tmp}/s260.XXXXXX")"
+awk '/^_sandy_wrap_cmd_exit_pause\(\) \{/ {on=1} on {print} on && /^\}/ {exit}' "$_S266_T" > "$_S266_D/wrap.sh"
+_S266_BODY="$(awk '/^build_claude_agents_cmd\(\) \{/ {on=1} on {print} on && /^\}/ {exit}' "$_S266_T")"
+check "§266(6) build_claude_agents_cmd asks the exit pause to report at every verbosity" \
+    bash -c 'printf "%s\n" "$1" | grep -qE "^[[:space:]]*_sandy_wrap_cmd_exit_pause \"Claude Code agent view\" \"\\\$cmd\" report\$"' _ "$_S266_BODY"
+check "§266(7) the agent view's pane, its command exiting 3 at SANDY_VERBOSE=0, prints [sandy] Claude Code agent view exited (code: 3)" \
     bash -c '. "$1/wrap.sh"; _sandy_is_headless=false; SANDY_VERBOSE=0
              s="$(_sandy_wrap_cmd_exit_pause "Claude Code agent view" "(exit 3)" report)"
-             bash -c "$s" </dev/null 2>/dev/null | grep -qxF "[sandy] Claude Code agent view exited (code: 3)"' _ "$_S260_D"
-check "§260(8) control: an ordinary pane at SANDY_VERBOSE=0 still pauses without the line (the probe can tell the two apart)" \
+             bash -c "$s" </dev/null 2>/dev/null | grep -qxF "[sandy] Claude Code agent view exited (code: 3)"' _ "$_S266_D"
+check "§266(8) control: an ordinary pane at SANDY_VERBOSE=0 still pauses without the line (the probe can tell the two apart)" \
     bash -c '. "$1/wrap.sh"; _sandy_is_headless=false; SANDY_VERBOSE=0
              s="$(_sandy_wrap_cmd_exit_pause "Codex CLI" "(exit 3)")"
              case "$s" in *"read -p"*) ;; *) exit 1 ;; esac
-             ! bash -c "$s" </dev/null 2>/dev/null | grep -qF "exited (code:"' _ "$_S260_D"
-rm -rf "$_S260_D"
+             ! bash -c "$s" </dev/null 2>/dev/null | grep -qF "exited (code:"' _ "$_S266_D"
+rm -rf "$_S266_D"
 _a6_done
-unset -f _s260_pids _s260_ws
-unset _S260_V _S260_BAD _S260_C _S260_T _S260_D _S260_BODY
+unset -f _s266_pids _s266_ws
+unset _S266_V _S266_BAD _S266_C _S266_T _S266_D _S266_BODY
 echo ""
 
 # BEGIN SUMMARY

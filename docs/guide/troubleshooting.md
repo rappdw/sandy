@@ -2,22 +2,24 @@
 
 Known problems and their fixes. Part of the [sandy guides](README.md); back to the [project README](../../README.md).
 
-## Sandy fails oddly on macOS (bash 3.2)
+## Sandy says it requires bash 5 (macOS bash 3.2)
 
-**Symptom.** On a Mac, `sandy` stops with an error that seems to have nothing
-to do with what you asked for, for example a shell error such as `unbound
-variable` or `syntax error`.
+**Symptom.** `sandy` stops at once with `[sandy] ERROR: sandy requires bash 5
+or newer; this is bash 3.2.57 at /bin/bash.`, followed by how to install one.
 
-**Cause.** Sandy requires bash 5 or newer on the host. `sandy` and `install.sh`
-start with `#!/usr/bin/env bash`, so they run under the first `bash` on your
-`PATH`. On a Mac without Homebrew's bash, that is `/bin/bash`, which is bash
-3.2.57. `sandy` and `install.sh` do not check the version and do not refuse to
-start. Under an older bash sandy is unsupported and may fail anywhere in a
-launch; one that works today is no promise for the next release. `sandy
---doctor` (or the standalone `doctor.sh`) does check: under bash 4 or older its
-Required section shows `! bash 3.2.57 (/bin/bash) is too old: sandy requires
-bash 5 or newer` with the fix below. It is a warning, so the doctor still exits
-0 when the required checks pass.
+**Cause.** Sandy requires bash 5 or newer on the host. `sandy` starts with
+`#!/usr/bin/env bash`, so it runs under the first `bash` on your `PATH`; on a
+Mac without Homebrew's bash first on `PATH`, that is `/bin/bash`, bash 3.2.57.
+Under a bash older than 5, sandy first looks for a newer one, at
+`/opt/homebrew/bin/bash`, `/usr/local/bin/bash` and then on your `PATH`, and
+re-runs itself under the first bash 5 it finds, with the same arguments, so
+with Homebrew's bash installed it works even when `/bin/bash` comes first. It
+stops with this message only when it finds none, and the message names the
+install command for your machine (Homebrew, MacPorts, or your Linux
+distribution's package manager). Since 2.12.0 sandy no longer even parses
+under bash 3.2, so it cannot run there at all. `sandy --doctor` (or the
+standalone `doctor.sh`) still warns under bash 4 or older (`! bash 3.2.57
+(/bin/bash) is too old: sandy requires bash 5 or newer`).
 
 **Fix.** Install a current bash and put it first on `PATH`:
 
