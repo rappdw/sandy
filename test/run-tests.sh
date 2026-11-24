@@ -7118,6 +7118,73 @@ PY
 check "§92(f) --validate-config missing-file errors[] is non-empty" \
     python3 "$_S92_ERRORS_PY" "$_s92f_out"
 
+# --- (f2) #583: a file with no KEY=VALUE line (empty, comments only, blank
+# lines only, or only lines that are not keys: `lower=1`, `KEY=`) is valid:
+# exit 0, stderr 0 bytes, one JSON document with no errors, warnings or keys. Before, the key reader's grep found no line and
+# exited 1 under the handler's ERR trap, which printed "introspection handler
+# failed" on stderr (the JSON and the exit code were right).
+_S92_EMPTY_PY="$(mktemp)"
+cat > "$_S92_EMPTY_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for k in ("errors", "warnings", "unknown_keys", "privileged_keys_requiring_approval"):
+    assert d.get(k) == [], "%s: %r" % (k, d.get(k))
+assert d.get("approval_status") == "none_required", d.get("approval_status")
+PY
+mkdir -p "$_S92_TMP/ws92e/.sandy"
+for _s92f2 in empty comments blank invalid; do
+    case "$_s92f2" in
+        empty) : > "$_S92_TMP/ws92e/.sandy/config" ;;
+        comments) printf '# SANDY_MODEL=x is commented out\n# nothing else\n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+        blank) printf '\n\n   \n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+        invalid) printf 'lower=1\nKEY=\n' > "$_S92_TMP/ws92e/.sandy/config" ;;
+    esac
+    _s92f2_out="$_S92_TMP/f2-$_s92f2.out"; _s92f2_err="$_S92_TMP/f2-$_s92f2.err"; _s92f2_rc=0
+    env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+        bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92e/.sandy/config" >"$_s92f2_out" 2>"$_s92f2_err" </dev/null || _s92f2_rc=$?
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) exits 0 (#583)" test "$_s92f2_rc" -eq 0
+    _s92_diag "$_s92f2_err" "§92(f2) --validate-config ($_s92f2)"
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) writes 0 bytes to stderr (got: $(_s92_pv "$_s92f2_err"); mutation: the key reader's grep run unguarded under the ERR trap)" \
+        bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f2_err"
+    check "§92(f2) --validate-config on a config with no KEY=VALUE line ($_s92f2) prints one JSON document with no errors, warnings or keys (mutation: grep's no-match status read as a read failure)" \
+        bash -c 'python3 "$1" "$2" && python3 "$3" "$2"' -- "$_S92_PURITY_PY" "$_s92f2_out" "$_S92_EMPTY_PY"
+done
+rm -f "$_S92_EMPTY_PY"
+unset _s92f2 _s92f2_out _s92f2_err _s92f2_rc _S92_EMPTY_PY
+# --- (f3) a path that cannot be read as a config file is an error, not "no
+# keys": exit 1, stderr 0 bytes, one JSON document whose errors[] says why.
+# Before, `|| true` on the key reader made an unreadable file (grep's exit 2)
+# valid with errors: [], and a directory was reported as "file does not exist".
+_S92_REASON_PY="$(mktemp)"
+cat > "$_S92_REASON_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+errs = d.get("errors") or []
+assert len(errs) == 1 and errs[0].startswith(sys.argv[2]), "errors: %r, want one starting %r" % (errs, sys.argv[2])
+PY
+mkdir -p "$_S92_TMP/ws92u/.sandy" "$_S92_TMP/ws92d/.sandy/config"
+printf 'SANDY_MODEL=x\n' > "$_S92_TMP/ws92u/.sandy/config"; chmod 000 "$_S92_TMP/ws92u/.sandy/config"
+for _s92f3 in unreadable directory; do
+    case "$_s92f3" in
+        unreadable) _s92f3_p="$_S92_TMP/ws92u/.sandy/config"; _s92f3_why="file is not readable: " ;;
+        directory) _s92f3_p="$_S92_TMP/ws92d/.sandy/config"; _s92f3_why="path is a directory, not a config file: " ;;
+    esac
+    if [ "$_s92f3" = unreadable ] && [ -r "$_s92f3_p" ]; then
+        skip "§92(f3) --validate-config on an unreadable file: this user can read a mode-000 file (root), so the case cannot be made"
+        continue
+    fi
+    _s92f3_out="$_S92_TMP/f3-$_s92f3.out"; _s92f3_err="$_S92_TMP/f3-$_s92f3.err"; _s92f3_rc=0
+    env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+        bash "$_S92_SANDY" --validate-config "$_s92f3_p" >"$_s92f3_out" 2>"$_s92f3_err" </dev/null || _s92f3_rc=$?
+    _s92_diag "$_s92f3_err" "§92(f3) --validate-config ($_s92f3)"
+    check "§92(f3) --validate-config on a $_s92f3 path exits 1, writes 0 bytes to stderr, and prints one JSON document whose errors[] says ${_s92f3_why% } (rc $_s92f3_rc; mutation: the key reader ending in || true, or the directory reported as missing)" \
+        bash -c '[ "$1" = 1 ] && [ "$(( $(wc -c < "$2") ))" -eq 0 ] && python3 "$3" "$4" && python3 "$5" "$4" "$6"' -- \
+        "$_s92f3_rc" "$_s92f3_err" "$_S92_PURITY_PY" "$_s92f3_out" "$_S92_REASON_PY" "$_s92f3_why"
+done
+chmod 600 "$_S92_TMP/ws92u/.sandy/config" 2>/dev/null || true
+rm -f "$_S92_REASON_PY"
+unset _s92f3 _s92f3_p _s92f3_why _s92f3_out _s92f3_err _s92f3_rc _S92_REASON_PY
+
 # --- (g) --validate-config with NO argument -> exit 1, stdout 0 bytes, stderr has ERROR ---
 _s92g_out="$_S92_TMP/g.out"; _s92g_err="$_S92_TMP/g.err"; _s92g_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
@@ -13349,7 +13416,8 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 : > "$_S130_DIR/scan.sh"
 for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_is_copied_rel _sandy_symlink_inside _sandy_symlink_resolve \
           _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_symlink_byname_rels _sandy_symlink_canon _sandy_symlink_target_judged _sandy_symlink_walk \
-          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan; do
+          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_worktree_admin_dirs _sandy_is_gitdir _sandy_ws_physical; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
 done
 unset _f
@@ -27737,7 +27805,9 @@ check "§238(latecp) .claude swapped for a link out of the workspace after the g
 _S238_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify _sandy_symlink_is_copied_rel \
           _sandy_symlink_walk _sandy_ws_physical _sandy_gitdir_host _sandy_symlink_path_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_gitdir_rel \
+          _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S238_D/fns.sh"
 done
 mkdir -p "$_S238_D/h/ws/c" "$_S238_D/h/o" "$_S238_D/h/p" "$_S238_D/h/dots" "$_S238_D/h/stow" "$_S238_D/h/.sandy/x" "$_S238_D/sys"
@@ -28088,7 +28158,9 @@ check "§239(g4) control: a real empty .github/workflows (debris) and an empty .
 # uncopied path linked to the same place is not.
 _S239_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host \
+          _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S239_D/fns.sh"
 done
 unset _f
@@ -28973,7 +29045,7 @@ _S250_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S250_A" ]; then echo "launch rc $
     _a6_pair "$_S250_A" -e SANDY_AGENT=claude || echo "no -e SANDY_AGENT=claude"
     if grep -qxF "SANDY_AGENT=claude," "$_S250_A"; then echo "the trailing comma reached the container"; fi
     grep -qxF sandy-claude-code "$_S250_A" || echo "not the single-agent claude image"
-    grep -qF "$_S250_W/.claude/skills/ (existed at launch with no sandbox overlay" "$_S250_O" || echo "the .claude/skills edit is not reported"; } 2>&1)" || true
+    grep -qF "$_S250_W/.claude/skills/ (existed at launch and is not overlaid in any session; its contents changed)" "$_S250_O" || echo "the .claude/skills edit is not reported"; } 2>&1)" || true
 if [ -n "$_S250_R" ]; then _a6_diag "§250(d)" "$_S250_C"; fi
 check "§250(d) SANDY_AGENT=claude, runs as SANDY_AGENT=claude with the claude image, and an edit to an existing .claude/skills is still reported (mutation: drop the rejoin after validation; ${_S250_R:-ok})" \
     test -z "$_S250_R"
@@ -29064,7 +29136,8 @@ _S251_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
           _sandy_symlink_is_byname_mount_rel _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts _sandy_path_overlaps _sandy_gstack_forbidden \
           _sandy_gstack_refuse_forbidden _sandy_symlink_resolve _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host _sandy_symlink_recorded \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_byname_rels _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S251_D/fns.sh"
 done
 unset _f
@@ -32839,10 +32912,11 @@ _S245_L="$(_s245_run SK2 launch claude)"
 _S245_SNAP="$(cat "$_S245_D/SK2/sb/.protected-existed-at-launch")"
 printf 'evil\n' >> "$_S245_D/SK2/ws/.claude/skills/mine/SKILL.md"
 _S245_OUT="$(_s245_run SK2 end claude)"
-check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
+check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed, worded as not overlaid in any session (#585), with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -q "skills" \
              && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" && ! printf "%s\n" "$3" | grep -qFx ".claude/skills" \
-             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch and is not overlaid in any session; its contents changed)" \
+             && ! printf "%s" "$1" | grep -qF "no sandbox overlay for this agent" \
              && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/SK2/ws" "$_S245_SNAP" "$_S245_L"
 mkdir -p "$_S245_D/SK3/ws/.claude/skills/mine"; printf 'mine\n' > "$_S245_D/SK3/ws/.claude/skills/mine/SKILL.md"
 _S245_L="$(_s245_run SK3 launch claude)"
@@ -32856,7 +32930,7 @@ printf 'evil\n' >> "$_S245_D/SK4/ws/.claude/skills/mine/SKILL.md"
 _S245_OUT="$(_s245_run SK4 end claude,)"
 check "§245(24b) SANDY_AGENT=claude, (a trailing comma the validator accepts): an existing .claude/skills is still fingerprinted and its edit reported (mutation: _sandy_agent_has matching an empty name, with the detection site trusting it)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" \
-             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/SK4/ws" "$_S245_SNAP"
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch and is not overlaid in any session"' _ "$_S245_OUT" "$_S245_D/SK4/ws" "$_S245_SNAP"
 _S245_L="$(_s245_run GX1 launch gemini)"
 mkdir -p "$_S245_D/GX1/ws/.gemini/extensions/evil"; printf '{"name":"evil","mcpServers":{"x":{"command":"sh"}}}\n' > "$_S245_D/GX1/ws/.gemini/extensions/evil/gemini-extension.json"
 _S245_OUT="$(_s245_run GX1 end gemini)"
@@ -32902,7 +32976,8 @@ for _s245_p in .gemini/agents .gemini/skills .gemini/policies .agents/skills; do
         check "§245(30) $_s245_ag session: an existing $_s245_p is fingerprinted, gets no mount, and an edit to it is reported as changed with no rm -rf (mutation: mapping $_s245_p to $_s245_ag in _sandy_overlay_detect_agent)" \
             bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -qF "$5" \
                      && printf "%s\n" "$3" | grep -qF "#content	$5	" && ! printf "%s\n" "$3" | grep -qFx "$5" \
-                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch with no sandbox overlay" \
+                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch and is not overlaid in any session; its contents changed)" \
+                     && ! printf "%s" "$1" | grep -qF "no sandbox overlay for this agent" \
                      && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/NB$_s245_n$_s245_ag/ws" "$_S245_SNAP" "$_S245_L" "$_s245_p"
     done
     mkdir -p "$_S245_D/NC$_s245_n/ws/$_s245_p/mine"; printf 'mine\n' > "$_S245_D/NC$_s245_n/ws/$_s245_p/mine/x.md"
@@ -33941,9 +34016,35 @@ check "§256(f) the snapshot lookup answers as grep -qFx and the awk lookup do, 
                  a=0; grep -qFx "$k" "$f" || a=1; b=0; _sandy_snap_scan "$f" = "$k" || b=1
                  [ "$a" = "$b" ] || { echo "= $k: $a $b"; exit 1; }
              done' _ "$_S256_SNAP" "$_S256_SCAN"
+# (g) #592: a key starting with `-` is a pattern, never an option. `-n` and
+# `-e` are lines of the snapshot (and `-n` a #id key); before, grep read
+# `-n` as its -n flag and took the snapshot path for the pattern, so it read
+# stdin (here /dev/null: an answer of "absent" instead of a block) and the
+# lookup said 1. `-x` is absent. Both halves of the function are asked: a
+# `-` key always goes to the command, and so does every key of the long
+# snapshot past line 200.
+_S256_DSNAP="$_S256_D/dash.snap"
+printf '%s\n' '#gitdirs-recorded' '-n' '-e' "$(printf '#id\t-n\tvn')" > "$_S256_DSNAP"
+# A key holding a backslash: awk -v would read h\nb as h<newline>b and
+# h\\b as h\b, so the field lookup missed them (a false REPLACED).
+printf '#id\t%s\t%s\n' 'h\nb' vbn 'h\\b' vbb 'h\b' vb1 >> "$_S256_DSNAP"
+cat "$_S256_SNAP" "$_S256_DSNAP" > "$_S256_D/dash-long.snap"
+check "§256(g) a snapshot key starting with - (-n, -e) is looked up as a pattern: found when it is a line, not found when absent, its #id value read, and a key holding a backslash (h\\nb, h\\\\b, h\\b) is looked up as written, in a short snapshot and past line 200 of a long one, with stdin at end of file (mutations: grep -qFx without -e and -- answers absent for -n and -e, #592; awk -v p= misses the backslash keys)" \
+    bash -c 'eval "$2"; [ -n "$(declare -F _sandy_snap_scan)" ] || exit 1
+             for f in "$1" "$3"; do
+                 n=0
+                 for k in -n -e; do _sandy_snap_scan "$f" = "$k" || { echo "= $k not found in $f"; exit 1; }; n=$((n + 1)); done
+                 if _sandy_snap_scan "$f" = -x; then echo "= -x found in $f"; exit 1; fi
+                 _sandy_snap_scan "$f" "#id" -n v; [ "$v" = xvn ] || { echo "#id -n: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$4" v; [ "$v" = xvbn ] || { echo "#id $4: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$5" v; [ "$v" = xvbb ] || { echo "#id $5: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$6" v; [ "$v" = xvb1 ] || { echo "#id $6: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$7" v; [ -z "$v" ] || { echo "#id $7 found: [$v] in $f"; exit 1; }
+                 [ "$n" = 2 ] || exit 1
+             done' _ "$_S256_DSNAP" "$_S256_SCAN" "$_S256_D/dash-long.snap" 'h\nb' 'h\\b' 'h\b' 'h\x' </dev/null
 _a6_done
 unset -f _s256_shims _s256_count
-unset _S256_SNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
+unset _S256_SNAP _S256_DSNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
 echo ""
 
 # ============================================================
@@ -34100,6 +34201,396 @@ check "§257(d) every od call that sandy makes passes -v ($_S257_N calls; withou
 _a6_done
 unset -f _s257_hex _s257_unhex _s257_grab _s257_paths _s257_repo
 unset _S257_ODS _S257_RUN _S257_CASES _S257_C _S257_W _S257_OS _S257_D _S257_O _S257_S _S257_R _S257_F _S257_L _S257_HEX _S257_UNHEX _S257_LOCS _S257_N
+echo ""
+
+# ============================================================
+section "§258: cleanup() removes the agent container before the session-end report, and undoes what depends on it (stub dirs, the snapshot, the macOS locks, the seeded commondir files) only once the container is known gone; otherwise the report is provisional and judged again later (#584)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. Until 2.11.0 a session's cleanup() ran the session-end protected-path
+# report first and force-removed the agent container afterwards, so a write the
+# agent made between the two (a planted hook, a rewritten .envrc) was never
+# reported. --stop's direct teardown of a supervisor-less daemon already
+# removed the container first (#573). Now cleanup() does too: container
+# removed, report, then the locks and seeds released, as the 2.9.0 fix
+# (GHSA-wjw9-4x75-x5vx) requires, only once the container is known gone.
+# Known gone means inspect said "no such container/object"; a daemon that
+# cannot be reached also says "no such" (`connect: no such file or
+# directory`, `no such host`) and is NOT gone. While the container may still
+# exist: the empty stub dirs stay (removing one detaches a surviving
+# container's mount on Linux), the report is provisional and the launch
+# snapshot is kept, and the next launch (or --stop) judges the workspace
+# against it again once the container is gone.
+#
+# The stub in front of the §248 ones plays an agent that writes until it is
+# removed: at the `docker rm -f sandy-ws-...` that follows the agent's run it
+# creates .idea/late.xml in the workspace (S258_LATE=1; .idea is a protected
+# dir absent at launch, so not one sandy locks: a locked file the stub
+# rewrote would get a new ctime, which the unlock reads as the user's own
+# flag change), and records which files are
+# still locked (CASE/flags-at-rm), whether the seeded .git/commondir is still
+# there (CASE/seed-at-rm) and whether the .claude/commands stub dir is
+# (CASE/stub-at-rm). With S258_INSPECT_ERR its `inspect -f {{.Id}}` fails
+# with that message, as a docker CLI that cannot reach its daemon does. An rm
+# before the run (none is made today) finds no flags-during-run and does
+# nothing.
+_S258_B="$_A6_DIR/s258bin"; mkdir -p "$_S258_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "rm -f sandy-ws-"*)\n'
+  printf '    if [ -e "$A6_LOG/flags-during-run" ]; then\n'
+  printf '        cp "$A6_LOG/flags" "$A6_LOG/flags-at-rm" 2>/dev/null || : > "$A6_LOG/flags-at-rm"\n'
+  printf '        if [ -f "$A6_WS/.git/commondir" ]; then echo present; else echo gone; fi > "$A6_LOG/seed-at-rm"\n'
+  printf '        if [ -d "$A6_WS/.claude/commands" ]; then echo present; else echo gone; fi > "$A6_LOG/stub-at-rm"\n'
+  printf '        if [ -n "${S258_LATE:-}" ]; then mkdir -p "$A6_WS/.idea"; printf "late\\n" > "$A6_WS/.idea/late.xml"; fi\n'
+  printf '    fi ;;\n'
+  printf '"inspect -f {{.Id}} "*) if [ -n "${S258_INSPECT_ERR:-}" ]; then printf "%%s\\n" "$S258_INSPECT_ERR" >&2; exit 1; fi ;;\n'
+  printf 'esac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S258_B/docker"
+chmod +x "$_S258_B/docker"
+_S258_PATH="$_S258_B:$_S248_PATH"
+_s258_repo() {   # $1 = workspace: a git dir and an .envrc
+    mkdir -p "$1/.git/objects" "$1/.git/refs"
+    printf 'ref: refs/heads/main\n' > "$1/.git/HEAD"; printf '[core]\n' > "$1/.git/config"
+    printf 'export S258=1\n' > "$1/.envrc"
+}
+_S258_SOCK='failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory'
+_S258_HOST='error during connect: Get "http://remote:2375/v1.47/containers/x/json": dial tcp: lookup remote: no such host'
+# (a) a write the agent makes until it is removed is reported; the locks and
+# the seed were still held when it was removed, and are released after.
+_S258_C=s258-late; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_LATE=1 PATH="$_S258_PATH"
+# (c) the container may still exist after its removal: the report still runs
+# (and sees the late write), but is provisional and keeps the snapshot; the
+# locks and the seed are kept, and said so.
+_S258_C=s258-surv; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_LATE=1 S248_SURVIVE=1 PATH="$_S258_PATH"
+# (d) the empty stub dir a session's overlay mount created is removed after
+# the container, and only once it is gone.
+for _S258_C in s258-stub s258-stubk; do
+    _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"; mkdir -p "$(_a6_sandbox "$_S258_C")/workspace-commands"
+done
+_a6_bg s258-stub _a6_launch s258-stub SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_MOUNTPOINTS=.claude/commands PATH="$_S258_PATH"
+_a6_bg s258-stubk _a6_launch s258-stubk SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 A6_MOUNTPOINTS=.claude/commands S248_SURVIVE=1 PATH="$_S258_PATH"
+# (e2) the daemon unreachable at teardown (its socket missing): not gone.
+_S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_bg "$_S258_C" _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin S258_INSPECT_ERR="$_S258_SOCK" PATH="$_S258_PATH"
+_S258_C=s258-late; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"
+_S258_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$(_a6_agent_args "$_S258_C")" ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_A6_DIR/$_S258_C/seed-at-rm" ] || echo "the probe did not run (no rm -f of the agent container after its run)"
+    [ -f "$_S258_W/.idea/late.xml" ] || echo "the late write was not made"
+    awk '/Protected paths appeared during this session/ { on = 1 } on' "$_S258_O" | grep -qF "$_S258_W/.idea/" || echo "the late .idea/ is not reported as appeared"
+    if grep -qF "provisional" "$_S258_O"; then echo "called provisional with the container gone"; fi
+    [ ! -e "$(_a6_sandbox "$_S258_C")/.protected-existed-at-launch" ] || echo "the snapshot was kept with the container gone"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(a)" "$_S258_C"
+check "§258(a) a write the agent makes until its container is removed (here at the docker rm -f itself) is in the session-end report, which is final (snapshot removed) once the container is gone (mutation: the report before the removal, the 2.11.0 order, misses it; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_S258_R="$( { [ "$(cat "$_A6_DIR/$_S258_C/seed-at-rm" 2>/dev/null)" = present ] || echo "the seed was gone when the container was removed"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null || echo "not locked when the container was removed: [$(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null)]"
+    grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags-at-rm" 2>/dev/null || echo ".git/config not locked when the container was removed"
+    [ ! -s "$_A6_DIR/$_S258_C/flags" ] || echo "still locked after the session: $(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags")"
+    [ ! -e "$_S258_W/.git/commondir" ] || echo "the seed was not removed after the session"; } 2>&1)" || true
+check "§258(b) ...the macOS locks and the seeded commondir were still in place when the container was removed, and are released after it (mutation: the release before the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_S258_C=s258-surv; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"; _S258_S="$(_a6_sandbox "$_S258_C")"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ -f "$_A6_DIR/$_S258_C/seed-at-rm" ] || echo "the probe did not run"
+    awk '/Protected paths appeared during this session/ { on = 1 } on' "$_S258_O" | grep -qF "$_S258_W/.idea/" || echo "the late .idea/ is not reported as appeared"
+    grep -qF "may still exist, so this session-end report is provisional: writes it makes from here are not in it" "$_S258_O" || echo "not said to be provisional"
+    grep -qF "judged against it again once the container is gone: docker rm -f sandy-ws-" "$_S258_O" || echo "the advice is not docker rm -f for a terminal session's container"
+    if grep -qF "sandy --stop" "$_S258_O"; then echo "advises --stop for a terminal session"; fi
+    _S258_P="$(ls "$_S258_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
+    [ -n "$_S258_P" ] && grep -qx '#gitdirs-recorded' "$_S258_P" || echo "the launch snapshot was not kept in .protected-provisional/"
+    grep -q "^container	sandy-ws-" "${_S258_P%.snap}.info" 2>/dev/null || echo "no .info naming the container beside it"
+    [ ! -e "$_S258_S/.protected-existed-at-launch" ] || echo "the live snapshot name is still taken"
+    [ "$(cat "$_S258_W/.git/commondir" 2>/dev/null)" = . ] || echo "the seed was removed"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked under a surviving container"
+    grep -qF "may still exist, so the macOS file locks and the seeded commondir files are kept" "$_S258_O" || echo "no warning"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c)" "$_S258_C"
+check "§258(c) when the container may still exist after its removal, the report still runs (and names the late write) but says it is provisional, since writes after it go unreported, and keeps the launch snapshot; the locks and the seed are kept, and said so (mutation: the snapshot removed by the report regardless; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c2) the surviving container writes after that report (here: the test
+# creates .vscode/tasks.json); the next launch, which removes that container,
+# judges the workspace against the kept snapshot and reports it.
+mkdir -p "$_S258_W/.vscode"; printf '{"tasks":[]}\n' > "$_S258_W/.vscode/tasks.json"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S258_PATH"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qF "An EARLIER session's end report (it was provisional" "$_S258_O" || echo "no re-judgement, or not labelled as the earlier session's"
+    awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_S258_O" | grep -qF "$_S258_W/.vscode/" || echo "the write after the provisional report is not reported in the labelled block"
+    grep -qF "==== An earlier session, " "$_S258_S/.session-end-report" 2>/dev/null || echo "the re-judgement is not recorded"
+    grep -qF "$_S258_W/.vscode/" "$_S258_S/.session-end-report" 2>/dev/null || echo "the record does not name the write"
+    [ ! -e "$_S258_S/.protected-provisional" ] || echo "the kept snapshot was left: $(ls -A "$_S258_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c2)" "$_S258_C"
+check "§258(c2) ...and the next launch, once it has removed that container, judges the workspace against the kept snapshot: a write made after the provisional report (.vscode/tasks.json) is reported, labelled as the earlier session's, recorded until --ack-report, and the kept snapshot is gone (mutations: the snapshot removed by the provisional report; the re-judgement only printed; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c3) the same under --start: the re-judgement runs in the supervisor, whose
+# output is a log, so it must be recorded (the next --start, --attach, --stop
+# or terminal launch shows it until --ack-report).
+_S258_C=s258-start; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"; _S258_S="$(_a6_sandbox "$_S258_C")"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+mkdir -p "$_S258_W/.vscode"; printf '{"tasks":[]}\n' > "$_S258_W/.vscode/tasks.json"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 A6_TERM_ON_DETACH=1 PATH="$_S258_PATH" -- --start --workspace "$_S258_W"
+_S258_R="$( { [ -n "$(_a6_agent_args "$_S258_C")" ] || echo "no supervisor docker run (rc $_A6_RC)"
+    grep -qF "==== An earlier session, " "$_S258_S/.session-end-report" 2>/dev/null || echo "the supervisor's re-judgement is not recorded"
+    awk '/==== An earlier session, / { on = 1 } /==== Daemon session ended/ { on = 0 } on' "$_S258_S/.session-end-report" 2>/dev/null | grep -qF "$_S258_W/.vscode/" || echo "the record does not name the write"
+    [ ! -e "$_S258_S/.protected-provisional" ] || echo "the kept snapshot was left"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c3)" "$_S258_C"
+check "§258(c3) under --start the supervisor judges the kept snapshot once it has removed the earlier container, and RECORDS that report, so --start, --attach, --stop and a terminal launch show it until --ack-report (mutation: the re-judgement only printed, into the supervisor's log; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c4) two provisional sessions in a row each keep their own snapshot, tied to
+# their launch by name; the second launch, its predecessor's container still
+# there, says once that that report is still provisional and how to clear
+# it; the third judges both, and nothing else: a snapshot a killed session
+# left at the live name is not a kept one.
+_S258_C=s258-multi; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"; _S258_S="$(_a6_sandbox "$_S258_C")"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_S258_R="$( { [ "$(ls "$_S258_S/.protected-provisional/"*.snap 2>/dev/null | wc -l | tr -d ' ')" = 2 ] || echo "kept snapshots: $(ls -A "$_S258_S/.protected-provisional" 2>/dev/null | tr '\n' ' ')"
+    grep -qF "An earlier session-end report of this workspace is still provisional (its container may still exist); it is judged once the container is gone: docker rm -f sandy-ws-" "$_A6_DIR/$_S258_C/out" || echo "no still-provisional line"; } 2>&1)" || true
+printf '%s\n' '#gitdirs-recorded' > "$_S258_S/.protected-existed-at-launch"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S258_PATH"
+_S258_R="$_S258_R$( { [ "$(grep -cF "An EARLIER session's end report" "$_A6_DIR/$_S258_C/out" || true)" = 2 ] || echo "re-judgements: $(grep -cF "An EARLIER session's end report" "$_A6_DIR/$_S258_C/out" || true), want 2"
+    [ ! -e "$_S258_S/.protected-provisional" ] || echo "left: $(ls -A "$_S258_S/.protected-provisional")"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c4)" "$_S258_C"
+check "§258(c4) two provisional sessions keep two snapshots, each tied to its launch by name (not one marker any snapshot could pair with); while the first one's container is still there the next launch says that report is still provisional and how to clear it; then both are judged, and a stray snapshot at the live name is not (mutations: one shared kept snapshot overwritten; the not-yet-judged case silent; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_a6_join s258-stub; _S258_W="$_A6_DIR/s258-stub/ws"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qx "mountpoint .claude/commands" "$_A6_DIR/s258-stub/events.log" || echo "fixture: no overlay mount point created"
+    [ "$(cat "$_A6_DIR/s258-stub/stub-at-rm" 2>/dev/null)" = present ] || echo "the stub dir was removed before the container (at-rm: $(cat "$_A6_DIR/s258-stub/stub-at-rm" 2>/dev/null || echo none))"
+    [ ! -e "$_S258_W/.claude/commands" ] || echo "the stub dir was not removed after the session"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(d)" s258-stub
+check "§258(d) the empty stub dir an overlay mount created (.claude/commands) is still there when the container is removed, and removed after it (mutation: the stub sweep before the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+_a6_join s258-stubk; _S258_W="$_A6_DIR/s258-stubk/ws"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    grep -qx "mountpoint .claude/commands" "$_A6_DIR/s258-stubk/events.log" || echo "fixture: no overlay mount point created"
+    [ -d "$_S258_W/.claude/commands" ] || echo "the stub dir was removed under a surviving container"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(d2)" s258-stubk
+check "§258(d2) ...and it stays when the container may still exist (mutation: the stub sweep regardless of the removal; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (e) the predicate itself: no such container / object (Docker, podman) is
+# gone, an empty id is gone, an id is not, and a daemon that cannot be
+# reached (a missing socket, a DOCKER_HOST that does not resolve) is not.
+_S258_FN="$(sed -n '/^_sandy_container_gone() {/,/^}$/p' "$SANDY_SCRIPT")"
+check "§258(e) _sandy_container_gone: \"No such container\", \"No such object\" and podman's \"no such container\" are gone; an empty id is gone; an id, a missing daemon socket (connect: no such file or directory) and an unresolvable DOCKER_HOST (no such host) are not (mutation: matching any \"no such\")" \
+    bash -c 'eval "$1"; [ -n "$(declare -F _sandy_container_gone)" ] || exit 1
+             docker() { if [ -n "$D_ERR" ]; then printf "%s\n" "$D_ERR" >&2; return 1; fi; printf "%s" "$D_OUT"; }
+             t() { D_ERR="$2" D_OUT="$3"; if _sandy_container_gone x; then r=gone; else r=present; fi; [ "$r" = "$1" ] || { echo "[$2|$3] -> $r, want $1"; exit 1; }; }
+             t gone "Error response from daemon: No such container: x" ""
+             t gone "Error: No such object: x" ""
+             t gone "Error: no such container x" ""
+             t gone "" ""
+             t present "" "4f3c2b1a"
+             t present "$2" ""
+             t present "$3" ""
+             echo probed' _ "$_S258_FN" "$_S258_SOCK" "$_S258_HOST"
+_S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _a6_join "$_S258_C"; _S258_O="$_A6_DIR/$_S258_C/out"
+_S258_R="$( { if [ "$_A6_RC" != 0 ]; then echo "launch rc $_A6_RC"; fi
+    [ "$(cat "$_S258_W/.git/commondir" 2>/dev/null)" = . ] || echo "the seed was removed with the daemon unreachable"
+    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked with the daemon unreachable"
+    grep -qF "provisional" "$_S258_O" || echo "the report was not called provisional"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(e2)" "$_S258_C"
+check "§258(e2) a launch whose teardown cannot reach the docker daemon (inspect: connect: no such file or directory) keeps the macOS locks and the seed and calls its report provisional (mutation: matching any \"no such\" as gone; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (c5) the re-judgement walks the gitdir a .git FILE named in that session
+# (recorded beside the kept snapshot): a worktree admin dir created there
+# after the provisional report is reported.
+_S258_C=s258-gitf; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_G="$_A6_DIR/$_S258_C/realgit"
+mkdir -p "$_S258_W" "$_S258_G/objects" "$_S258_G/refs"; printf 'ref: refs/heads/main\n' > "$_S258_G/HEAD"; printf '[core]\n' > "$_S258_G/config"
+printf 'gitdir: ../realgit\n' > "$_S258_W/.git"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_S258_R="$( { grep -q "^gitdir	[0-9a-f]" "$(ls "$(_a6_sandbox "$_S258_C")/.protected-provisional/"*.info 2>/dev/null | head -n 1)" 2>/dev/null || echo "the gitdir was not recorded beside the kept snapshot (rc $_A6_RC)"; } 2>&1)" || true
+mkdir -p "$_S258_G/worktrees/new"; printf 'ref: refs/heads/new\n' > "$_S258_G/worktrees/new/HEAD"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S258_PATH"
+_S258_R="$_S258_R$( { awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_A6_DIR/$_S258_C/out" | grep -qF "$_S258_G/worktrees/new" || echo "the admin dir created in the .git file's gitdir is not in the re-judgement"; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(c5)" "$_S258_C"
+check "§258(c5) the re-judgement walks the gitdir the earlier session's .git file named (recorded with the kept snapshot): a worktree admin dir created there after the provisional report is reported (mutation: the re-judgement without that gitdir; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (e3) --unlock refuses while the workspace's container may still exist.
+# Docker unreachable (the socket-missing wording): the refusal says so, since
+# neither docker rm -f nor the next launch can help then, and prints the
+# chflags -h nouchg command for each flag sandy set, after the same checks
+# the unlock applies (.envrc, replaced by another file since, gets a line
+# saying so instead). The container present (inspect prints an id): the
+# docker rm -f advice, and no chflags lines. Gone: it unlocks.
+_S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_O="$_A6_DIR/$_S258_C/out"
+cp "$_S258_W/.envrc" "$_S258_W/.envrc.new"; mv -f "$_S258_W/.envrc.new" "$_S258_W/.envrc"
+_a6_launch "$_S258_C" A6_OS=Darwin S258_INSPECT_ERR="$_S258_SOCK" PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
+_S258_R="$( { [ "$_A6_RC" = 1 ] || echo "--unlock rc $_A6_RC, want 1"
+    grep -qF "Docker could not be reached, so whether the container sandy-ws-" "$_S258_O" || echo "the refusal does not name reachability"
+    grep -qxF "[sandy]   chflags -h nouchg $(printf '%q' "$_S258_W/.git/config")" "$_S258_O" || grep -qxF "  chflags -h nouchg $(printf '%q' "$_S258_W/.git/config")" "$_S258_O" || echo "no nouchg line for .git/config"
+    grep -qF ".envrc: a different file now sits there: no command printed" "$_S258_O" || echo "the replaced .envrc is not named"
+    if grep -qF "nouchg $(printf '%q' "$_S258_W/.envrc")" "$_S258_O"; then echo "a nouchg line for the replaced .envrc"; fi
+    grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked anyway"; } 2>&1)" || true
+_a6_launch "$_S258_C" A6_OS=Darwin S248_SURVIVE=1 PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
+_S258_R="$_S258_R$( { [ "$_A6_RC" = 1 ] || echo "--unlock (container present) rc $_A6_RC, want 1"
+    grep -qF "still exists (a session that outlived its teardown), so its locks stay" "$_S258_O" || echo "no refusal for a present container"
+    grep -qF "docker rm -f sandy-ws-" "$_S258_O" || echo "no docker rm -f advice"
+    if grep -qF "chflags -h nouchg" "$_S258_O"; then echo "nouchg lines while the container exists"; fi; } 2>&1)" || true
+_a6_launch "$_S258_C" A6_OS=Darwin PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
+_S258_R="$_S258_R$( { if grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags" 2>/dev/null; then echo ".git/config still locked once the container is gone (rc $_A6_RC)"; fi; } 2>&1)" || true
+[ -z "$_S258_R" ] || _a6_diag "§258(e3)" "$_S258_C"
+check "§258(e3) --unlock refuses while the workspace's container may still exist: with Docker unreachable it says so and prints chflags -h nouchg for each flag sandy set that passes the unlock's checks (a replaced file is named instead); with the container present it advises docker rm -f and prints none; once it is gone it unlocks (mutations: --unlock checking daemon containers only; no nouchg lines; the lines printed while the container exists; ${_S258_R:-ok})" \
+    test -z "$_S258_R"
+# (f) --reset-sandbox says when it drops a pending session-end judgement.
+_S258_C=s258-reset; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
+_a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
+_a6_launch "$_S258_C" PATH="$_S258_PATH" -- --reset-sandbox --workspace "$_S258_W" --keep-history --dry-run
+check "§258(f) --reset-sandbox names a pending session-end judgement (a kept provisional snapshot) it would drop (rc $_A6_RC; mutation: the line removed)" \
+    bash -c '[ "$1" = 0 ] && grep -qF "Drops a pending session-end judgement" "$2" && [ -n "$(ls -A "$3/.protected-provisional" 2>/dev/null)" ]' _ "$_A6_RC" "$_A6_DIR/$_S258_C/out" "$(_a6_sandbox "$_S258_C")"
+_a6_done
+unset -f _s258_repo
+unset _S258_B _S258_PATH _S258_C _S258_W _S258_O _S258_R _S258_S _S258_FN _S258_SOCK _S258_HOST _S258_P _S258_G
+echo ""
+
+# ============================================================
+section "§259: every git path sandy mounts by name (the gitdir a .git file names, its config, hooks, info, commondir and config.worktree, those of each submodule gitdir and worktree admin dir, the core.hooksPath directory) is judged by the dangerous-symlink gate wherever a link there points, a target outside \$HOME included, and mounted only after approval"
+# ============================================================
+_fx_a6; _fx_s236; _fx_s230
+# WHY. The scan (_sandy_symlink_classify) and the -v check before docker run
+# (_sandy_symlink_path_unjudged) judged a link to a target outside $HOME only at
+# a protected path, a copied tree or .gstack. The git paths sandy derives from
+# the workspace and mounts by name are none of those, so `.git` FILE
+# `gitdir: vendor/g` (an in-workspace git directory) with vendor/g/config ->
+# a host file outside $HOME launched with rc 0, no prompt, and
+# `-v <ws>/vendor/g/config:...:ro` handed that file to the container (Docker
+# follows a link at a -v source). Both now ask one predicate
+# (_sandy_symlink_is_byname_rel: the whole _sandy_symlink_byname_rels list), so
+# such a link reaches the gate (a headless launch refuses it), is mounted
+# after approval, and one planted after the gate is refused before docker run.
+# Changing only the -v check would refuse every launch with "Launch again",
+# which could never help: (b) and (c) launch with the link approved.
+#
+# Targets live in CASE-out, beside the fixture HOME (CASE), so outside it.
+_s259_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+_s259_case() {   # $1 = CASE: CASE-out/secret (a file) and CASE-out/dir (a directory)
+    mkdir -p "$_A6_DIR/$1/ws" "$_A6_DIR/$1-out/dir"
+    printf 'S259-SECRET\n' > "$_A6_DIR/$1-out/secret"; printf 'S259-HOOK\n' > "$_A6_DIR/$1-out/dir/pre-commit"
+}
+_S259_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+# _s259_fix CASE KIND: the layout of one kind, with its link, in CASE/ws.
+# Prints the link as the gate names it: "<rel> -> <target>".
+_s259_fix() {
+    local w="$_A6_DIR/$1/ws" o="$_A6_DIR/$1-out" rel tgt
+    case "$2" in
+        g-*)   _s259_gd "$w/vendor/g"; printf 'gitdir: vendor/g\n' > "$w/.git" ;;
+        gs-*)  _s259_gd "$w/vendor/g"; _s259_gd "$w/vendor/g/modules/sub"; printf 'gitdir: vendor/g\n' > "$w/.git" ;;
+        s-*)   _s259_gd "$w/.git"; _s259_gd "$w/.git/modules/sub" ;;
+        wt-*)  _s259_gd "$w/.git"; mkdir -p "$w/.git/worktrees/w"; printf 'ref: refs/heads/w\n' > "$w/.git/worktrees/w/HEAD" ;;
+        hp)    _s259_gd "$w/.git"; printf '[core]\n\thooksPath = tools/hooks\n' > "$w/.git/config"; mkdir -p "$w/tools" ;;
+    esac
+    case "$2" in
+        g-config) rel=vendor/g/config; tgt="$o/secret" ;;
+        g-hooks) rel=vendor/g/hooks; tgt="$o/dir" ;;
+        g-info) rel=vendor/g/info; tgt="$o/dir" ;;
+        g-commondir) rel=vendor/g/commondir; tgt="$o/secret" ;;
+        g-cfgwt) rel=vendor/g/config.worktree; tgt="$o/secret" ;;
+        gs-hooks) rel=vendor/g/modules/sub/hooks; tgt="$o/dir" ;;
+        s-config) rel=.git/modules/sub/config; tgt="$o/secret" ;;
+        s-hooks) rel=.git/modules/sub/hooks; tgt="$o/dir" ;;
+        s-info) rel=.git/modules/sub/info; tgt="$o/dir" ;;
+        wt-commondir) rel=.git/worktrees/w/commondir; tgt="$o/secret" ;;
+        hp) rel=tools/hooks; tgt="$o/dir" ;;
+    esac
+    ln -s "$tgt" "$w/$rel"
+    printf '%s -> %s\n' "$rel" "$tgt"
+}
+# (a) each kind, a headless launch with no approval: refused by the gate,
+# naming the link; no docker run of any kind carried the outside path.
+_S259_KINDS="g-config g-hooks g-info g-commondir g-cfgwt gs-hooks s-config s-hooks s-info wt-commondir hp"
+for _S259_N in $_S259_KINDS; do
+    _S259_C="s259-$_S259_N"; _s259_case "$_S259_C"
+    _s259_fix "$_S259_C" "$_S259_N" > "$_A6_DIR/$_S259_C.link"
+    _a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+done
+# (b) approved (the list a "y" at the prompt persists): the launch runs and
+# mounts the by-name path, so Docker hands the container the approved target.
+_S259_C=s259-ok; _s259_case "$_S259_C"; _S259_L="$(_s259_fix "$_S259_C" g-config)"; _s236_seed "$_S259_C" "$_S259_L"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+_S259_C=s259-oks; _s259_case "$_S259_C"; _S259_L="$(_s259_fix "$_S259_C" s-hooks)"; _s236_seed "$_S259_C" "$_S259_L"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+# (c) planted after the gate (at the second core.hooksPath read: the scan
+# reads it first, the hooks mount next), with vendor/g/config a plain file at
+# the scan: the -v check refuses it, by name.
+_S259_C=s259-late; _s259_case "$_S259_C"; _S259_W="$_A6_DIR/$_S259_C/ws"; _S259_G="$_A6_DIR/$_S259_C/gitbin"
+_s259_gd "$_S259_W/vendor/g"; printf '[core]\n' > "$_S259_W/vendor/g/config"; printf 'gitdir: vendor/g\n' > "$_S259_W/.git"; mkdir -p "$_S259_G"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in *core.hooksPath*) n=$(cat %q 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > %q
+    [ "$n" -lt 2 ] || [ -e %q ] || { rm -f %q; ln -s %q %q; : > %q; } ;; esac\n' \
+      "$_A6_DIR/$_S259_C/hp-reads" "$_A6_DIR/$_S259_C/hp-reads" "$_A6_DIR/$_S259_C/planted" \
+      "$_S259_W/vendor/g/config" "$_A6_DIR/$_S259_C-out/secret" "$_S259_W/vendor/g/config" "$_A6_DIR/$_S259_C/planted"
+  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S259_G/git"
+chmod +x "$_S259_G/git"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}" PATH="$_S259_G:$_A6_DIR/bin:$PATH"
+# (d) under --start, planted between the approval pass and the supervisor:
+# the supervisor's own scan judges it.
+_s259_plant() { _s259_case s259-start; _s259_fix s259-start g-config > "$_A6_DIR/s259-start.link"; }
+_a6_bg s259-start _s230_sup_after s259-start _s259_plant
+for _S259_N in $_S259_KINDS; do
+    _S259_C="s259-$_S259_N"; _a6_join "$_S259_C"
+    _S259_L="$(cat "$_A6_DIR/$_S259_C.link")"
+    _S259_OK=0; { _s230_refused "$_S259_C" "$_S259_L" && ! grep -rqsF -- "$_A6_DIR/$_S259_C-out" "$_A6_DIR/$_S259_C/runs"; } || _S259_OK=$?
+    [ "$_S259_OK" = 0 ] || _a6_diag "§259(a) $_S259_N" "$_S259_C"
+    check "§259(a) $_S259_N: a headless launch with ${_S259_L%% -> *} linked to a target outside \$HOME is refused by the dangerous-symlink gate, naming the link; nothing outside reaches a docker run (mutation: the predicate dropped from _sandy_symlink_classify, or this path left out of _sandy_symlink_byname_rels; rc ${_A6_RC:-none})" \
+        test "$_S259_OK" = 0
+done
+_S259_C=s259-ok; _S259_W="$_A6_DIR/$_S259_C/ws"; _a6_join "$_S259_C"
+_S259_R="$(_s236_unmet "$_S259_C" "$_A6_DIR/$_S259_C" "vendor/g/config -> $_A6_DIR/$_S259_C-out/secret" "")"
+if [ -z "$_S259_R" ] && ! _a6_pair "$(_a6_agent_args "$_S259_C")" -v "$_S259_W/vendor/g/config:/home/sandy/ws/vendor/g/config:ro"; then _S259_R="no -v of vendor/g/config"; fi
+[ -z "$_S259_R" ] || _a6_diag "§259(b)" "$_S259_C"
+check "§259(b) approved, the same gitdir config link launches (rc 0, the list unchanged) and vendor/g/config is mounted :ro, so the container gets the approved target (mutation: the predicate in the -v check only: every launch refused with \"Launch again\"; ${_S259_R:-ok})" \
+    test -z "$_S259_R"
+_S259_C=s259-oks; _S259_W="$_A6_DIR/$_S259_C/ws"; _a6_join "$_S259_C"
+_S259_R="$(_s236_unmet "$_S259_C" "$_A6_DIR/$_S259_C" ".git/modules/sub/hooks -> $_A6_DIR/$_S259_C-out/dir" "")"
+if [ -z "$_S259_R" ] && ! _a6_pair "$(_a6_agent_args "$_S259_C")" -v "$_S259_W/.git/modules/sub/hooks:/home/sandy/ws/.git/modules/sub/hooks:ro"; then _S259_R="no -v of .git/modules/sub/hooks"; fi
+[ -z "$_S259_R" ] || _a6_diag "§259(b2)" "$_S259_C"
+check "§259(b2) ...and an approved submodule hooks link the same (${_S259_R:-ok})" \
+    test -z "$_S259_R"
+_S259_C=s259-late; _a6_join "$_S259_C"
+_S259_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S259_C")" ] && [ -e "$_A6_DIR/$_S259_C/planted" ] \
+  && grep -qF "leaves the workspace through a link the" "$_A6_DIR/$_S259_C/out" \
+  && grep -qF "vendor/g/config -> $_A6_DIR/$_S259_C-out/secret" "$_A6_DIR/$_S259_C/out" \
+  && ! grep -rqsF -- "$_A6_DIR/$_S259_C-out" "$_A6_DIR/$_S259_C/runs"; } || _S259_OK=$?
+[ "$_S259_OK" = 0 ] || _a6_diag "§259(c)" "$_S259_C"
+check "§259(c) vendor/g/config made a link to a target outside \$HOME after the gate (before docker run) is refused by the -v check, named, no agent run (mutation: the predicate dropped from _sandy_symlink_path_unjudged; rc ${_A6_RC:-none})" \
+    test "$_S259_OK" = 0
+_a6_join s259-start
+_S259_OK=0; _s230_refused s259-start "$(cat "$_A6_DIR/s259-start.link")" && ! grep -rqsF -- "$_A6_DIR/s259-start-out" "$_A6_DIR/s259-start/runs" || _S259_OK=$?
+[ "$_S259_OK" = 0 ] || _a6_diag "§259(d)" s259-start
+check "§259(d) under --start, the gitdir config link planted after the approval pass is refused by the supervisor's gate (rc ${_A6_RC:-none})" \
+    test "$_S259_OK" = 0
+# (e) the -v check reads the by-name list as it is when it runs, and adds
+# the core.hooksPath directory the mount loop actually mounted
+# (_extra_hooks), which its -v source is spelled from, whatever the scan
+# read.
+_S259_D="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
+          _sandy_symlink_is_byname_mount_rel _sandy_symlink_is_byname_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_symlink_unjudged_refuse \
+          _sandy_symlink_check_mounts _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir \
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S259_D/fns.sh"
+done
+unset _f
+mkdir -p "$_S259_D/h/ws" "$_S259_D/out"
+mkdir -p "$_S259_D/h/ws/.git"
+ln -s "$_S259_D/out" "$_S259_D/h/ws/sl"
+check "§259(e) the -v check judges against the by-name list as it is when it runs, with the core.hooksPath directory actually mounted (_extra_hooks: tools/new) on it (mutation: _extra_hooks not added)" \
+    bash -c 'trap - ERR; set +e
+             error() { :; }; warn() { :; }; _sandy_daemon_fatal() { :; }
+             . "$1/fns.sh"
+             HOME="$1/h"; SANDY_HOME="$1/h/.sandy"; WORK_DIR="$1/h/ws"; REAL_WORK_DIR="$WORK_DIR"
+             _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
+             _SANDY_BYNAME_HOOKSPATH=tools/old; _SANDY_BYNAME_LOADED=1; _SANDY_BYNAME_SET=$'"'"'\nstale\n'"'"'; _extra_hooks=tools/new
+             RUN_FLAGS=(-v "$WORK_DIR:/w" -v "$WORK_DIR/sl:/w/sl:ro")
+             _sandy_symlink_check_mounts
+             [ "$_SANDY_BYNAME_LOADED" = 1 ] || { echo "the list was not loaded (probe did not reach the predicate)"; exit 1; }
+             case "$_SANDY_BYNAME_SET" in *$'"'"'\n'"'"'tools/new$'"'"'\n'"'"'*) ;; *) echo "tools/new missing: $_SANDY_BYNAME_SET"; exit 1 ;; esac
+             case "$_SANDY_BYNAME_SET" in *stale*) echo "the list was not read again"; exit 1 ;; esac' _ "$_S259_D"
+rm -rf "$_S259_D"
+_a6_done
+unset -f _s259_gd _s259_case _s259_fix _s259_plant
+unset _S259_K _S259_KINDS _S259_N _S259_C _S259_W _S259_G _S259_L _S259_OK _S259_R _S259_D
 echo ""
 
 # BEGIN SUMMARY

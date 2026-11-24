@@ -62,7 +62,13 @@ When a session ends, sandy reports protected paths that appeared, changed or
 were replaced in the workspace during it (a new `.git/hooks/` hook,
 `.github/workflows/` file, `.vscode/` task, `.claude/commands/` command, and so
 on; see [Security](security.md)). A terminal session prints that report as it
-exits. A daemon session has no terminal: its supervisor's output goes to a log
+exits. The report runs once the agent's container has been removed (2.11.1), so
+it also covers anything the agent wrote in its last moments. If sandy cannot
+confirm the container is gone (Docker unreachable during the teardown), the
+report says it is provisional and what to do (for a terminal session:
+`docker rm -f <container>`, then launch again). The next launch, or
+`sandy --stop` of a daemon session, checks the workspace again once the
+container is gone, and records that report until `sandy --ack-report`. A daemon session has no terminal: its supervisor's output goes to a log
 file under `~/.sandy/sandboxes/` that nobody reads. So a daemon
 session also **records** the report in its sandbox
 (`~/.sandy/sandboxes/<name>/.session-end-report`, outside the workspace and
