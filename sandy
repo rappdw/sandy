@@ -3839,8 +3839,15 @@ _sandy_session_end_protected_report() {
                         esac
                     fi
                 elif [ "$_e" != "$_p" ]; then
-                    printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
-                        "$WORK_DIR" "$_p" >&2
+                    # #585: an entry no agent overlays (.claude/skills and the
+                    # 2.10.1 four) is not "missing an overlay for this agent".
+                    if [ -n "$(_sandy_overlay_detect_agent "$_p")" ]; then
+                        printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch with no sandbox overlay for this agent; its contents changed)\n" \
+                            "$WORK_DIR" "$_p" >&2
+                    else
+                        printf "${YELLOW}[sandy]${NC}   %s/%q/ (existed at launch and is not overlaid in any session; its contents changed)\n" \
+                            "$WORK_DIR" "$_p" >&2
+                    fi
                 elif [ -d "$WORK_DIR/$_p" ]; then
                     printf "${YELLOW}[sandy]${NC}   %s/%q/\n" "$WORK_DIR" "$_p" >&2
                     _rm_args="$_rm_args $(printf '%q' "$_p")/"

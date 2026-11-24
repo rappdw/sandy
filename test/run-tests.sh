@@ -28973,7 +28973,7 @@ _S250_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S250_A" ]; then echo "launch rc $
     _a6_pair "$_S250_A" -e SANDY_AGENT=claude || echo "no -e SANDY_AGENT=claude"
     if grep -qxF "SANDY_AGENT=claude," "$_S250_A"; then echo "the trailing comma reached the container"; fi
     grep -qxF sandy-claude-code "$_S250_A" || echo "not the single-agent claude image"
-    grep -qF "$_S250_W/.claude/skills/ (existed at launch with no sandbox overlay" "$_S250_O" || echo "the .claude/skills edit is not reported"; } 2>&1)" || true
+    grep -qF "$_S250_W/.claude/skills/ (existed at launch and is not overlaid in any session; its contents changed)" "$_S250_O" || echo "the .claude/skills edit is not reported"; } 2>&1)" || true
 if [ -n "$_S250_R" ]; then _a6_diag "§250(d)" "$_S250_C"; fi
 check "§250(d) SANDY_AGENT=claude, runs as SANDY_AGENT=claude with the claude image, and an edit to an existing .claude/skills is still reported (mutation: drop the rejoin after validation; ${_S250_R:-ok})" \
     test -z "$_S250_R"
@@ -32839,10 +32839,11 @@ _S245_L="$(_s245_run SK2 launch claude)"
 _S245_SNAP="$(cat "$_S245_D/SK2/sb/.protected-existed-at-launch")"
 printf 'evil\n' >> "$_S245_D/SK2/ws/.claude/skills/mine/SKILL.md"
 _S245_OUT="$(_s245_run SK2 end claude)"
-check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
+check "§245(24) claude session: an existing .claude/skills is fingerprinted (no overlay is ever mounted on it), gets no mount, and an edit to it is reported as changed, worded as not overlaid in any session (#585), with no rm -rf of the operator's dir (mutation: mapping .claude/skills to claude records it as overlaid and hides the edit)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -q "skills" \
              && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" && ! printf "%s\n" "$3" | grep -qFx ".claude/skills" \
-             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay" \
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch and is not overlaid in any session; its contents changed)" \
+             && ! printf "%s" "$1" | grep -qF "no sandbox overlay for this agent" \
              && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/SK2/ws" "$_S245_SNAP" "$_S245_L"
 mkdir -p "$_S245_D/SK3/ws/.claude/skills/mine"; printf 'mine\n' > "$_S245_D/SK3/ws/.claude/skills/mine/SKILL.md"
 _S245_L="$(_s245_run SK3 launch claude)"
@@ -32856,7 +32857,7 @@ printf 'evil\n' >> "$_S245_D/SK4/ws/.claude/skills/mine/SKILL.md"
 _S245_OUT="$(_s245_run SK4 end claude,)"
 check "§245(24b) SANDY_AGENT=claude, (a trailing comma the validator accepts): an existing .claude/skills is still fingerprinted and its edit reported (mutation: _sandy_agent_has matching an empty name, with the detection site trusting it)" \
     bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && printf "%s\n" "$3" | grep -q "^#content	.claude/skills	" \
-             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch with no sandbox overlay"' _ "$_S245_OUT" "$_S245_D/SK4/ws" "$_S245_SNAP"
+             && printf "%s" "$1" | grep -qF "$2/.claude/skills/ (existed at launch and is not overlaid in any session"' _ "$_S245_OUT" "$_S245_D/SK4/ws" "$_S245_SNAP"
 _S245_L="$(_s245_run GX1 launch gemini)"
 mkdir -p "$_S245_D/GX1/ws/.gemini/extensions/evil"; printf '{"name":"evil","mcpServers":{"x":{"command":"sh"}}}\n' > "$_S245_D/GX1/ws/.gemini/extensions/evil/gemini-extension.json"
 _S245_OUT="$(_s245_run GX1 end gemini)"
@@ -32902,7 +32903,8 @@ for _s245_p in .gemini/agents .gemini/skills .gemini/policies .agents/skills; do
         check "§245(30) $_s245_ag session: an existing $_s245_p is fingerprinted, gets no mount, and an edit to it is reported as changed with no rm -rf (mutation: mapping $_s245_p to $_s245_ag in _sandy_overlay_detect_agent)" \
             bash -c 'printf "%s" "$1" | grep -q "DRIVE-OK" && ! printf "%s" "$4" | grep -qF "$5" \
                      && printf "%s\n" "$3" | grep -qF "#content	$5	" && ! printf "%s\n" "$3" | grep -qFx "$5" \
-                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch with no sandbox overlay" \
+                     && printf "%s" "$1" | grep -qF "$2/$5/ (existed at launch and is not overlaid in any session; its contents changed)" \
+                     && ! printf "%s" "$1" | grep -qF "no sandbox overlay for this agent" \
                      && ! printf "%s" "$1" | grep -q "rm -rf"' _ "$_S245_OUT" "$_S245_D/NB$_s245_n$_s245_ag/ws" "$_S245_SNAP" "$_S245_L" "$_s245_p"
     done
     mkdir -p "$_S245_D/NC$_s245_n/ws/$_s245_p/mine"; printf 'mine\n' > "$_S245_D/NC$_s245_n/ws/$_s245_p/mine/x.md"
