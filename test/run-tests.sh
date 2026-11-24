@@ -36063,6 +36063,89 @@ _S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
 [ -z "$_S264_R" ] || _a6_diag "§264(g)" "$_S264_C"
 check "§264(g) in a worktree session, hooks/<hook>, config.worktree and info created in the common dir (absent at launch, so not mounted :ro) are reported at session end, and so is a switch of the main checkout's HEAD (mutations: no #gdabsent record; no #mainhead record; ${_S264_R:-ok})" \
     test -z "$_S264_R"
+# (h) the session's OWN admin dir is writable (git writes HEAD, index, logs
+# there), and with extensions.worktreeConfig git in this worktree reads its
+# config.worktree as config: one created in the session (core.fsmonitor)
+# would run on the host's next git here. So an empty one is seeded and
+# mounted :ro, released like a commondir seed (through the hold), never one
+# the user made; and, as a backstop, reported when it appears unseeded.
+_s264_cwfix() {   # $1 = CASE
+    _s264_fix "$1" && _s264_git -C "$_A6_DIR/$1/main" config extensions.worktreeConfig true
+}
+_S264_CWM() { printf '%s' "$_A6_DIR/$1/main/.git/worktrees/ws/config.worktree"; }
+# (h1) seeded, :ro, removed at the end.
+_S264_C=s264-cw; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="if [ -f '$_S264_P' ] && [ ! -L '$_S264_P' ] && [ ! -s '$_S264_P' ]; then echo seeded > '$_S264_H/cwseen'; fi"
+_S264_A="$(_a6_agent_args "$_S264_C")"
+_S264_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S264_A" ] || echo "launch rc $_A6_RC"
+    [ "$(cat "$_S264_H/cwseen" 2>/dev/null)" = seeded ] || echo "no empty config.worktree in the own admin dir while the session ran"
+    _a6_pair "$_S264_A" -v "$_S264_P:/home/sandy/main/.git/worktrees/ws/config.worktree:ro" || echo "the own admin dir's config.worktree is not mounted :ro"
+    [ ! -e "$_S264_P" ] || echo "the seed outlived the session"
+    if grep -qF "CHANGED during this session" "$_A6_DIR/$_S264_C/out"; then echo "a change was reported"; fi; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h1)" "$_S264_C"
+check "§264(h1) with extensions.worktreeConfig, the session's own (writable) admin dir gets an empty config.worktree seeded and mounted :ro, so the agent cannot plant one there (core.fsmonitor), and sandy removes it at the end (mutations: not seeded; not unseeded; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h2) written over during the session (the stub's write lands on the host,
+# as a host-side write would): reported, and kept.
+_S264_C=s264-cw2; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="printf '[core]\n\tfsmonitor = /tmp/s264\n' > '$_S264_P'"
+_S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    awk '/Protected files CHANGED during this session/ { on = 1 } on' "$_A6_DIR/$_S264_C/out" | grep -qF "$_S264_P" || echo "the changed config.worktree is not reported"
+    grep -qF "fsmonitor = /tmp/s264" "$_S264_P" 2>/dev/null || echo "the changed file was removed"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h2)" "$_S264_C"
+check "§264(h2) the seeded config.worktree written during the session is reported as a protected file that changed, and is not removed (mutation: any file at a seededcw record removed; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h3) the user's own (empty) config.worktree: mounted :ro, never removed.
+_S264_C=s264-cw3; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"; : > "$_S264_P"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    _a6_pair "$(_a6_agent_args "$_S264_C")" -v "$_S264_P:/home/sandy/main/.git/worktrees/ws/config.worktree:ro" || echo "not mounted :ro"
+    [ -f "$_S264_P" ] || echo "the user's own config.worktree was removed"
+    [ ! -e "$(_a6_sandbox "$_S264_C")/.commondir-seeded" ] || ! grep -q seededcw "$(_a6_sandbox "$_S264_C")/.commondir-seeded" || echo "recorded as seeded"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h3)" "$_S264_C"
+check "§264(h3) a config.worktree the user made (empty, as sandy's would be) is mounted :ro and never removed (mutation: seeded over or recorded when present; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h4) a worktree session seeds it, a main-checkout session shares the
+# repository; the worktree session ends first: the seed stays (the main
+# session's container has it mounted :ro); the main session ends: removed.
+_S264_C=s264-cw4; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_s264_ctr "$_S264_H/ws" > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_s264_ctr "$_S264_H/main" >> "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/main"
+_S264_R="$( { [ -f "$_S264_P" ] && [ ! -s "$_S264_P" ] || echo "fixture: the worktree session did not seed it"; } 2>&1)" || true
+_s264_ctr "$_S264_H/main" > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ -f "$_S264_P" ] || echo "the seed went while the main checkout's session runs"; } 2>&1)" || true
+: > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/main"
+_S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S264_P" ] || echo "the seed outlived both sessions"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h4)" "$_S264_C"
+check "§264(h4) the worktree session's config.worktree seed stays while a main-checkout session of the repository runs, and the last session to end removes it (mutation: the seed not copied into the hold; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (h5) the backstop: with seeding off (a copy of sandy whose switch returns
+# 1), one created in the session is reported at the end.
+_S264_C=s264-cw5; _s264_cwfix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_P="$(_S264_CWM "$_S264_C")"
+_S264_M="$_A6_DIR/s264-noseed-sandy"
+awk '$0 == "_sandy_commondir_seed_enabled() { return 0; }" { print "_sandy_commondir_seed_enabled() { return 1; }"; n++; next } { print } END { exit n == 1 ? 0 : 1 }' "$SANDY_SCRIPT" > "$_S264_M" && _S264_OK=1 || _S264_OK=0
+_S264_SAVED="$_A6_SCRIPT"; _A6_SCRIPT="$_S264_M"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="printf '[core]\n\tfsmonitor = /tmp/s264\n' > '$_S264_P'"
+_A6_SCRIPT="$_S264_SAVED"
+_S264_R="$( { [ "$_S264_OK" = 1 ] || echo "the switch was not found"
+    [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    awk '/Git files appeared during this session in the git directory/ { on = 1 } on' "$_A6_DIR/$_S264_C/out" | grep -qF "$_S264_P" || echo "the created config.worktree is not reported"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(h5)" "$_S264_C"
+check "§264(h5) backstop: with seeding off, a config.worktree created in the own admin dir during the session is reported at session end (mutation: the own admin dir left out of the #gdabsent records; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+unset -f _s264_cwfix _S264_CWM
+unset _S264_M _S264_SAVED
 _a6_done
 unset -f _s264_git _s264_fix _s264_ctr _s264_run
 unset _S264_C _S264_H _S264_A _S264_L _S264_R _S264_P _S264_D _S264_G0 _S264_N _S264_OK _S264_B _S264_PATH _S264_W1 _S264_W2 _S264_RUN _S264_O

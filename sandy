@@ -3797,33 +3797,40 @@ _sandy_commondir_record() {   # $1 = sandbox [$2 = variable to set instead of pr
 # Seed gitdir $2 (anchor $1: the walk from there passes no link), appending to
 # record $3. Created by mktemp in the gitdir and renamed into place without
 # replacing anything (mv -n), then checked: the file at the path must be the
-# one sandy wrote.
-_sandy_commondir_seed_one() {   # $1 = anchor  $2 = gitdir  $3 = record
-    local _f="$2/commondir" _t _i _i2 _hx
+# one sandy wrote. With $4 = cw: an EMPTY config.worktree instead, recorded
+# as `seededcw` (#582: the session's own linked-worktree admin dir, below).
+_sandy_commondir_seed_one() {   # $1 = anchor  $2 = gitdir  $3 = record  [$4 = cw]
+    local _f="$2/commondir" _t _i _i2 _hx _kind=seeded
+    [ "${4:-}" != cw ] || { _f="$2/config.worktree"; _kind=seededcw; }
     { [ -e "$_f" ] || [ -L "$_f" ]; } && return 0
     [ -d "$2" ] && [ ! -L "$2" ] || return 0
     if [ "$2" != "$1" ] && _sandy_path_symlink_component "$1" "$_f" >/dev/null; then return 0; fi
     _t="$(exec mktemp "$2/.sandy-commondir.XXXXXX" 2>/dev/null)" || return 0
-    printf '.\n' > "$_t" && chmod 644 "$_t" || { rm -f "$_t"; return 0; }
+    if [ "$_kind" = seededcw ]; then : > "$_t"; else printf '.\n' > "$_t"; fi && chmod 644 "$_t" || { rm -f "$_t"; return 0; }
     _sandy_file_inode "$_t" _i
     mv -n "$_t" "$_f" 2>/dev/null || true
     # Left behind only when mv -n refused (rm -f of a missing name does nothing).
     if [ -e "$_t" ] || [ -L "$_t" ]; then rm -f "$_t" 2>/dev/null || true; fi
     if [ -f "$_f" ] && [ ! -L "$_f" ] && [ -n "$_i" ] && { _sandy_file_inode "$_f" _i2 || true; [ "$_i2" = "$_i" ]; }; then
         _sandy_hex "$_f" _hx || true
-        printf 'seeded\t%s\t%s\n' "$_hx" "$_i" >> "$3"
+        printf '%s\t%s\t%s\n' "$_kind" "$_hx" "$_i" >> "$3"
     fi
     return 0
 }
 # True when record line fields ($1 path hex, $2 inode) still name the file
-# sandy created: no link at the path, same inode, content exactly `.`.
-_sandy_commondir_is_ours() {
+# sandy created: no link at the path, same inode, content exactly `.` (for
+# $3 = seededcw: empty).
+_sandy_commondir_is_ours() {   # $1 = path hex  $2 = inode  [$3 = kind]
     local _f _io_i="" _io_c=""
     _sandy_unhex "$1" _f || return 1
     [ -f "$_f" ] && [ ! -L "$_f" ] && { _sandy_file_inode "$_f" _io_i || true; [ "$_io_i" = "$2" ]; } || return 1
     case "$_f" in
         "${WORK_DIR:-/nonexistent}"/*) ! _sandy_path_symlink_component "$WORK_DIR" "$_f" >/dev/null || return 1 ;;
     esac
+    if [ "${3:-seeded}" = seededcw ]; then
+        if [ -s "$_f" ]; then return 1; fi
+        return 0
+    fi
     # Exactly ".\n" (read to the end with no NUL on the way) needs no process;
     # anything else is judged by cat, as always.
     if ! IFS= read -r -d '' _io_c 2>/dev/null < "$_f" && [ "$_io_c" = "."$'\n' ]; then return 0; fi
@@ -3840,7 +3847,8 @@ _sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
     _sandy_commondir_fix_dirs "$1" "$2"
     if [ -f "$_rec" ]; then
         while IFS=$'\t' read -r _k _h _i; do
-            [ "$_k" = seeded ] && _sandy_commondir_is_ours "$_h" "$_i" && _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_i"$'\n'
+            case "$_k" in seeded|seededcw) ;; *) continue ;; esac
+            _sandy_commondir_is_ours "$_h" "$_i" "$_k" && _keep="$_keep$_k"$'\t'"$_h"$'\t'"$_i"$'\n'
         done < "$_rec"
     fi
     printf '%s' "$_keep" > "$_rec"
@@ -3862,7 +3870,18 @@ _sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
     done <<< "$_dirs"
     if _sandy_commondir_seed_enabled; then
         while IFS=$'\t' read -r _a _d; do
-            [ -n "$_d" ] && _sandy_commondir_seed_one "$_a" "$_d" "$_rec"
+            [ -n "$_d" ] || continue
+            _sandy_commondir_seed_one "$_a" "$_d" "$_rec"
+            # #582: the session's own linked-worktree admin dir is writable
+            # (git writes HEAD, index, logs there), and git in that worktree
+            # reads its config.worktree as config (extensions.worktreeConfig),
+            # so one created in the session (core.fsmonitor, core.hooksPath)
+            # would run on the host's next git there. Seeded empty (harmless
+            # with the extension off) so it is mounted :ro, hashed and locked;
+            # released as a commondir seed is, through the hold (#596).
+            if [ -n "${_SANDY_OWN_WT_ADMIN:-}" ] && [ "$_d" = "$_SANDY_OWN_WT_ADMIN" ]; then
+                _sandy_commondir_seed_one "$_a" "$_d" "$_rec" cw
+            fi
         done <<< "$_dirs"
     fi
     [ -s "$_rec" ] || rm -f "$_rec"
@@ -3878,12 +3897,12 @@ _sandy_commondir_unseed() {   # $1 = sandbox (or a hold dir)
     [ -f "$_rec" ] || return 0
     _sandy_hold_skipset "$1" _skip
     while IFS=$'\t' read -r _k _h _i; do
-        [ "$_k" = seeded ] || continue
+        case "$_k" in seeded|seededcw) ;; *) continue ;; esac
         if [ -n "$_skip" ] && _sandy_unhex "$_h" _f \
            && _sandy_hold_lists "$_skip" "$_f" "$_k" "$_h" "$_i" .commondir-seeded; then
             continue
         fi
-        if _sandy_commondir_is_ours "$_h" "$_i"; then
+        if _sandy_commondir_is_ours "$_h" "$_i" "$_k"; then
             _sandy_unhex "$_h" _f && rm -f "$_f"
         fi
     done < "$_rec"
@@ -4210,7 +4229,7 @@ _sandy_hold_sync() {   # $1 = sandbox
         [ -f "$1/$_sy_r" ] || continue
         while IFS=$'\t' read -r _sy_k _sy_h _sy_x _sy_y; do
             case "$_sy_r:$_sy_k" in
-                .commondir-seeded:seeded) _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x" ;;
+                .commondir-seeded:seeded|.commondir-seeded:seededcw) _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x" ;;
                 .uchg-locked:locked) _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'"${_sy_y:--}" ;;
                 *) continue ;;
             esac
@@ -4671,11 +4690,11 @@ _sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
         [ -n "$_p" ] && [ -d "$_p" ] && [ ! -L "$_p" ] || continue
         case "$_p" in "$1"/*) ! _sandy_path_symlink_component "$1" "$_p" >/dev/null || continue ;; esac
         if [ -n "$(ls -A "$_p" 2>/dev/null)" ]; then
-            warn "$(_sandy_uchg_show "$_p") is a directory with content where git expects a commondir file: git cannot run in that repository until it is moved away. Sandy leaves it alone."
+            warn "$(_sandy_uchg_show "$_p") is a directory with content where git expects a ${_p##*/} file: git cannot run in that repository until it is moved away. Sandy leaves it alone."
             continue
         fi
         if rmdir "$_p" 2>/dev/null; then
-            warn "Removed an empty directory at $(_sandy_uchg_show "$_p"): a container that outlived its session left it where sandy's commondir file was, and git cannot run with it there."
+            warn "Removed an empty directory at $(_sandy_uchg_show "$_p"): a container that outlived its session left it where sandy's ${_p##*/} file was, and git cannot run with it there."
         fi
     done < <({
         for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
@@ -4683,11 +4702,12 @@ _sandy_commondir_fix_dirs() {   # $1 = workspace  $2 = sandbox dir (or empty)
             printf '%s\n' "$_g/commondir"
             while IFS= read -r _d; do [ -n "$_d" ] && printf '%s\n' "$_d/commondir"; done < <(_sandy_git_admin_dirs_of "$_g")
         done
+        [ -z "${_SANDY_OWN_WT_ADMIN:-}" ] || printf '%s\n' "$_SANDY_OWN_WT_ADMIN/config.worktree"
         if [ -n "$2" ]; then
             _sandy_commondir_record "$2" _rec
             if [ -f "$_rec" ]; then
                 while IFS=$'\t' read -r _k _h _i; do
-                    [ "$_k" = seeded ] && _sandy_unhex "$_h" && printf '\n'
+                    case "$_k" in seeded|seededcw) _sandy_unhex "$_h" && printf '\n' ;; esac
                 done < "$_rec"
             fi
         fi
@@ -28379,9 +28399,10 @@ _sandy_protected_hash_snapshot "$SANDBOX_DIR/.protected-existed-at-launch" "$SAN
 # are. And a linked worktree's session could switch the main checkout's
 # branch through the common dir's HEAD: recorded (#mainhead) and reported.
 if [ -n "${GITDIR_HOST:-}" ] && [ -d "$GITDIR_HOST" ]; then
-    for _gd_f in config config.worktree hooks info packed-refs; do
-        if [ ! -e "$GITDIR_HOST/$_gd_f" ] && [ ! -L "$GITDIR_HOST/$_gd_f" ]; then
-            _sandy_hex "$GITDIR_HOST/$_gd_f" _gd_x
+    # And the own admin dir's config.worktree, when it could not be seeded.
+    for _gd_f in "$GITDIR_HOST"/{config,config.worktree,hooks,info,packed-refs} ${_SANDY_OWN_WT_ADMIN:+"$_SANDY_OWN_WT_ADMIN/config.worktree"}; do
+        if [ ! -e "$_gd_f" ] && [ ! -L "$_gd_f" ]; then
+            _sandy_hex "$_gd_f" _gd_x
             printf '#gdabsent\t%s\n' "$_gd_x" >> "$SANDBOX_DIR/.protected-existed-at-launch"
         fi
     done
