@@ -3803,7 +3803,7 @@ _sandy_commondir_unseed() {   # $1 = sandbox (or a hold dir)
 # hold lists it (the hold releases those, _sandy_hold_release, and only when
 # no other holder remains), and release any other line themselves. A flag is
 # listed in the hold before it is set (ctime `-`, as in the session's own
-# record, and left so), so a crash between the two strands nothing. Another holder counts as alive while its launcher pid
+# record, replaced once known), so a crash between the two strands nothing. Another holder counts as alive while its launcher pid
 # runs or its container is not known gone (_sandy_container_gone: Docker not
 # reachable counts as there); one that is neither is pruned. A crashed
 # session's entry only keeps the protections longer.
@@ -3829,13 +3829,45 @@ _sandy_hold_key() {   # $1 = dir  $2 $3 = variables
     fi
     printf -v "$2" '%s' "$_hk_p"; printf -v "$3" '%s' "$_hk_x"
 }
-# Take / drop the mutex of hold dir $1. Taking it waits for as long as the
-# pid in the lock runs (after about 5 s it says once whom it waits for); a
-# lock whose pid is gone, or that stays empty that long, is taken over
-# (_sandy_hold_take_stale). Returns 1 only when the hold dir is gone (a last
-# holder removed it: the caller creates it afresh) or is not a directory.
+# True when pid $1 is a running sandy process: alive, and its command line
+# runs a script named sandy (argv[0], or the script argument of a shell:
+# `bash /path/to/sandy ...`). A pid the system has given to another program
+# since (a reboot, a long uptime) is not. Linux reads /proc/<pid>/cmdline with
+# builtins; elsewhere `ps -ww -o command=`; with neither, kill -0 decides.
+_sandy_pid_is_sandy() {   # $1 = pid
+    local _ps_c="" _ps_w _ps_n=0 _ps_a
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null || return 1
+    if [ -r "/proc/$1/cmdline" ]; then
+        while IFS= read -r -d '' _ps_a; do _ps_c="$_ps_c $_ps_a"; done < "/proc/$1/cmdline" 2>/dev/null || true
+    elif command -v ps >/dev/null 2>&1; then
+        _ps_c=" $(ps -ww -o command= -p "$1" 2>/dev/null)" || return 1
+    else
+        return 0
+    fi
+    local -a _ps_v=()
+    read -r -a _ps_v <<< "$_ps_c" || true
+    for _ps_w in ${_ps_v[@]+"${_ps_v[@]}"}; do
+        _ps_n=$((_ps_n + 1)); [ "$_ps_n" -le 3 ] || break
+        [ "${_ps_w##*/}" != sandy ] || return 0
+    done
+    return 1
+}
+# How long a session waits for a hold's mutex that a running sandy keeps
+# (seconds; _SANDY_HOLD_WAIT_S, for tests): a stopped (Ctrl-Z) or hung sandy
+# must not make every other session wait for ever.
+case "${_SANDY_HOLD_WAIT_S:-}" in ''|*[!0-9]*) _SANDY_HOLD_WAIT_S=60 ;; esac
+# Take / drop the mutex of hold dir $1: the file lock, created with
+# noclobber, holding this pid. One that a running sandy holds (_sandy_pid_is_sandy)
+# is waited for, for at most $_SANDY_HOLD_WAIT_S seconds (saying once after
+# about 5 s whom it waits for); one whose pid is gone or is no sandy, or that
+# stays empty that long, is stale and removed (_sandy_hold_take_stale).
+# Returns 0 when taken; 1 when the hold dir is gone (a last holder removed it:
+# the caller creates it afresh) or is not a directory; 2 when the wait ran out
+# (the caller fails safe: keeps what it would release, or refuses the launch).
 _sandy_hold_lock() {   # $1 = hold dir
-    local _hl_n=0 _hl_p _hl_c="" _hl_i _hl_said=""
+    local _hl_n=0 _hl_p _hl_c="" _hl_said="" _hl_max
+    _hl_max=$(( ${_SANDY_HOLD_WAIT_S:-60} * 20 ))
     case $- in *C*) _hl_c=1 ;; esac
     while :; do
         [ -d "$1" ] && [ ! -L "$1" ] || return 1
@@ -3845,34 +3877,47 @@ _sandy_hold_lock() {   # $1 = hold dir
             return 0
         fi
         [ -n "$_hl_c" ] || set +C
-        # The inode first, then its pid: the takeover renames only that file.
-        _hl_i=""; _sandy_file_inode "$1/lock" _hl_i || continue
-        [ -n "$_hl_i" ] || continue
         _hl_p=""
         { IFS= read -r _hl_p < "$1/lock"; } 2>/dev/null || true
         _hl_n=$((_hl_n + 1))
         case "$_hl_p" in
-            ''|*[!0-9]*) if [ "$_hl_n" -ge 100 ]; then _sandy_hold_take_stale "$1" "$_hl_i"; _hl_n=0; continue; fi ;;
-            *) if ! kill -0 "$_hl_p" 2>/dev/null; then _sandy_hold_take_stale "$1" "$_hl_i"; continue; fi
+            ''|*[!0-9]*) if [ "$_hl_n" -ge 100 ]; then _sandy_hold_take_stale "$1"; fi ;;
+            *) if ! _sandy_pid_is_sandy "$_hl_p"; then _sandy_hold_take_stale "$1"; continue; fi
                if [ "$_hl_n" -ge 100 ] && [ -z "$_hl_said" ]; then
                    _hl_said=1
                    printf "${YELLOW:-}[sandy]${NC:-} Waiting for sandy (pid %s) to finish with the git dir hold %s...\n" "$_hl_p" "${1##*/}" >&2
                fi ;;
         esac
+        [ "$_hl_n" -lt "$_hl_max" ] || return 2
         sleep 0.05
     done
 }
-# Take over the lock of hold dir $1 seen with inode $2 and a pid that is gone:
-# renamed aside (one rename wins), then removed only if it is that very file.
-# If it is not (another session took the stale lock first and made a fresh
-# one, which this rename moved), it is linked back in place: ln never
-# replaces a lock that exists.
-_sandy_hold_take_stale() {   # $1 = hold dir  $2 = the inode seen
-    local _ht_t="$1/lock.take.$$" _ht_i=""
-    mv "$1/lock" "$_ht_t" 2>/dev/null || return 0
-    _sandy_file_inode "$_ht_t" _ht_i || true
-    if [ "$_ht_i" != "$2" ]; then ln "$_ht_t" "$1/lock" 2>/dev/null || true; fi
-    rm -f "$_ht_t" 2>/dev/null || true
+# Remove the stale lock of hold dir $1, serialized by a second, mkdir-based
+# guard ($1/takeover.d, holding its maker's pid): only its holder removes a
+# lock, and only after reading the lock again and finding it still stale. A
+# lock file cannot be replaced while it exists (noclobber), and nobody but a
+# guard holder removes one whose owner is gone, so between that read and the
+# removal it is the same lock: no rename, no hand-back, no hard link, and two
+# sessions that saw one stale lock cannot both end up inside (mkdir is atomic
+# on APFS, ext4 and NFS alike). A guard whose maker is gone (it died within
+# the few instructions it holds the guard) is removed the same way; only two
+# such deaths in a row could let two removers in at once.
+_sandy_hold_take_stale() {   # $1 = hold dir
+    local _ht_g="$1/takeover.d" _ht_p=""
+    if ! mkdir "$_ht_g" 2>/dev/null; then
+        { IFS= read -r _ht_p < "$_ht_g/pid"; } 2>/dev/null || true
+        if [ -n "$_ht_p" ] && ! _sandy_pid_is_sandy "$_ht_p"; then rm -rf "$_ht_g" 2>/dev/null || true; fi
+        return 0
+    fi
+    printf '%s\n' "$$" > "$_ht_g/pid" 2>/dev/null || true
+    _ht_p=""
+    { IFS= read -r _ht_p < "$1/lock"; } 2>/dev/null || true
+    case "$_ht_p" in
+        '') rm -f "$1/lock" 2>/dev/null || true ;;
+        *[!0-9]*) rm -f "$1/lock" 2>/dev/null || true ;;
+        *) _sandy_pid_is_sandy "$_ht_p" || rm -f "$1/lock" 2>/dev/null || true ;;
+    esac
+    rm -rf "$_ht_g" 2>/dev/null || true
     return 0
 }
 # Drop the mutex of hold dir $1: only a lock that holds this process's pid.
@@ -3884,7 +3929,7 @@ _sandy_hold_unlock() {
 # Register this session (sandbox $SANDBOX_DIR, container $CONTAINER_NAME,
 # workspace $WORK_DIR) as a holder of git dir $1. Once per dir per launch.
 _sandy_hold_add() {   # $1 = git dir, as spelled
-    local _ha_p _ha_k _ha_r _ha_d _ha_x _ha_s _ha_t _ha_ok
+    local _ha_p _ha_k _ha_r _ha_d _ha_x _ha_s _ha_t _ha_ok _ha_rc
     [ -n "${CONTAINER_NAME:-}" ] && [ -n "${SANDBOX_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] || return 0
     case $'\n'"${_SANDY_HOLD_ADDED:-}" in *$'\n'"$1"$'\n'*) return 0 ;; esac
     _SANDY_HOLD_ADDED="${_SANDY_HOLD_ADDED:-}$1"$'\n'
@@ -3898,11 +3943,21 @@ _sandy_hold_add() {   # $1 = git dir, as spelled
     _ha_ok=""
     for _ha_t in 1 2 3; do
         _sandy_hold_mkdir "$_ha_d" || break
-        if _sandy_hold_lock "$_ha_d"; then
+        _ha_rc=0; _sandy_hold_lock "$_ha_d" || _ha_rc=$?
+        if [ "$_ha_rc" = 0 ]; then
             [ -f "$_ha_d/path" ] || printf '%s\n' "$_ha_x" > "$_ha_d/path"
             if printf 'pid\t%s\nws\t%s\n' "$$" "$_ha_s" > "$_ha_d/holder.$CONTAINER_NAME"; then _ha_ok=1; fi
             _sandy_hold_unlock "$_ha_d"
             break
+        fi
+        if [ "$_ha_rc" = 2 ]; then
+            # Fail safe: a session that is not a holder could have its seed
+            # and locks released under it by whichever ends first (#596).
+            error_lit "The git dir $_ha_p is shared with another sandy session, and its hold has been busy for ${_SANDY_HOLD_WAIT_S:-60} s: $_ha_d/lock"
+            error_lit "  (held by pid $(cat "$_ha_d/lock" 2>/dev/null || echo '?')). A stopped sandy (Ctrl-Z) holds it until it runs again."
+            error_lit "  If no sandy is running for it, remove that file and launch again: rm $(printf '%q' "$_ha_d/lock")"
+            _sandy_daemon_fatal
+            exit 1
         fi
     done
     if [ -z "$_ha_ok" ]; then
@@ -3920,7 +3975,7 @@ _sandy_hold_add() {   # $1 = git dir, as spelled
 _sandy_hold_holder_alive() {   # $1 = holder file  $2 = container
     local _hh_k _hh_v _hh_p=""
     while IFS=$'\t' read -r _hh_k _hh_v; do [ "$_hh_k" != pid ] || _hh_p="$_hh_v"; done 2>/dev/null < "$1"
-    case "$_hh_p" in ''|*[!0-9]*) ;; *) if kill -0 "$_hh_p" 2>/dev/null; then return 0; fi ;; esac
+    case "$_hh_p" in ''|*[!0-9]*) ;; *) if _sandy_pid_is_sandy "$_hh_p"; then return 0; fi ;; esac
     ! _sandy_container_gone "$2"
 }
 # The dirs sandbox $1 holds, as "<dir as spelled><TAB><key>" lines (newline
@@ -3953,10 +4008,9 @@ _sandy_hold_lists() {   # $1 = skipset  $2 = file  $3 = kind  $4 = hex  $5 = ino
 # Copy the seeds and the flags sandbox $1's records hold for a held dir into
 # that dir's hold, so the last holder releases them whichever session made
 # them. A flag is copied before it is set, with ctime `-` (so a crash between
-# the two strands nothing), and stays so: the hold's unlock judges such a line
-# by its inode and the flag, as for any `-` line.
+# the two strands nothing), and its line is replaced once the ctime is known.
 _sandy_hold_sync() {   # $1 = sandbox
-    local _sy_hf="$1/.gitdir-holds" _sy_r _sy_k _sy_h _sy_x _sy_y _sy_f _sy_d _sy_hk _sy_hx _sy_hd _sy_t _sy_l _sy_root
+    local _sy_hf="$1/.gitdir-holds" _sy_r _sy_k _sy_h _sy_x _sy_y _sy_f _sy_d _sy_hk _sy_hx _sy_hd _sy_t _sy_l _sy_root _sy_m _sy_ups=""
     [ -f "$_sy_hf" ] && [ ! -L "$_sy_hf" ] || return 0
     _sy_root="$SANDY_HOME/gitdir-holds"
     for _sy_r in .commondir-seeded .uchg-locked; do
@@ -3975,16 +4029,51 @@ _sandy_hold_sync() {   # $1 = sandbox
             done < "$_sy_hf"
             [ -n "$_sy_hd" ] && [ -d "$_sy_hd" ] && [ ! -L "$_sy_hd" ] || continue
             if [ -f "$_sy_hd/$_sy_r" ]; then
-                _sy_t=""
+                _sy_t=""; _sy_m=""
                 while IFS= read -r _sy_t; do
-                    case "$_sy_t" in "$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"|"$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'*) _sy_t=HIT; break ;; esac
+                    case "$_sy_t" in
+                        "$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'-) _sy_m=dash; break ;;
+                        "$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"|"$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'*) _sy_m=hit; break ;;
+                    esac
                 done < "$_sy_hd/$_sy_r"
-                [ "$_sy_t" != HIT ] || continue
+                [ "$_sy_m" != hit ] || continue
+                if [ "$_sy_m" = dash ]; then
+                    # Listed before its flag was set; now its ctime is known:
+                    # replaced (below, under the hold's mutex), so the last
+                    # holder's unlock compares it.
+                    [ "$_sy_l" != "${_sy_k}"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'- ] || continue
+                    _sy_ups="$_sy_ups$_sy_hd"$'\t'"$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'"$_sy_y"$'\n'
+                    continue
+                fi
             fi
-            # Appended only (O_APPEND, no lock needed): never rewritten.
+            # Appended (O_APPEND: no lock needed for a line that is new).
             printf '%s\n' "$_sy_l" >> "$_sy_hd/$_sy_r"
         done < "$1/$_sy_r"
     done
+    # The `-` lines whose ctime is now known, one rewrite per hold, under its
+    # mutex (another session appends there too). A busy hold keeps the `-`
+    # line, which the unlock then judges by inode and flag.
+    local _sy_hdl _sy_seen=$'\n' _sy_cur _sy_out _sy_d2 _sy_r2 _sy_k2 _sy_h2 _sy_x2 _sy_y2 _sy_mt
+    while IFS=$'\t' read -r _sy_hdl _sy_k _sy_h _sy_x _sy_y; do
+        [ -n "$_sy_hdl" ] || continue
+        case "$_sy_seen" in *$'\n'"$_sy_hdl"$'\n'*) continue ;; esac
+        _sy_seen="$_sy_seen$_sy_hdl"$'\n'
+        [ -f "$_sy_hdl/.uchg-locked" ] || continue
+        _sandy_hold_lock "$_sy_hdl" || continue
+        _sy_out=""
+        while IFS= read -r _sy_cur; do
+            [ -n "$_sy_cur" ] || continue
+            while IFS=$'\t' read -r _sy_d2 _sy_k2 _sy_h2 _sy_x2 _sy_y2; do
+                [ "$_sy_d2" = "$_sy_hdl" ] || continue
+                if [ "$_sy_cur" = "$_sy_k2"$'\t'"$_sy_h2"$'\t'"$_sy_x2"$'\t'- ]; then
+                    _sy_cur="$_sy_k2"$'\t'"$_sy_h2"$'\t'"$_sy_x2"$'\t'"$_sy_y2"; break
+                fi
+            done <<< "$_sy_ups"
+            _sy_out="$_sy_out$_sy_cur"$'\n'
+        done < "$_sy_hdl/.uchg-locked"
+        { printf '%s' "$_sy_out" > "$_sy_hdl/.uchg-locked.new" && mv -f "$_sy_hdl/.uchg-locked.new" "$_sy_hdl/.uchg-locked"; } 2>/dev/null || true
+        _sandy_hold_unlock "$_sy_hdl"
+    done <<< "${_sy_ups:-}"
     return 0
 }
 # The holds of sandbox $1: its .gitdir-holds lines, then _SANDY_HOLD_EXTRA
@@ -4072,7 +4161,8 @@ _sandy_hold_release() {   # $1 = sandbox  $2 = workspace  $3 = container
         [ -d "$_hr_d" ] && [ ! -L "$_hr_d" ] || continue
         _sandy_unhex "$_hr_x" _hr_p || _hr_p="$_hr_k"
         if ! _sandy_hold_lock "$_hr_d"; then
-            _SANDY_HOLD_KEPT="$_SANDY_HOLD_KEPT$_hr_p (its hold is busy)"$'\n'
+            # Fail safe: everything kept (the seed, the locks, this entry).
+            _SANDY_HOLD_KEPT="$_SANDY_HOLD_KEPT$_hr_p (its hold is busy: $_hr_d/lock; if no sandy is running for it, remove that file, then sandy --unlock)"$'\n'
             continue
         fi
         # Its own entry goes with the hold (last holder) or with the lock.
@@ -4988,7 +5078,7 @@ _sandy_provisional_rejudge() {   # $1 = sandbox  $2 = launch|stop
         [ -f "$_f" ] && [ ! -L "$_f" ] || continue
         _id="${_f##*.judging.}"
         case "$_id" in ''|*[!0-9]*) continue ;; esac
-        ! kill -0 "$_id" 2>/dev/null || continue
+        ! _sandy_pid_is_sandy "$_id" || continue
         _cl="${_f%.judging.*}.snap"
         [ -e "$_cl" ] || mv "$_f" "$_cl" 2>/dev/null || true
     done
