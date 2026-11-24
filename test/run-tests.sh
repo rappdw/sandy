@@ -35232,15 +35232,15 @@ check "§261(i) a link planted at \$SANDY_HOME/gitdir-holds is replaced by sandy
 # (each with its own $$, as two sandy sessions have).
 _S261_U="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_hex _sandy_unhex _sandy_awk_f1 _sandy_file_inode _sandy_hold_mkdir _sandy_hold_key _sandy_hold_lock \
-          _sandy_hold_take_stale _sandy_pid_is_sandy _sandy_hold_unlock _sandy_hold_add _sandy_hold_holder_alive _sandy_hold_list \
+          _sandy_hold_take_stale _sandy_pid_start _sandy_self_start _sandy_pid_alive _sandy_hold_read_owner _sandy_hold_unlock _sandy_hold_add _sandy_hold_holder_alive _sandy_hold_list \
           _sandy_hold_release _sandy_hold_skipset _sandy_hold_lists _sandy_hold_sync _sandy_commondir_record \
           _sandy_commondir_unseed _sandy_commondir_is_ours _sandy_path_symlink_component _sandy_uchg_write_record; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S261_U/fns.sh"
 done
 unset _f
 printf '%s\n' 'sha256() { shasum -a 256 2>/dev/null || sha256sum; }' 'warn() { printf "WARN %s\n" "$*"; }' 'info() { :; }' >> "$_S261_U/fns.sh"
-# The sessions are played by a script named sandy: a lock or a holder entry
-# counts as a session's only while its pid runs a sandy (_sandy_pid_is_sandy).
+# A lock or a holder entry counts as a session's while its pid runs and has
+# the start recorded beside it (_sandy_pid_alive), whatever it is named.
 # (j) the reviewer's e10 interleaving, made deterministic: holder C crashed
 # (its pid gone), A is ending as the last holder and asks Docker about C's
 # container, which takes 9 s (well past the old 5 s wait); B registers
@@ -35276,7 +35276,7 @@ _S261_R="$( { [ -n "$_S261_K" ] && [ -f "$_S261_J/sbA/.gitdir-holds" ] || echo "
 check "§261(j) a session registering while the last holder releases the hold (the release slowed to 9 s by a Docker question) waits for the mutex, and ends up registered in a hold that exists (on 646025d it registered without the lock and the release removed its entry; mutations: registering without the lock after a timeout; rm -rf of the hold; ${_S261_R:-ok})" \
     test -z "$_S261_R"
 # A stand-in for a running sandy that holds a lock and never lets go (a
-# stopped or hung session): its command line runs a script named sandy.
+# stopped or hung session). Its locks record no start, so a live pid counts.
 printf 'sleep 300\n' > "$_S261_U/sandy"
 # (k) the three-way takeover of e14, forced: a stale lock (dead pid); A takes
 # it over and holds the lock; B, which saw the same stale lock, now runs its
@@ -35298,17 +35298,119 @@ _S261_R="$(bash -c '. "$1/fns.sh"; d="$2"
     _sandy_hold_take_stale "$d"; [ ! -e "$d/lock" ] || echo "the stale lock behind a dead guard was not taken over"' _ "$_S261_U" "$_S261_KD" "$_S261_PL" </dev/null 2>&1)" || true
 check "§261(k) the three-way takeover (e14): a session late with its takeover of a stale lock leaves the live lock another session took meanwhile, a third cannot create one beside it, and a guard whose maker died is cleared (mutation: the takeover without the guard re-reading the lock; ${_S261_R:-ok})" \
     test -z "$_S261_R"
-# (q) a lock whose pid is alive but runs no sandy (a pid reused since) is
-# stale: taken at once.
+# (q) a reused pid: the lock's pid is alive, but its recorded start is not
+# that process's (here a wrong one written for a live sleep), so it is
+# another process now: stale, taken at once.
 _S261_Q="$_S261_U/q"; mkdir -p "$_S261_Q"
 sleep 300 </dev/null >/dev/null 2>&1 &
 _S261_PQ=$!
-printf '%s\n' "$_S261_PQ" > "$_S261_Q/lock"
+printf '%s\n%s\n' "$_S261_PQ" p1 > "$_S261_Q/lock"
 _S261_R="$(bash -c '. "$1/fns.sh"; t0=$SECONDS; _sandy_hold_lock "$2"; rc=$?
-    [ "$rc" = 0 ] || echo "not taken (rc $rc)"; [ $((SECONDS - t0)) -le 3 ] || echo "waited $((SECONDS - t0)) s for a pid that runs no sandy"
-    [ "$(cat "$2/lock")" = "$$" ] || echo "the lock is not this session'"'"'s"' _ "$_S261_U" "$_S261_Q" </dev/null 2>&1)" || true
+    [ "$rc" = 0 ] || echo "not taken (rc $rc)"; [ $((SECONDS - t0)) -le 3 ] || echo "waited $((SECONDS - t0)) s for a reused pid"
+    [ "$(head -n 1 "$2/lock")" = "$$" ] || echo "the lock is not this session'"'"'s"
+    [ -n "$(sed -n 2p "$2/lock")" ] || echo "the lock records no start"' _ "$_S261_U" "$_S261_Q" </dev/null 2>&1)" || true
 kill "$_S261_PQ" 2>/dev/null || true; wait "$_S261_PQ" 2>/dev/null || true
-check "§261(q) a lock whose pid is alive but runs no sandy (sleep, a reused pid) is taken over at once, not waited for (mutation: kill -0 alone; ${_S261_R:-ok})" \
+check "§261(q) a lock whose pid is alive but whose recorded start is another process's (a reused pid) is taken over at once, not waited for, and the new lock records this session's start (mutation: the start not compared; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (u) liveness is the pid and its start, never the command line: a session
+# run as a link named sb, a copy named sandy-dev, `bash -x -e /path/sandy`, a
+# path with two spaces, through PATH, and the --start re-exec (nohup env ...)
+# are each alive with the start recorded for them, on the /proc path and on
+# the ps path macOS takes; each with a wrong start is not; a pid that is gone
+# is not; a record with no start counts as alive while the pid runs.
+_S261_V="$_S261_U/v"; mkdir -p "$_S261_V/bin" "$_S261_V/a b  c"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$_S261_V/bin/sandy"; chmod +x "$_S261_V/bin/sandy"
+ln -s sandy "$_S261_V/bin/sb"; cp "$_S261_V/bin/sandy" "$_S261_V/bin/sandy-dev"; cp "$_S261_V/bin/sandy" "$_S261_V/a b  c/sandy"
+_s261_v() {   # $1 = label, then the command -> one line: label ok|<what failed>
+    local l="$1" p r=""; shift
+    "$@" </dev/null >/dev/null 2>&1 &
+    p=$!; sleep 0.3
+    r="$(bash -c '. "$1/fns.sh"; p=$2; o=""
+        for how in proc ps; do
+            if [ "$how" = ps ]; then _SANDY_PROC_FORCE_PS=1; fi
+            _sandy_pid_start "$p" st || { o="$o $how: no start read;"; continue; }
+            _sandy_pid_alive "$p" "$st" || o="$o $how: judged stale with its own start ($st);"
+            case "$st" in p*) w=p1 ;; *) w=e1 ;; esac
+            ! _sandy_pid_alive "$p" "$w" || o="$o $how: alive with a wrong start;"
+        done
+        unset _SANDY_PROC_FORCE_PS
+        _sandy_pid_alive "$p" "" || o="$o no start recorded: judged stale;"
+        printf "%s" "${o:-ok}"' _ "$_S261_U" "$p" 2>&1)" || r="probe failed"
+    kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true
+    printf '%s: %s\n' "$l" "$r"
+}
+_S261_R="$( {
+    _s261_v "via PATH" env PATH="$_S261_V/bin:$PATH" sandy
+    _s261_v "a link named sb" env PATH="$_S261_V/bin:$PATH" sb
+    _s261_v "a copy named sandy-dev" bash "$_S261_V/bin/sandy-dev"
+    _s261_v "bash -x -e" bash -x -e "$_S261_V/bin/sandy"
+    _s261_v "two spaces in the path" bash "$_S261_V/a b  c/sandy"
+    _s261_v "the --start re-exec" nohup env SANDY_DAEMON_SUPERVISOR=1 "$_S261_V/bin/sandy"
+    sleep 30 </dev/null >/dev/null 2>&1 & _S261_PG=$!; kill "$_S261_PG" 2>/dev/null; wait "$_S261_PG" 2>/dev/null
+    bash -c '. "$1/fns.sh"; ! _sandy_pid_alive "$2" "" || echo "gone: judged alive"' _ "$_S261_U" "$_S261_PG"; } 2>&1 | grep -v ': ok$' || true)"
+check "§261(u) a session is alive by its pid and recorded start whatever runs it (a link named sb, a copy sandy-dev, bash -x -e, two spaces in the path, PATH, the --start re-exec), on the /proc and the ps paths; a wrong start or a gone pid is not; no start recorded counts as alive (mutations: the start not compared; a name check; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (w) e17 part 3: a lock held by a live session run through a link named sb,
+# its start recorded, is waited for and never taken over (the wait runs out:
+# rc 2, the lock unchanged).
+_S261_W2="$_S261_U/w"; mkdir -p "$_S261_W2"
+env PATH="$_S261_V/bin:$PATH" sb </dev/null >/dev/null 2>&1 &
+_S261_PW=$!; sleep 0.3
+_S261_R="$(bash -c '. "$1/fns.sh"; d="$2"; p="$3"; _SANDY_HOLD_WAIT_S=1
+    _sandy_pid_start "$p" st; printf "%s\n%s\n" "$p" "$st" > "$d/lock"; cp "$d/lock" "$d/lock.was"
+    _sandy_hold_lock "$d"; rc=$?
+    [ "$rc" = 2 ] || echo "rc $rc (want 2: waited out)"
+    cmp -s "$d/lock" "$d/lock.was" || echo "the live session'"'"'s lock was taken over: [$(tr "\n" " " < "$d/lock")]"' _ "$_S261_U" "$_S261_W2" "$_S261_PW" </dev/null 2>&1)" || true
+kill "$_S261_PW" 2>/dev/null || true; wait "$_S261_PW" 2>/dev/null || true
+check "§261(w) a lock held by a live session run through a link named sb (start recorded) is waited for, bounded, and never taken over (on 67c48dd it was judged stale and taken mid-release; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (y) a holder entry is judged the same way: it records its launcher's
+# start, and an entry whose pid is alive with another start (a reused pid) is
+# dead once its container is gone; with its own start it is alive.
+_S261_Y="$_S261_U/y"; mkdir -p "$_S261_Y/sh" "$_S261_Y/g/.git" "$_S261_Y/sbA"
+sleep 300 </dev/null >/dev/null 2>&1 &
+_S261_PY=$!
+_S261_R="$(bash -c '. "$1/fns.sh"; Y="$2"; p="$3"
+    _sandy_container_gone() { return 0; }
+    SANDY_HOME="$Y/sh"; SANDBOX_DIR="$Y/sbA"; CONTAINER_NAME=sandy-A; WORK_DIR="$Y/wa"
+    _sandy_hold_add "$Y/g/.git"
+    e="$(ls "$Y"/sh/gitdir-holds/*/holder.sandy-A 2>/dev/null | head -n 1)"
+    [ -n "$e" ] || { echo "no holder entry written"; exit 0; }
+    grep -q "^start	[pe][0-9]" "$e" || echo "the holder entry records no start: [$(tr "\n" " " < "$e")]"
+    _sandy_pid_start "$p" st
+    printf "pid\t%s\nstart\t%s\nws\t00\n" "$p" "$st" > "$Y/own"; printf "pid\t%s\nstart\tp1\nws\t00\n" "$p" > "$Y/reused"
+    _sandy_hold_holder_alive "$Y/own" sandy-X || echo "a live holder with its own start judged dead"
+    ! _sandy_hold_holder_alive "$Y/reused" sandy-X || echo "a reused pid (another start) judged alive"' _ "$_S261_U" "$_S261_Y" "$_S261_PY" </dev/null 2>&1)" || true
+kill "$_S261_PY" 2>/dev/null || true; wait "$_S261_PY" 2>/dev/null || true
+check "§261(y) a holder entry records its launcher's start; one whose pid is alive with another start is dead once its container is gone, one with its own start is alive (mutations: no start written; the start not read; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (x) e17 part 4: a takeover guard whose maker died before writing its pid,
+# beside a lock whose pid is gone, is cleared after about a second and the lock
+# taken; and a lock that cannot be removed (the hold dir read-only) ends in
+# the bound (rc 2), never in a busy loop. Each run is watched: killed and
+# failed after 15 s.
+_s261_bounded() {   # CMD... -> its output, or "HUNG" when it ran past 15 s
+    local o="$_S261_U/bounded.out" p n=0
+    "$@" > "$o" 2>&1 </dev/null &
+    p=$!
+    while kill -0 "$p" 2>/dev/null; do
+        n=$((n + 1)); if [ "$n" -gt 150 ]; then kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; echo HUNG; return 0; fi
+        sleep 0.1
+    done
+    wait "$p" 2>/dev/null || true
+    cat "$o"
+}
+_S261_X="$_S261_U/x"; mkdir -p "$_S261_X/g1" "$_S261_X/g2"
+mkdir "$_S261_X/g1/takeover.d"; printf '%s\n' 2147480003 > "$_S261_X/g1/lock"
+printf '%s\n' 2147480003 > "$_S261_X/g2/lock"; chmod 500 "$_S261_X/g2"
+_S261_R="$(_s261_bounded bash -c '. "$1/fns.sh"; _SANDY_HOLD_WAIT_S=3
+    t0=$SECONDS; _sandy_hold_lock "$2/g1"; rc=$?; t=$((SECONDS - t0))
+    [ "$rc" = 0 ] || echo "g1: rc $rc (want the lock taken)"; [ "$t" -le 4 ] || echo "g1: took $t s"
+    [ ! -e "$2/g1/takeover.d" ] || echo "g1: the pid-less guard was left"
+    t0=$SECONDS; _sandy_hold_lock "$2/g2"; rc=$?; t=$((SECONDS - t0))
+    [ "$rc" = 2 ] || echo "g2: rc $rc (want 2: the bound)"; [ "$t" -le 5 ] || echo "g2: took $t s"' _ "$_S261_U" "$_S261_X")" || true
+chmod 700 "$_S261_X/g2" 2>/dev/null || true
+check "§261(x) a takeover guard left with no pid is cleared within about a second and the stale lock taken; a stale lock that cannot be removed ends in the bound (rc 2), not a busy loop (on 67c48dd: an endless loop; mutation: the takeover path skipping the bound and the sleep; ${_S261_R:-ok})" \
     test -z "$_S261_R"
 # (r) a lock a running sandy holds and never releases (stopped, hung): the
 # wait is bounded, and both sides fail safe. A release keeps everything and
@@ -35431,21 +35533,22 @@ _S261_R="$( { [ -n "$_S261_P" ] || echo "fixture: no kept snapshot"
 [ -z "$_S261_R" ] || _a6_diag "§261(n)" "$_S261_C"
 check "§261(n) a provisional snapshot claimed by a judge that died mid-judgement is given back and judged by the next launch (mutation: claims left as they are; ${_S261_R:-ok})" \
     test -z "$_S261_R"
-# (t) ...and so is one whose pid has been reused by a program that is no sandy.
+# (t) ...and so is one whose pid has been reused (the pid alive, the start
+# in the claim another process's).
 _S261_C=s261-claim2; _S261_W="$_A6_DIR/$_S261_C/ws"; mkdir -p "$_S261_W/.git/objects" "$_S261_W/.git/refs"
 printf 'ref: refs/heads/main\n' > "$_S261_W/.git/HEAD"; printf '[core]\n' > "$_S261_W/.git/config"
 _a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
 _S261_S="$(_a6_sandbox "$_S261_C")"; _S261_P="$(ls "$_S261_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
 sleep 300 </dev/null >/dev/null 2>&1 &
 _S261_PT=$!
-[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.$_S261_PT"
+[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.$_S261_PT.p1"
 _a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
 kill "$_S261_PT" 2>/dev/null || true; wait "$_S261_PT" 2>/dev/null || true
 _S261_R="$( { [ -n "$_S261_P" ] || echo "fixture: no kept snapshot"
     grep -qF "An EARLIER session's end report" "$_A6_DIR/$_S261_C/out" || echo "the claim of a reused pid was not judged"
     [ -z "$(ls -A "$_S261_S/.protected-provisional" 2>/dev/null)" ] || echo "left: $(ls -A "$_S261_S/.protected-provisional")"; } 2>&1)" || true
 [ -z "$_S261_R" ] || _a6_diag "§261(t)" "$_S261_C"
-check "§261(t) ...and one whose pid now runs another program (a reused pid, here a sleep) is given back and judged too (mutation: kill -0 alone; ${_S261_R:-ok})" \
+check "§261(t) ...and one whose pid now belongs to another process (alive, a different start) is given back and judged too (mutation: the start not compared; ${_S261_R:-ok})" \
     test -z "$_S261_R"
 check "§261(o) a sandbox's .gitdir-holds is never copied by --rsync and is named as regenerable by --reset-sandbox (mutation: dropped from either list)" \
     bash -c 'grep -A3 "^_SANDY_RSY_NEVER=(" "$1" | grep -qF ".gitdir-holds" && grep -F "_rs_regen() {" "$1" | grep -qF "|.gitdir-holds|"' _ "$SANDY_SCRIPT"
