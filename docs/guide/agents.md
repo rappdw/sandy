@@ -217,6 +217,8 @@ A session you **adopt** was created without sandy's inbound `refuse` pin. If it 
 
 **Readiness.** `--start` reports ready (exit `0`) only once every declared session is running. Otherwise it exits **`9`**, names each one and why (ambiguous name, unknown `session:` id, a copy instead of a resume, not running after 60s), and **leaves the container running**, so the sessions that did come up keep working. `--print-state` reports each session's status under `claude_sessions`.
 
+**When the agent view exits.** The background sessions share one Claude Code daemon, and the agent view in the claude pane is its front end. If the view exits (the daemon died, say), the pane prints `[sandy] Claude Code agent view exited (code: N)` and waits for Enter, at every verbosity, so a dead view is visible instead of sitting silent. Every session in the sandbox counts against one process limit, and that limit counts threads, which Claude Code uses many of: if you run many sessions, raise `SANDY_PIDS_LIMIT` (default 4096; see [Configuration](configuration.md)).
+
 Files under `.sandy/sessions/` are not part of the `.sandy/Dockerfile` build context: editing one never re-prompts the Dockerfile approval or rebuilds the project image. `.sandy/` is read-only inside the container, so an agent can't rewrite its own instructions.
 
 ## Headless / remote servers
