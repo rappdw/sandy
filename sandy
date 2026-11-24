@@ -18779,9 +18779,12 @@ _sandy_symlink_classify() {
             # #544: and a path sandy mounts read-write by name
             # (_sandy_symlink_is_byname_mount_rel: .gstack). Docker mounts
             # the link's target, so it is judged wherever it points.
+            # Issue 42: and every other path sandy mounts by name, the git
+            # paths it derives from the workspace among them: one predicate
+            # for all of them, shared with the -v check
+            # (_sandy_symlink_is_byname_rel).
             _sl_rel="${link#$WORK_DIR/}"
-            if _sandy_is_protected_rel "$_sl_rel" || _sandy_symlink_is_copied_rel "$_sl_rel" \
-               || _sandy_symlink_is_byname_mount_rel "$_sl_rel"; then
+            if _sandy_symlink_is_byname_rel "$_sl_rel"; then
                 DANGEROUS_SYMLINKS+=("$_sl_rel -> $target")
                 _SANDY_SL_RELS+=("$_sl_rel"); _SANDY_SL_TGTS+=("$target")
             fi
@@ -18980,6 +18983,45 @@ _sandy_symlink_is_copied_rel() {
 _sandy_symlink_is_byname_mount_rel() {
     [ "$1" = .gstack ] || return 1
     case ",${SANDY_SKILL_PACKS:-}," in *,gstack,*) return 0 ;; esac
+    return 1
+}
+
+# Issue 42: the ONE predicate the scan's classification
+# (_sandy_symlink_classify) and the -v check (_sandy_symlink_path_unjudged)
+# share for "a path sandy mounts or copies by name": a link there is judged
+# wherever it points, a target outside $HOME included, because Docker follows
+# a link at a -v source and cp copies what it finds. It is every entry of
+# _sandy_symlink_byname_rels: the protected paths, the copied trees, .gstack
+# while gstack is on (_sandy_symlink_is_byname_mount_rel; a link at .gstack
+# is an ordinary workspace link otherwise), and the git paths the mount code
+# derives from the workspace (the gitdir a .git file names, with its config,
+# hooks, info, packed-refs, commondir and config.worktree, those of every
+# submodule gitdir and linked-worktree admin dir, worktrees/ and its entries,
+# and the core.hooksPath directory). Before, both judged such a target only
+# at the first three, so `gitdir: vendor/g` with vendor/g/config -> a host
+# file outside $HOME was mounted :ro with no prompt. Both must ask the same
+# question: a path the -v check refuses that the scan did not judge is
+# refused on every launch ("Launch again" could never help).
+# The list is read on first need, once per scan and once per -v check
+# (_SANDY_BYNAME_LOADED, cleared by _sandy_resolve_symlinks and by
+# _sandy_symlink_check_mounts), so a workspace with no link that leaves it at
+# such a path never reads it.
+_sandy_symlink_is_byname_rel() {
+    local _bn_p _bn_s
+    if _sandy_is_protected_rel "$1" || _sandy_symlink_is_copied_rel "$1" \
+       || _sandy_symlink_is_byname_mount_rel "$1"; then
+        return 0
+    fi
+    [ "$1" != .gstack ] || return 1
+    if [ "${_SANDY_BYNAME_LOADED:-}" != 1 ]; then
+        _bn_s=$'\n'
+        while IFS= read -r -d '' _bn_p; do _bn_s="$_bn_s$_bn_p"$'\n'; done < <(_sandy_symlink_byname_rels)
+        # The -v check adds the core.hooksPath directory actually mounted
+        # (_extra_hooks), which is what its -v source is spelled from.
+        if [ -n "${_SANDY_BYNAME_EXTRA:-}" ]; then _bn_s="$_bn_s$_SANDY_BYNAME_EXTRA"$'\n'; fi
+        _SANDY_BYNAME_SET="$_bn_s"; _SANDY_BYNAME_LOADED=1
+    fi
+    case "$_SANDY_BYNAME_SET" in *$'\n'"$1"$'\n'*) return 0 ;; esac
     return 1
 }
 
@@ -19342,8 +19384,8 @@ _sandy_symlink_protected_sweep() {
 # target in $SANDY_HOME is never covered; one that is, or lies under, a
 # target this launch's gate judged is covered (and so is the rest of its
 # tree, until a prefix comes back in); otherwise a target under $HOME, or
-# any target at a protected path, at a copied tree, at the path mounted by name
-# (_sandy_symlink_is_byname_mount_rel), or at one whose workspace name cannot
+# any target at a path sandy mounts or copies by name (_sandy_symlink_is_byname_rel,
+# the scan's own predicate: issue 42), or at one whose workspace name cannot
 # be told, is printed. A path with no link and no `..` component cannot leave
 # where it is, so it costs no readlink.
 _sandy_symlink_path_unjudged() {
@@ -19408,8 +19450,8 @@ _sandy_symlink_path_unjudged() {
         esac
         if _sandy_symlink_target_judged "$_t"; then _ok=1; continue; fi
         if [[ "$_t" == "$HOME"/* ]] || { [ -z "$_q" ] && [ -z "$_qp" ]; } \
-           || { [ -n "$_q" ] && { _sandy_is_protected_rel "$_q" || _sandy_symlink_is_copied_rel "$_q" || _sandy_symlink_is_byname_mount_rel "$_q"; }; } \
-           || { [ -n "$_qp" ] && { _sandy_is_protected_rel "$_qp" || _sandy_symlink_is_copied_rel "$_qp" || _sandy_symlink_is_byname_mount_rel "$_qp"; }; }; then
+           || { [ -n "$_q" ] && _sandy_symlink_is_byname_rel "$_q"; } \
+           || { [ -n "$_qp" ] && _sandy_symlink_is_byname_rel "$_qp"; }; then
             _pu_q="${_q:-${_qp:-$_w}}"; _pu_hit=1; break
         fi
     done
@@ -19459,6 +19501,10 @@ _sandy_symlink_unjudged_refuse() {
 # list (_sandy_symlink_byname_rels) does not know of yet.
 _sandy_symlink_check_mounts() {
     local _i=0 _n=${#RUN_FLAGS[@]} _hit _bad=""
+    # The by-name list as it is now, on first need (issue 42): a gitdir a
+    # .git file names since the gate is judged where it lies today, and the
+    # core.hooksPath directory the mount loop actually mounted is on it.
+    _SANDY_BYNAME_LOADED=""; _SANDY_BYNAME_EXTRA="${_extra_hooks:-}"
     # #544: re-pointed onto .git, a protected path or the workspace since the gate.
     if _sandy_symlink_is_byname_mount_rel .gstack; then _sandy_gstack_refuse_forbidden "$WORK_DIR"; fi
     while [ "$_i" -lt "$_n" ]; do
@@ -19533,6 +19579,7 @@ _sandy_resolve_symlinks() {
     # so strip it or nothing inside the workspace would compare as inside.
     while case "$REAL_WORK_DIR" in //*) true ;; *) false ;; esac; do REAL_WORK_DIR="${REAL_WORK_DIR#/}"; done
     _SANDY_PROTECTED_RELS_LOADED=""   # #494: re-read the protected lists for this scan
+    _SANDY_BYNAME_LOADED=""; _SANDY_BYNAME_EXTRA=""   # issue 42: and the by-name list, on first need (hooksPath read just below)
     _SANDY_BYNAME_HOOKSPATH="$(exec git -C "$WORK_DIR" config --path --get core.hooksPath 2>/dev/null)" || _SANDY_BYNAME_HOOKSPATH=""
     DANGEROUS_SYMLINKS=()
     # Parallel arrays: resolved host path and the container path where it should be mounted

@@ -13416,7 +13416,8 @@ sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR
 : > "$_S130_DIR/scan.sh"
 for _f in _sandy_symlink_recorded _sandy_symlink_classify _sandy_fnmatch_escape _sandy_dir_has_entry _sandy_symlink_skip_parse _sandy_symlink_copied _sandy_symlink_is_copied_rel _sandy_symlink_inside _sandy_symlink_resolve \
           _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_symlink_byname_rels _sandy_symlink_canon _sandy_symlink_target_judged _sandy_symlink_walk \
-          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan; do
+          _sandy_symlink_protected_sweep _sandy_symlink_is_internal_entry _sandy_symlink_internal_sweep _sandy_symlink_scan \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_worktree_admin_dirs _sandy_is_gitdir _sandy_ws_physical; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
 done
 unset _f
@@ -27804,7 +27805,9 @@ check "§238(latecp) .claude swapped for a link out of the workspace after the g
 _S238_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_resolve _sandy_symlink_target_judged _sandy_symlink_recorded _sandy_symlink_canon _sandy_symlink_classify _sandy_symlink_is_copied_rel \
           _sandy_symlink_walk _sandy_ws_physical _sandy_gitdir_host _sandy_symlink_path_unjudged _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_gitdir_rel \
+          _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S238_D/fns.sh"
 done
 mkdir -p "$_S238_D/h/ws/c" "$_S238_D/h/o" "$_S238_D/h/p" "$_S238_D/h/dots" "$_S238_D/h/stow" "$_S238_D/h/.sandy/x" "$_S238_D/sys"
@@ -28155,7 +28158,9 @@ check "§239(g4) control: a real empty .github/workflows (debris) and an empty .
 # uncopied path linked to the same place is not.
 _S239_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_is_byname_mount_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host \
+          _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S239_D/fns.sh"
 done
 unset _f
@@ -29131,7 +29136,8 @@ _S251_D="$(cd "$(mktemp -d)" && pwd -P)"
 for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
           _sandy_symlink_is_byname_mount_rel _sandy_symlink_unjudged_refuse _sandy_symlink_check_mounts _sandy_path_overlaps _sandy_gstack_forbidden \
           _sandy_gstack_refuse_forbidden _sandy_symlink_resolve _sandy_symlink_copied _sandy_gitdir_rel _sandy_gitdir_host _sandy_symlink_recorded \
-          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files \
+          _sandy_symlink_is_byname_rel _sandy_symlink_byname_rels _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S251_D/fns.sh"
 done
 unset _f
@@ -34424,6 +34430,156 @@ check "§258(f) --reset-sandbox names a pending session-end judgement (a kept pr
 _a6_done
 unset -f _s258_repo
 unset _S258_B _S258_PATH _S258_C _S258_W _S258_O _S258_R _S258_S _S258_FN _S258_SOCK _S258_HOST _S258_P _S258_G
+echo ""
+
+# ============================================================
+section "§259: every git path sandy mounts by name (the gitdir a .git file names, its config, hooks, info, commondir and config.worktree, those of each submodule gitdir and worktree admin dir, the core.hooksPath directory) is judged by the dangerous-symlink gate wherever a link there points, a target outside \$HOME included, and mounted only after approval"
+# ============================================================
+_fx_a6; _fx_s236; _fx_s230
+# WHY. The scan (_sandy_symlink_classify) and the -v check before docker run
+# (_sandy_symlink_path_unjudged) judged a link to a target outside $HOME only at
+# a protected path, a copied tree or .gstack. The git paths sandy derives from
+# the workspace and mounts by name are none of those, so `.git` FILE
+# `gitdir: vendor/g` (an in-workspace git directory) with vendor/g/config ->
+# a host file outside $HOME launched with rc 0, no prompt, and
+# `-v <ws>/vendor/g/config:...:ro` handed that file to the container (Docker
+# follows a link at a -v source). Both now ask one predicate
+# (_sandy_symlink_is_byname_rel: the whole _sandy_symlink_byname_rels list), so
+# such a link reaches the gate (a headless launch refuses it), is mounted
+# after approval, and one planted after the gate is refused before docker run.
+# Changing only the -v check would refuse every launch with "Launch again",
+# which could never help: (b) and (c) launch with the link approved.
+#
+# Targets live in CASE-out, beside the fixture HOME (CASE), so outside it.
+_s259_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+_s259_case() {   # $1 = CASE: CASE-out/secret (a file) and CASE-out/dir (a directory)
+    mkdir -p "$_A6_DIR/$1/ws" "$_A6_DIR/$1-out/dir"
+    printf 'S259-SECRET\n' > "$_A6_DIR/$1-out/secret"; printf 'S259-HOOK\n' > "$_A6_DIR/$1-out/dir/pre-commit"
+}
+_S259_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+# _s259_fix CASE KIND: the layout of one kind, with its link, in CASE/ws.
+# Prints the link as the gate names it: "<rel> -> <target>".
+_s259_fix() {
+    local w="$_A6_DIR/$1/ws" o="$_A6_DIR/$1-out" rel tgt
+    case "$2" in
+        g-*)   _s259_gd "$w/vendor/g"; printf 'gitdir: vendor/g\n' > "$w/.git" ;;
+        gs-*)  _s259_gd "$w/vendor/g"; _s259_gd "$w/vendor/g/modules/sub"; printf 'gitdir: vendor/g\n' > "$w/.git" ;;
+        s-*)   _s259_gd "$w/.git"; _s259_gd "$w/.git/modules/sub" ;;
+        wt-*)  _s259_gd "$w/.git"; mkdir -p "$w/.git/worktrees/w"; printf 'ref: refs/heads/w\n' > "$w/.git/worktrees/w/HEAD" ;;
+        hp)    _s259_gd "$w/.git"; printf '[core]\n\thooksPath = tools/hooks\n' > "$w/.git/config"; mkdir -p "$w/tools" ;;
+    esac
+    case "$2" in
+        g-config) rel=vendor/g/config; tgt="$o/secret" ;;
+        g-hooks) rel=vendor/g/hooks; tgt="$o/dir" ;;
+        g-info) rel=vendor/g/info; tgt="$o/dir" ;;
+        g-commondir) rel=vendor/g/commondir; tgt="$o/secret" ;;
+        g-cfgwt) rel=vendor/g/config.worktree; tgt="$o/secret" ;;
+        gs-hooks) rel=vendor/g/modules/sub/hooks; tgt="$o/dir" ;;
+        s-config) rel=.git/modules/sub/config; tgt="$o/secret" ;;
+        s-hooks) rel=.git/modules/sub/hooks; tgt="$o/dir" ;;
+        s-info) rel=.git/modules/sub/info; tgt="$o/dir" ;;
+        wt-commondir) rel=.git/worktrees/w/commondir; tgt="$o/secret" ;;
+        hp) rel=tools/hooks; tgt="$o/dir" ;;
+    esac
+    ln -s "$tgt" "$w/$rel"
+    printf '%s -> %s\n' "$rel" "$tgt"
+}
+# (a) each kind, a headless launch with no approval: refused by the gate,
+# naming the link; no docker run of any kind carried the outside path.
+_S259_KINDS="g-config g-hooks g-info g-commondir g-cfgwt gs-hooks s-config s-hooks s-info wt-commondir hp"
+for _S259_N in $_S259_KINDS; do
+    _S259_C="s259-$_S259_N"; _s259_case "$_S259_C"
+    _s259_fix "$_S259_C" "$_S259_N" > "$_A6_DIR/$_S259_C.link"
+    _a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+done
+# (b) approved (the list a "y" at the prompt persists): the launch runs and
+# mounts the by-name path, so Docker hands the container the approved target.
+_S259_C=s259-ok; _s259_case "$_S259_C"; _S259_L="$(_s259_fix "$_S259_C" g-config)"; _s236_seed "$_S259_C" "$_S259_L"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+_S259_C=s259-oks; _s259_case "$_S259_C"; _S259_L="$(_s259_fix "$_S259_C" s-hooks)"; _s236_seed "$_S259_C" "$_S259_L"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}"
+# (c) planted after the gate (at the second core.hooksPath read: the scan
+# reads it first, the hooks mount next), with vendor/g/config a plain file at
+# the scan: the -v check refuses it, by name.
+_S259_C=s259-late; _s259_case "$_S259_C"; _S259_W="$_A6_DIR/$_S259_C/ws"; _S259_G="$_A6_DIR/$_S259_C/gitbin"
+_s259_gd "$_S259_W/vendor/g"; printf '[core]\n' > "$_S259_W/vendor/g/config"; printf 'gitdir: vendor/g\n' > "$_S259_W/.git"; mkdir -p "$_S259_G"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in *core.hooksPath*) n=$(cat %q 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > %q
+    [ "$n" -lt 2 ] || [ -e %q ] || { rm -f %q; ln -s %q %q; : > %q; } ;; esac\n' \
+      "$_A6_DIR/$_S259_C/hp-reads" "$_A6_DIR/$_S259_C/hp-reads" "$_A6_DIR/$_S259_C/planted" \
+      "$_S259_W/vendor/g/config" "$_A6_DIR/$_S259_C-out/secret" "$_S259_W/vendor/g/config" "$_A6_DIR/$_S259_C/planted"
+  printf 'exec %q "$@"\n' "$(command -v git)"; } > "$_S259_G/git"
+chmod +x "$_S259_G/git"
+_a6_bg "$_S259_C" _a6_launch "$_S259_C" "${_S259_K[@]}" PATH="$_S259_G:$_A6_DIR/bin:$PATH"
+# (d) under --start, planted between the approval pass and the supervisor:
+# the supervisor's own scan judges it.
+_s259_plant() { _s259_case s259-start; _s259_fix s259-start g-config > "$_A6_DIR/s259-start.link"; }
+_a6_bg s259-start _s230_sup_after s259-start _s259_plant
+for _S259_N in $_S259_KINDS; do
+    _S259_C="s259-$_S259_N"; _a6_join "$_S259_C"
+    _S259_L="$(cat "$_A6_DIR/$_S259_C.link")"
+    _S259_OK=0; { _s230_refused "$_S259_C" "$_S259_L" && ! grep -rqsF -- "$_A6_DIR/$_S259_C-out" "$_A6_DIR/$_S259_C/runs"; } || _S259_OK=$?
+    [ "$_S259_OK" = 0 ] || _a6_diag "§259(a) $_S259_N" "$_S259_C"
+    check "§259(a) $_S259_N: a headless launch with ${_S259_L%% -> *} linked to a target outside \$HOME is refused by the dangerous-symlink gate, naming the link; nothing outside reaches a docker run (mutation: the predicate dropped from _sandy_symlink_classify, or this path left out of _sandy_symlink_byname_rels; rc ${_A6_RC:-none})" \
+        test "$_S259_OK" = 0
+done
+_S259_C=s259-ok; _S259_W="$_A6_DIR/$_S259_C/ws"; _a6_join "$_S259_C"
+_S259_R="$(_s236_unmet "$_S259_C" "$_A6_DIR/$_S259_C" "vendor/g/config -> $_A6_DIR/$_S259_C-out/secret" "")"
+if [ -z "$_S259_R" ] && ! _a6_pair "$(_a6_agent_args "$_S259_C")" -v "$_S259_W/vendor/g/config:/home/sandy/ws/vendor/g/config:ro"; then _S259_R="no -v of vendor/g/config"; fi
+[ -z "$_S259_R" ] || _a6_diag "§259(b)" "$_S259_C"
+check "§259(b) approved, the same gitdir config link launches (rc 0, the list unchanged) and vendor/g/config is mounted :ro, so the container gets the approved target (mutation: the predicate in the -v check only: every launch refused with \"Launch again\"; ${_S259_R:-ok})" \
+    test -z "$_S259_R"
+_S259_C=s259-oks; _S259_W="$_A6_DIR/$_S259_C/ws"; _a6_join "$_S259_C"
+_S259_R="$(_s236_unmet "$_S259_C" "$_A6_DIR/$_S259_C" ".git/modules/sub/hooks -> $_A6_DIR/$_S259_C-out/dir" "")"
+if [ -z "$_S259_R" ] && ! _a6_pair "$(_a6_agent_args "$_S259_C")" -v "$_S259_W/.git/modules/sub/hooks:/home/sandy/ws/.git/modules/sub/hooks:ro"; then _S259_R="no -v of .git/modules/sub/hooks"; fi
+[ -z "$_S259_R" ] || _a6_diag "§259(b2)" "$_S259_C"
+check "§259(b2) ...and an approved submodule hooks link the same (${_S259_R:-ok})" \
+    test -z "$_S259_R"
+_S259_C=s259-late; _a6_join "$_S259_C"
+_S259_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S259_C")" ] && [ -e "$_A6_DIR/$_S259_C/planted" ] \
+  && grep -qF "leaves the workspace through a link the" "$_A6_DIR/$_S259_C/out" \
+  && grep -qF "vendor/g/config -> $_A6_DIR/$_S259_C-out/secret" "$_A6_DIR/$_S259_C/out" \
+  && ! grep -rqsF -- "$_A6_DIR/$_S259_C-out" "$_A6_DIR/$_S259_C/runs"; } || _S259_OK=$?
+[ "$_S259_OK" = 0 ] || _a6_diag "§259(c)" "$_S259_C"
+check "§259(c) vendor/g/config made a link to a target outside \$HOME after the gate (before docker run) is refused by the -v check, named, no agent run (mutation: the predicate dropped from _sandy_symlink_path_unjudged; rc ${_A6_RC:-none})" \
+    test "$_S259_OK" = 0
+_a6_join s259-start
+_S259_OK=0; _s230_refused s259-start "$(cat "$_A6_DIR/s259-start.link")" && ! grep -rqsF -- "$_A6_DIR/s259-start-out" "$_A6_DIR/s259-start/runs" || _S259_OK=$?
+[ "$_S259_OK" = 0 ] || _a6_diag "§259(d)" s259-start
+check "§259(d) under --start, the gitdir config link planted after the approval pass is refused by the supervisor's gate (rc ${_A6_RC:-none})" \
+    test "$_S259_OK" = 0
+# (e) the -v check reads the by-name list as it is when it runs, and adds
+# the core.hooksPath directory the mount loop actually mounted
+# (_extra_hooks), which its -v source is spelled from, whatever the scan
+# read.
+_S259_D="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_symlink_inside _sandy_symlink_target_judged _sandy_ws_physical _sandy_symlink_path_unjudged _sandy_symlink_is_copied_rel \
+          _sandy_symlink_is_byname_mount_rel _sandy_symlink_is_byname_rel _sandy_symlink_byname_rels _sandy_symlink_copied _sandy_symlink_unjudged_refuse \
+          _sandy_symlink_check_mounts _sandy_gitdir_rel _sandy_gitdir_host _sandy_submodule_gitdirs _sandy_worktree_admin_dirs _sandy_is_gitdir \
+          _sandy_is_protected_rel _sandy_protected_files _sandy_protected_dirs _sandy_protected_git_files; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S259_D/fns.sh"
+done
+unset _f
+mkdir -p "$_S259_D/h/ws" "$_S259_D/out"
+mkdir -p "$_S259_D/h/ws/.git"
+ln -s "$_S259_D/out" "$_S259_D/h/ws/sl"
+check "§259(e) the -v check judges against the by-name list as it is when it runs, with the core.hooksPath directory actually mounted (_extra_hooks: tools/new) on it (mutation: _extra_hooks not added)" \
+    bash -c 'trap - ERR; set +e
+             error() { :; }; warn() { :; }; _sandy_daemon_fatal() { :; }
+             . "$1/fns.sh"
+             HOME="$1/h"; SANDY_HOME="$1/h/.sandy"; WORK_DIR="$1/h/ws"; REAL_WORK_DIR="$WORK_DIR"
+             _SANDY_PROTECTED_RELS_LOADED=""; _SANDY_SL_RELS=(); _SANDY_SL_TGTS=()
+             _SANDY_BYNAME_HOOKSPATH=tools/old; _SANDY_BYNAME_LOADED=1; _SANDY_BYNAME_SET=$'"'"'\nstale\n'"'"'; _extra_hooks=tools/new
+             RUN_FLAGS=(-v "$WORK_DIR:/w" -v "$WORK_DIR/sl:/w/sl:ro")
+             _sandy_symlink_check_mounts
+             [ "$_SANDY_BYNAME_LOADED" = 1 ] || { echo "the list was not loaded (probe did not reach the predicate)"; exit 1; }
+             case "$_SANDY_BYNAME_SET" in *$'"'"'\n'"'"'tools/new$'"'"'\n'"'"'*) ;; *) echo "tools/new missing: $_SANDY_BYNAME_SET"; exit 1 ;; esac
+             case "$_SANDY_BYNAME_SET" in *stale*) echo "the list was not read again"; exit 1 ;; esac' _ "$_S259_D"
+rm -rf "$_S259_D"
+_a6_done
+unset -f _s259_gd _s259_case _s259_fix _s259_plant
+unset _S259_K _S259_KINDS _S259_N _S259_C _S259_W _S259_G _S259_L _S259_OK _S259_R _S259_D
 echo ""
 
 # BEGIN SUMMARY
