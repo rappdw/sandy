@@ -35384,6 +35384,25 @@ _S261_R="$(bash -c '. "$1/fns.sh"; Y="$2"; p="$3"
 kill "$_S261_PY" 2>/dev/null || true; wait "$_S261_PY" 2>/dev/null || true
 check "§261(y) a holder entry records its launcher's start; one whose pid is alive with another start is dead once its container is gone, one with its own start is alive (mutations: no start written; the start not read; ${_S261_R:-ok})" \
     test -z "$_S261_R"
+# (z) the ps path (macOS) after an exec in place: a process that waits 6 s
+# and then execs a script (as `sandy --login` re-execs itself, or a wrapper
+# does setup and then execs sandy) records its own start the way another
+# session reads it (ps etime counts from the process's creation, which the
+# exec keeps), so it is alive; the time the script itself started is 6 s
+# later and would make it look dead.
+_S261_Z="$_S261_U/z"; mkdir -p "$_S261_Z"
+printf '%s\n' '_SANDY_PROC_T0="${EPOCHSECONDS:-}"' ". $(printf '%q' "$_S261_U/fns.sh")" '_SANDY_PROC_FORCE_PS=1' \
+    '_sandy_self_start st; printf "%s\n" "$st" > "$1/start.t"; mv "$1/start.t" "$1/start"; sleep 30' > "$_S261_Z/rec"
+bash -c 'sleep 6; exec bash "$1/rec" "$1"' _ "$_S261_Z" </dev/null >/dev/null 2>&1 &
+_S261_PZ=$!
+_S261_N=0; while [ ! -s "$_S261_Z/start" ] && [ "$_S261_N" -lt 150 ]; do sleep 0.1; _S261_N=$((_S261_N + 1)); done
+_S261_R="$(bash -c '. "$1/fns.sh"; st="$(cat "$2/start" 2>/dev/null)"
+    [ -n "$st" ] || { echo "no start recorded"; exit 0; }
+    case "$st" in e*) ;; *) echo "not a ps-path start: $st" ;; esac
+    _SANDY_PROC_FORCE_PS=1 _sandy_pid_alive "$3" "$st" || echo "judged dead with the start it recorded for itself ($st)"' _ "$_S261_U" "$_S261_Z" "$_S261_PZ" </dev/null 2>&1)" || true
+kill "$_S261_PZ" 2>/dev/null || true; wait "$_S261_PZ" 2>/dev/null || true
+check "§261(z) on the ps path, a session that execs in place 6 s after its process was created records its own start as others read it, and is judged alive (mutation: its start taken from the time the script started; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
 # (x) e17 part 4: a takeover guard whose maker died before writing its pid,
 # beside a lock whose pid is gone, is cleared after about a second and the lock
 # taken; and a lock that cannot be removed (the hold dir read-only) ends in
