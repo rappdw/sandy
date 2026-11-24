@@ -2,6 +2,10 @@
 [![GitHub release](https://img.shields.io/github/v/release/rappdw/sandy)](https://github.com/rappdw/sandy/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)]()
 
+<p align="center">
+  <img src="images/sandy-mascot.png" alt="Sandy's mascot: an orange hermit crab whose shell is a terminal window" width="240">
+</p>
+
 # sandy — an isolated sibling for your coding agents
 
 **New to sandy?** [sandy, explained](https://rappdw.github.io/sandy/) is a short guided walkthrough: what it isolates, animated examples of the boundary at work, and how to get running.
