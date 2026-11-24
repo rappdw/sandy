@@ -897,7 +897,7 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 ### macOS
 
-**Network isolation is NOT active on macOS when the egress proxy is explicitly turned off (`SANDY_EGRESS_PROXY=0`).** (The default is `1` — permissive — so this applies only when a user opts out.) Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS_PROXY=1` (or `=2`) applies real isolation on macOS** — see "Egress Proxy" below.
+**Network isolation is NOT active on macOS when the egress proxy is explicitly turned off (`SANDY_EGRESS=off`).** (The default is `permissive`, so this applies only when a user opts out.) Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS=permissive` (or `SANDY_EGRESS=strict`) applies real isolation on macOS** — see "Egress Proxy" below.
 
 **Launch warning**: On non-Linux hosts with the proxy off, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and pointing at `SANDY_EGRESS=permissive|strict` (it named the deprecated `SANDY_EGRESS_PROXY=1/2` before 2.4.0). In proxy mode `apply_network_isolation` is not called (the `--internal` topology is the isolation), so no banner fires.
 
@@ -1569,7 +1569,7 @@ An image built before this can still carry an empty version file, and an empty v
 
 ### Not Mitigated
 
-- **DNS/outbound exfiltration**: In the default permissive mode (`SANDY_EGRESS_PROXY=1`), public internet is intentionally available — exfil to arbitrary public hosts is not blocked. Strict mode (`=2`) narrows egress to the default allowlist + `SANDY_ALLOW_HOSTS` (domain filtering), but does not stop exfil to an *allowlisted* host (host-relay broker is POST_1.0).
+- **DNS/outbound exfiltration**: In the default permissive mode (`SANDY_EGRESS=permissive`), public internet is intentionally available — exfil to arbitrary public hosts is not blocked. Strict mode (`SANDY_EGRESS=strict`) narrows egress to the default allowlist + `SANDY_ALLOW_HOSTS` (domain filtering), but does not stop exfil to an *allowlisted* host (host-relay broker is POST_1.0).
 - **Data exfiltration via workspace files**: Workspace is read-write (by design).
 
 ---
