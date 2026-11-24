@@ -3486,6 +3486,38 @@ _sandy_uchg_unlock() {
     [ -z "$_keep" ] || _rc=1
     return "$_rc"
 }
+# --unlock, refused because Docker cannot be reached: the command that would
+# clear each flag sandy set, for the user to run by hand if they know the
+# container is gone. Read-only. Only `locked` entries of record $1 (workspace
+# $2), each judged by the checks _sandy_uchg_unlock applies (the path decoded,
+# present, not a link and reached through no link, the same inode, the ctime
+# recorded after locking, the flag still set); one that fails a check gets a
+# line saying why instead of a command.
+_sandy_uchg_manual_lines() {   # $1 = record  $2 = workspace
+    local _k _h _x _y _f _s _lnk="" _i _c
+    [ -f "$1" ] || return 0
+    while IFS=$'\t' read -r _k _h _x _y; do
+        [ "$_k" = locked ] || continue
+        if ! _sandy_unhex "$_h" _f || [ -z "$_f" ]; then
+            printf '  (an entry sandy cannot read in %s: no command printed for it)\n' "$1"; continue
+        fi
+        _sandy_uchg_show "$_f" _s
+        if ! { [ -e "$_f" ] || [ -L "$_f" ]; }; then printf '  (%s: no longer there, nothing to unlock)\n' "$_s"; continue; fi
+        if [ -L "$_f" ] || { case "$_f" in "$2"/*) true ;; *) false ;; esac \
+                && _sandy_path_symlink_component "$2" "$_f" _lnk; }; then
+            printf '  (%s: %s is now a symbolic link, so this is not the file sandy locked: no command printed)\n' "$_s" "${_lnk:-it}"
+            _lnk=""; continue
+        fi
+        _sandy_file_inode "$_f" _i || true
+        if [ "$_i" != "$_x" ]; then printf '  (%s: a different file now sits there: no command printed)\n' "$_s"; continue; fi
+        if [ -n "$_y" ] && [ "$_y" != - ] && { _sandy_file_ctime "$_f" _c; [ "$_c" != "$_y" ]; }; then
+            printf '  (%s: its flags changed after sandy set them: no command printed)\n' "$_s"; continue
+        fi
+        _sandy_uchg_is_set "$_f" || { printf '  (%s: not locked any more)\n' "$_s"; continue; }
+        printf '  chflags -h nouchg %q\n' "$_f"
+    done < "$1"
+    return 0
+}
 
 # True when container $1 (a name or id; empty = none was ever created) is
 # known to be gone: inspect reports no such container or object (Docker's
@@ -3494,17 +3526,22 @@ _sandy_uchg_unlock() {
 # depends on it: in particular the daemon unreachable mid-teardown, whose
 # messages also hold "no such" (`connect: no such file or directory` for a
 # missing socket, `no such host` for a DOCKER_HOST that does not resolve).
+# It also leaves why in _SANDY_CONTAINER_STATE: gone, present (inspect printed
+# an id) or unknown (inspect failed for another reason: Docker not reachable).
 _sandy_container_gone() {
     local _o _rc=0
+    _SANDY_CONTAINER_STATE=gone
     [ -n "$1" ] || return 0
     _o="$(docker inspect -f '{{.Id}}' "$1" 2>&1)" || _rc=$?
     if [ "$_rc" = 0 ]; then
         if [ -z "$_o" ]; then return 0; fi
+        _SANDY_CONTAINER_STATE=present
         return 1
     fi
     case "$_o" in
         *"No such container"*|*"No such object"*|*"no such container"*|*"no such object"*) return 0 ;;
     esac
+    _SANDY_CONTAINER_STATE=unknown
     return 1
 }
 # A `commondir` that is an EMPTY directory (Docker created it for a missing -v
@@ -9519,7 +9556,18 @@ if [[ "${1:-}" == "--unlock" ]]; then
     # counts as "may still exist"); with no docker command at all there is
     # no container.
     if command -v docker >/dev/null 2>&1 && ! _sandy_container_gone "sandy-${_ulk_base}-${_ulk_hash}"; then
-        error "--unlock: the container sandy-${_ulk_base}-${_ulk_hash} of this workspace may still exist (a session that outlived its teardown, or Docker could not be reached), so its locks stay."
+        if [ "${_SANDY_CONTAINER_STATE:-}" = unknown ]; then
+            # Fail closed, but say what is known: Docker did not answer, so
+            # neither docker rm -f nor the next launch can help until it
+            # does. The commands that would clear each flag are printed for
+            # the user to run by hand, once they know no container of this
+            # workspace is running (nothing here runs them).
+            error "--unlock: Docker could not be reached, so whether the container sandy-${_ulk_base}-${_ulk_hash} of this workspace still exists is unknown; its locks stay."
+            error "  Start Docker (or fix DOCKER_HOST) and run sandy --unlock again. If you know no container of this workspace is running, you can clear the flags sandy set yourself:"
+            _sandy_uchg_manual_lines "$_ulk_rec" "$WORK_DIR" >&2
+            exit 1
+        fi
+        error "--unlock: the container sandy-${_ulk_base}-${_ulk_hash} of this workspace still exists (a session that outlived its teardown), so its locks stay."
         error "  Remove it first: docker rm -f sandy-${_ulk_base}-${_ulk_hash}, then run sandy --unlock again."
         exit 1
     fi

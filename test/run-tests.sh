@@ -34406,20 +34406,31 @@ _S258_R="$_S258_R$( { awk '/An EARLIER session/ { on = 1 } /End of the earlier s
 [ -z "$_S258_R" ] || _a6_diag "§258(c5)" "$_S258_C"
 check "§258(c5) the re-judgement walks the gitdir the earlier session's .git file named (recorded with the kept snapshot): a worktree admin dir created there after the provisional report is reported (mutation: the re-judgement without that gitdir; ${_S258_R:-ok})" \
     test -z "$_S258_R"
-# (e3) --unlock refuses while the workspace's container may still exist (here:
-# Docker still unreachable), naming it and how to remove it; once it is gone
-# it unlocks.
+# (e3) --unlock refuses while the workspace's container may still exist.
+# Docker unreachable (the socket-missing wording): the refusal says so, since
+# neither docker rm -f nor the next launch can help then, and prints the
+# chflags -h nouchg command for each flag sandy set, after the same checks
+# the unlock applies (.envrc, replaced by another file since, gets a line
+# saying so instead). The container present (inspect prints an id): the
+# docker rm -f advice, and no chflags lines. Gone: it unlocks.
 _S258_C=s258-down; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_O="$_A6_DIR/$_S258_C/out"
+cp "$_S258_W/.envrc" "$_S258_W/.envrc.new"; mv -f "$_S258_W/.envrc.new" "$_S258_W/.envrc"
 _a6_launch "$_S258_C" A6_OS=Darwin S258_INSPECT_ERR="$_S258_SOCK" PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
 _S258_R="$( { [ "$_A6_RC" = 1 ] || echo "--unlock rc $_A6_RC, want 1"
-    grep -qF "may still exist (a session that outlived its teardown, or Docker could not be reached), so its locks stay" "$_S258_O" || echo "no refusal naming the container"
+    grep -qF "Docker could not be reached, so whether the container sandy-ws-" "$_S258_O" || echo "the refusal does not name reachability"
+    grep -qxF "[sandy]   chflags -h nouchg $(printf '%q' "$_S258_W/.git/config")" "$_S258_O" || grep -qxF "  chflags -h nouchg $(printf '%q' "$_S258_W/.git/config")" "$_S258_O" || echo "no nouchg line for .git/config"
+    grep -qF ".envrc: a different file now sits there: no command printed" "$_S258_O" || echo "the replaced .envrc is not named"
+    if grep -qF "nouchg $(printf '%q' "$_S258_W/.envrc")" "$_S258_O"; then echo "a nouchg line for the replaced .envrc"; fi
+    grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked anyway"; } 2>&1)" || true
+_a6_launch "$_S258_C" A6_OS=Darwin S248_SURVIVE=1 PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
+_S258_R="$_S258_R$( { [ "$_A6_RC" = 1 ] || echo "--unlock (container present) rc $_A6_RC, want 1"
+    grep -qF "still exists (a session that outlived its teardown), so its locks stay" "$_S258_O" || echo "no refusal for a present container"
     grep -qF "docker rm -f sandy-ws-" "$_S258_O" || echo "no docker rm -f advice"
-    grep -qxF "$_S258_W/.envrc" "$_A6_DIR/$_S258_C/flags" 2>/dev/null || echo "unlocked anyway"; } 2>&1)" || true
+    if grep -qF "chflags -h nouchg" "$_S258_O"; then echo "nouchg lines while the container exists"; fi; } 2>&1)" || true
 _a6_launch "$_S258_C" A6_OS=Darwin PATH="$_S258_PATH" -- --unlock --workspace "$_S258_W"
-_S258_R="$_S258_R$( { [ "$_A6_RC" = 0 ] || echo "--unlock rc $_A6_RC once the container is gone"
-    [ ! -s "$_A6_DIR/$_S258_C/flags" ] || echo "still locked: $(tr '\n' ' ' < "$_A6_DIR/$_S258_C/flags")"; } 2>&1)" || true
+_S258_R="$_S258_R$( { if grep -qxF "$_S258_W/.git/config" "$_A6_DIR/$_S258_C/flags" 2>/dev/null; then echo ".git/config still locked once the container is gone (rc $_A6_RC)"; fi; } 2>&1)" || true
 [ -z "$_S258_R" ] || _a6_diag "§258(e3)" "$_S258_C"
-check "§258(e3) --unlock refuses while the workspace's container (a terminal session's, no daemon label) may still exist, naming it and docker rm -f, and unlocks once it is gone (mutation: --unlock checking daemon containers only; ${_S258_R:-ok})" \
+check "§258(e3) --unlock refuses while the workspace's container may still exist: with Docker unreachable it says so and prints chflags -h nouchg for each flag sandy set that passes the unlock's checks (a replaced file is named instead); with the container present it advises docker rm -f and prints none; once it is gone it unlocks (mutations: --unlock checking daemon containers only; no nouchg lines; the lines printed while the container exists; ${_S258_R:-ok})" \
     test -z "$_S258_R"
 # (f) --reset-sandbox says when it drops a pending session-end judgement.
 _S258_C=s258-reset; _S258_W="$_A6_DIR/$_S258_C/ws"; _s258_repo "$_S258_W"
