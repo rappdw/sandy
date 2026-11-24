@@ -824,6 +824,8 @@ sandy_check_update() {
 # does change something is thereby always a NEW file, created exclusively
 # (noclobber / wx), never written through a link planted in the agent home.
 _sandy_launch_id=""   # minted once per launch, right after the sandbox dir exists
+_SANDY_HASH_EXTRA=()  # #582: host files hashed for the content check though not mounted (a translated copy is)
+_SANDY_OWN_WT_ADMIN=""; _SANDY_WT_NAME=""; _SANDY_WT_DOTGIT=""
 _sandy_staged_name() { printf '%s.sandy-launch.%s' "$1" "$_sandy_launch_id"; }
 _sandy_launch_dir()  { printf '%s/launch/%s' "$SANDBOX_DIR" "$_sandy_launch_id"; }
 _sandy_stage_begin() {   # $1 = target path -> prints the working path
@@ -2637,14 +2639,18 @@ _sandy_unhex() {
 # destination lies under the workspace or the gitdir a .git file names, and
 # whose source is a regular file.
 _sandy_protected_hash_snapshot() {
-    local _snap="$1" _cdir="$2" _i=0 _n=${#RUN_FLAGS[@]} _spec _src _dst _seen=$'\n' _h _hx _t _um _hs
+    local _snap="$1" _cdir="$2" _i=0 _n=${#RUN_FLAGS[@]} _spec _src _dst _seen=$'\n' _h _hx _t _um _hs _x=0
     local -a _touch=()
     if [ ! -d "$_cdir" ] || [ -L "$_cdir" ]; then
         rm -f "$_cdir" 2>/dev/null || true
         mkdir -m 700 "$_cdir" 2>/dev/null || true
     fi
-    while [ "$_i" -lt "$_n" ]; do
-        if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
+    # The :ro mounts' sources, then _SANDY_HASH_EXTRA (#582: host files a
+    # container gets a translated copy of, so not mounted themselves).
+    while [ "$_i" -lt "$_n" ] || [ "$_x" -lt ${#_SANDY_HASH_EXTRA[@]} ]; do
+        if [ "$_i" -ge "$_n" ]; then
+            _src="${_SANDY_HASH_EXTRA[$_x]}"; _x=$((_x + 1)); _spec="$_src::ro"; _dst=""
+        elif [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
             _spec="${RUN_FLAGS[$((_i + 1))]}"
             _i=$((_i + 2))
             case "$_spec" in *:ro) ;; *) continue ;; esac
@@ -2654,6 +2660,12 @@ _sandy_protected_hash_snapshot() {
                 *) if [ -z "${GITDIR_CONTAINER:-}" ]; then continue; fi
                    case "$_dst" in "$GITDIR_CONTAINER"/*) ;; *) continue ;; esac ;;
             esac
+            # A container-only copy sandy wrote (#582) is not the user's.
+            case "$_src" in "${SANDBOX_DIR:-/nonexistent}"/*) continue ;; esac
+        else
+            _i=$((_i + 1)); continue
+        fi
+        if :; then
             [ -f "$_src" ] || continue
             case "$_seen" in *$'\n'"$_src"$'\n'*) continue ;; esac
             _seen="$_seen$_src"$'\n'
@@ -3012,7 +3024,7 @@ _sandy_git_links_mod() {   # $1 = a directory under some modules/
 # (#gitlink lines), was created during the session. Reported, never removed:
 # it may be the user's own `git worktree add` or submodule.
 _sandy_git_admin_report() {
-    local _d _hx _n=0 _t _t0 _what
+    local _d _hx _n=0 _t _t0 _what _rk _rh
     _sandy_git_admin_head() {
         if [ "$_n" = 0 ]; then
             printf "\n${YELLOW:-}[sandy]${NC:-} A git worktree or submodule gitdir was created during this session:\n" >&2
@@ -3040,11 +3052,38 @@ _sandy_git_admin_report() {
         printf "${YELLOW:-}[sandy]${NC:-} Sandy did not protect it (it did not exist at launch). Its commondir, config and\n" >&2
         printf "${YELLOW:-}[sandy]${NC:-} hooks steer git run in that worktree or submodule: review them before running git there.\n\n" >&2
     fi
+    # #582: what the gitdir a .git file names lacked at launch (#gdabsent)
+    # and has now; and the main checkout's HEAD a worktree session switched.
+    local _ga_l="" _ga_p _ga_h0 _ga_h1 _ga_m="" _ga_m0="" _ga_m1=""
+    while IFS=$'\t' read -r _rk _rh _ga_h0; do
+        case "$_rk" in
+            "#gdabsent")
+                _sandy_unhex "$_rh" _ga_p || continue
+                if [ -L "$_ga_p" ] || [ -f "$_ga_p" ] || { [ -d "$_ga_p" ] && [ -n "$(ls -A "$_ga_p" 2>/dev/null)" ]; }; then
+                    _ga_l="$_ga_l$_ga_p"$'\n'
+                fi ;;
+            "#mainhead")
+                _sandy_unhex "$_rh" _ga_p || continue
+                _sandy_unhex "${_ga_h0:-}" _ga_h0 || _ga_h0=""
+                _ga_h1=""; { IFS= read -r _ga_h1 < "$_ga_p"; } 2>/dev/null || true
+                [ "$_ga_h1" = "$_ga_h0" ] || { _ga_m="$_ga_p"; _ga_m0="$_ga_h0"; _ga_m1="$_ga_h1"; } ;;
+        esac
+    done 2>/dev/null < "$1"
+    if [ -n "$_ga_m" ]; then
+        printf "\n${YELLOW:-}[sandy]${NC:-} The main checkout's HEAD was switched during this session (%q): %s -> %s\n" "$_ga_m" "${_ga_m0:-?}" "${_ga_m1:-?}" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} The main checkout now shows that branch on the host: switch it back there if this was not yours.\n\n" >&2
+    fi
+    if [ -n "$_ga_l" ]; then
+        printf "\n${YELLOW:-}[sandy]${NC:-} Git files appeared during this session in the git directory a .git file names:\n" >&2
+        while IFS= read -r _t; do [ -z "$_t" ] || printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$_t" >&2; done <<< "$_ga_l"
+        printf "${YELLOW:-}[sandy]${NC:-} They had no read-only mount (they did not exist at launch); the host's git reads them\n" >&2
+        printf "${YELLOW:-}[sandy]${NC:-} (hooks run, config is obeyed) at its next command there: review them first.\n\n" >&2
+    fi
     # #597: and every one the launch recorded (#gitdir lines) that is gone
     # now, or is now a link: a `git worktree prune` or `git gc` in the session
     # deletes the admin dirs of linked worktrees it takes for gone. Builtins
     # only (no process per recorded dir).
-    local _rk _rh _rw="" _rs=""
+    local _rw="" _rs=""
     while IFS=$'\t' read -r _rk _rh; do
         [ "$_rk" = "#gitdir" ] || continue
         _sandy_unhex "$_rh" _d || continue
@@ -3165,9 +3204,10 @@ _sandy_is_gitdir() {
 #   inside      (_sandy_gitdir_host spells it under $WORK_DIR): unchanged.
 #   submodule   the gitdir git uses for this workspace as a submodule of the
 #               repository that contains it (_sandy_gitdir_submodule_of): no prompt.
-#   (#582 will add a linked worktree's admin directory as a second recognized
-#   relationship, in _sandy_gitdir_judge, beside the submodule test. Today one
-#   has no objects/ and is refused by the structural check before this.)
+#   worktree    a linked worktree's admin directory (<common>/worktrees/<name>,
+#               no objects/) whose commondir names a git directory holding
+#               it and whose gitdir back-pointer names this workspace's .git:
+#               judged as, and mounted as, that common dir; no prompt (#582).
 #   anything else (a --separate-git-dir, a sibling repository, a "submodule"
 #   no .gitmodules declares): the one-time approval of _sandy_gitdir_gate,
 #   recorded per workspace and target in $SANDBOX_DIR/.sandy-approved-gitdir
@@ -3380,6 +3420,50 @@ _sandy_gitdir_submodule_of() {   # $1 = working tree  $2 = gitdir  [$3 = depth]
     done
     return 1
 }
+# #582: a linked worktree (`git worktree add`) has a .git FILE naming its admin
+# dir, <common>/worktrees/<name>, which holds HEAD and commondir but no
+# objects/ or refs/: git takes those, and config, hooks and info, from the
+# common dir its commondir names (the main repository's .git). Prints that
+# common dir, spelled under $WORK_DIR when it lies physically in the workspace
+# (as _sandy_gitdir_host spells a gitdir), when directory $1 is such an admin
+# dir: a directory, not a link, holding a HEAD and a commondir that are
+# regular files, not links, whose commondir (one line; relative to $1, as git
+# reads it) names a git directory by structure (_sandy_is_gitdir) of which $1
+# is PHYSICALLY worktrees/<its own name>, so mounting the common dir mounts
+# the admin dir with it. Nothing otherwise. Read-only.
+_sandy_gitdir_worktree_common() {   # $1 = the directory a .git file names
+    local _a="$1" _cd="" _ap _cp _w _nl=$'\n' _cr=$'\r'
+    [ -n "$_a" ] && [ -d "$_a" ] && [ ! -L "$_a" ] || return 0
+    [ -f "$_a/HEAD" ] && [ ! -L "$_a/HEAD" ] && [ -f "$_a/commondir" ] && [ ! -L "$_a/commondir" ] || return 0
+    IFS= read -r -d '' _cd 2>/dev/null < "$_a/commondir" || true
+    # git drops trailing newlines and carriage returns, and nothing else.
+    while [ "${_cd%"$_nl"}" != "$_cd" ] || [ "${_cd%"$_cr"}" != "$_cd" ]; do _cd="${_cd%"$_nl"}"; _cd="${_cd%"$_cr"}"; done
+    case "$_cd" in ''|*"$_nl"*) return 0 ;; esac
+    _sandy_phys_dir "$_a" _ap || return 0
+    case "$_cd" in /*) ;; *) _cd="$_ap/$_cd" ;; esac
+    _sandy_phys_dir "$_cd" _cp || return 0
+    [ "$_ap" = "${_cp%/}/worktrees/${_ap##*/}" ] || return 0
+    _sandy_is_gitdir "$_cp" || return 0
+    if _w="$(_sandy_ws_physical "$_cp")"; then printf '%s' "$_w"; else printf '%s' "$_cp"; fi
+}
+# True when linked-worktree admin dir $1 names THIS workspace's .git file as
+# its worktree: its `gitdir` back-pointer (a regular file, not a link; one
+# line, absolute or relative to $1, as git writes it) resolves physically to
+# $WORK_DIR/.git. A structurally sound admin dir of another worktree (one a
+# workspace link leads to: `node_modules/v -> ~/victim/.git`, `gitdir:
+# node_modules/v/worktrees/feat`) is not this workspace's.
+_sandy_worktree_is_ours() {   # $1 = admin dir
+    local _b="" _bp _wd _nl=$'\n' _cr=$'\r'
+    [ -f "$1/gitdir" ] && [ ! -L "$1/gitdir" ] || return 1
+    IFS= read -r -d '' _b 2>/dev/null < "$1/gitdir" || true
+    while [ "${_b%"$_nl"}" != "$_b" ] || [ "${_b%"$_cr"}" != "$_b" ]; do _b="${_b%"$_nl"}"; _b="${_b%"$_cr"}"; done
+    case "$_b" in ''|*"$_nl"*) return 1 ;; esac
+    case "$_b" in /*) ;; *) _b="$1/$_b" ;; esac
+    [ "${_b##*/}" = .git ] || return 1
+    _sandy_phys_dir "${_b%/*}" _bp || return 1
+    _sandy_phys_dir "$WORK_DIR" _wd || return 1
+    [ "$_bp" = "$_wd" ]
+}
 # _sandy_gitdir_judge GITDIR_REL GITDIR_HOST: what the gitdir a .git file
 # names is, without asking or writing anything (the launch and the
 # --approvals report both call it). Sets _SANDY_GD_VERDICT:
@@ -3392,20 +3476,31 @@ _sandy_gitdir_submodule_of() {   # $1 = working tree  $2 = gitdir  [$3 = depth]
 #              (refused: mounted, it hands over the home directory)
 #   inside     in the workspace
 #   submodule  outside, this workspace's submodule gitdir
+#   worktree   outside, this workspace is a linked worktree of the repository
+#              whose common dir _SANDY_GD_COMMON is (#582: no prompt)
+#   wtforeign  a linked-worktree admin dir that names another worktree, not
+#              this workspace (refused)
 #   approved   outside, unrecognized, approved for this workspace and target
 #   pending    outside, unrecognized, nothing approved
 #   changed    outside, unrecognized, the approval names another directory
 # and _SANDY_GD_PHYS (the physical gitdir, when outside), _SANDY_GD_PREV (the
 # directory an approval names, for `changed`), _SANDY_GD_AT (its date).
 _sandy_gitdir_judge() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
-    local _gj_w _gj_f _gj_a _gj_b _gj_ws _gj_tg _gj_sh _gj_hm
+    local _gj_w _gj_f _gj_a _gj_b _gj_ws _gj_tg _gj_sh _gj_hm _gj_g="$2"
     _SANDY_GD_VERDICT=none; _SANDY_GD_PHYS=""; _SANDY_GD_PREV=""; _SANDY_GD_AT=""
+    _SANDY_GD_COMMON=""; _SANDY_GD_WTADMIN=""
     [ -n "$1" ] || return 0
-    if [ -z "$2" ] || [ ! -f "$2/HEAD" ] || [ ! -d "$2/objects" ] || [ ! -d "$2/refs" ]; then
-        _SANDY_GD_VERDICT=notgit; return 0
+    if [ -z "$_gj_g" ] || [ ! -f "$_gj_g/HEAD" ] || [ ! -d "$_gj_g/objects" ] || [ ! -d "$_gj_g/refs" ]; then
+        # #582: a linked worktree's admin dir (the structure of
+        # _sandy_gitdir_worktree_common): judged as its common dir, which is
+        # what is mounted, from here on.
+        [ -n "$_gj_g" ] && _SANDY_GD_COMMON="$(_sandy_gitdir_worktree_common "$_gj_g")"
+        if [ -z "$_SANDY_GD_COMMON" ]; then _SANDY_GD_VERDICT=notgit; return 0; fi
+        _sandy_phys_dir "$_gj_g" _SANDY_GD_WTADMIN || { _SANDY_GD_VERDICT=notgit; return 0; }
+        _gj_g="$_SANDY_GD_COMMON"
     fi
-    case "$2" in "$WORK_DIR"|"$WORK_DIR"/*) _SANDY_GD_VERDICT=inside; return 0 ;; esac
-    if ! _sandy_phys_dir "$2" _SANDY_GD_PHYS || ! _sandy_phys_dir "$WORK_DIR" _gj_w; then
+    case "$_gj_g" in "$WORK_DIR"|"$WORK_DIR"/*) _SANDY_GD_VERDICT=inside; return 0 ;; esac
+    if ! _sandy_phys_dir "$_gj_g" _SANDY_GD_PHYS || ! _sandy_phys_dir "$WORK_DIR" _gj_w; then
         _SANDY_GD_VERDICT=notgit; return 0
     fi
     # Never sandy's state or the home directory, nor a directory above
@@ -3419,10 +3514,18 @@ _sandy_gitdir_judge() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
     if [ -d "${HOME:-}" ] && _sandy_phys_dir "$HOME" _gj_hm; then
         case "${_gj_hm%/}/" in "${_SANDY_GD_PHYS%/}"/*) _SANDY_GD_VERDICT=home; return 0 ;; esac
     fi
+    if [ -n "$_SANDY_GD_WTADMIN" ]; then
+        # #582: the second recognized relationship. The admin dir names this
+        # workspace's .git as its worktree, so this workspace IS that linked
+        # worktree: no prompt. One that names another worktree is refused,
+        # however it was reached (a workspace link included): it is someone
+        # else's checkout of that repository.
+        if _sandy_worktree_is_ours "$_SANDY_GD_WTADMIN"; then _SANDY_GD_VERDICT=worktree; else _SANDY_GD_VERDICT=wtforeign; fi
+        return 0
+    fi
     if _sandy_gitdir_submodule_of "$_gj_w" "$_SANDY_GD_PHYS"; then
         _SANDY_GD_VERDICT=submodule; return 0
     fi
-    # (#582: a linked worktree's admin directory is recognized here.)
     _SANDY_GD_VERDICT=pending
     _gj_f="${SANDBOX_DIR:-}/.sandy-approved-gitdir"
     [ -n "${SANDBOX_DIR:-}" ] && [ -f "$_gj_f" ] && [ ! -L "$_gj_f" ] || return 0
@@ -3470,7 +3573,15 @@ _sandy_gitdir_gate() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
             echo "[sandy]        Resolved to: ${2:-<unresolvable>}" >&2
             echo "[sandy]        Refusing to bind-mount it. A .git FILE is repository content, so an" >&2
             echo "[sandy]        arbitrary path there would mount a host directory of the repository's" >&2
-            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/." >&2
+            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/, or a linked" >&2
+            echo "[sandy]        worktree's admin directory: HEAD and a commondir naming such a directory," >&2
+            echo "[sandy]        which holds it as worktrees/<name>." >&2
+            _sandy_daemon_fatal
+            exit 1 ;;
+        wtforeign)
+            error_lit "The .git file names the linked-worktree admin directory $_SANDY_GD_WTADMIN,"
+            error_lit "  whose gitdir file names another worktree, not this workspace: it is another checkout of $_SANDY_GD_PHYS."
+            error "  Mounted, that repository's history would be read-write in the container. Nothing was started."
             _sandy_daemon_fatal
             exit 1 ;;
         sandy)
@@ -19933,6 +20044,12 @@ _sandy_symlink_skip_parse() {
         _gits="$(_sandy_symlink_resolve .git | tr '[:upper:]' '[:lower:]')"
         _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
         if [ -n "$_ga" ]; then
+            # #582: and the common dir a linked worktree's admin dir lies in.
+            _ce="$(_sandy_gitdir_worktree_common "$_ga")"
+            if [ -n "$_ce" ]; then
+                _ce="$(readlink -f "$_ce" 2>/dev/null || true)"
+                [ -z "$_ce" ] || _gits="$_gits"$'\n'"$(printf '%s' "$_ce" | tr '[:upper:]' '[:lower:]')"
+            fi
             _ga="$(readlink -f "$_ga" 2>/dev/null || true)"
             [ -z "$_ga" ] || _gits="$_gits"$'\n'"$(printf '%s' "$_ga" | tr '[:upper:]' '[:lower:]')"
         fi
@@ -20206,8 +20323,16 @@ _sandy_symlink_byname_rels() {
         printf '%s\0' "$_r"
     done
     # Both helpers print nothing unless .git is a file (one process each).
+    # A linked worktree's admin dir stands for the common dir that is mounted
+    # for it (#582); one that is neither is listed as named.
     _ga=""
-    if [ -f "$WORK_DIR/.git" ]; then _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"; fi
+    if [ -f "$WORK_DIR/.git" ]; then
+        _ga="$(_sandy_gitdir_host "$(_sandy_gitdir_rel)")"
+        if [ -n "$_ga" ] && { [ ! -f "$_ga/HEAD" ] || [ ! -d "$_ga/objects" ] || [ ! -d "$_ga/refs" ]; }; then
+            _w="$(_sandy_gitdir_worktree_common "$_ga")"
+            [ -z "$_w" ] || _ga="$_w"
+        fi
+    fi
     case "$_ga" in
         "$WORK_DIR") _g=. ;;
         "$WORK_DIR"/*) _g="${_ga#"$WORK_DIR"/}" ;;
@@ -20744,6 +20869,8 @@ _sandy_resolve_symlinks() {
                     case "$_gdp/" in "${_gdw%/}"/*) ;; *) _gdrel=via_link; _gdt="$_gdp" ;; esac
                 fi ;;
             submodule) _gdrel=submodule; _gdt="$_SANDY_GD_PHYS" ;;
+            worktree) _gdrel=linked_worktree; _gdt="$_SANDY_GD_PHYS" ;;
+            wtforeign) _gdrel=foreign_worktree; _gds=refused; _gdt="$_SANDY_GD_PHYS" ;;
             notgit) _gdrel=not_a_git_directory; _gds=refused; _gdt="$_gdh" ;;
             sandy) _gdrel=sandy_state; _gds=refused; _gdt="$_SANDY_GD_PHYS" ;;
             home) _gdrel=home_directory; _gds=refused; _gdt="$_SANDY_GD_PHYS" ;;
@@ -26029,6 +26156,19 @@ if [ -f "$WORK_DIR/.git" ]; then
         # the gate and docker run cannot mount another one. (The container
         # path stays the spelled one: the .git file resolves to it there.)
         [ -z "$_SANDY_GD_PHYS" ] || GITDIR_HOST="$_SANDY_GD_PHYS"
+        # #582: a linked worktree mounts its common dir (the main repository's
+        # .git, which holds this worktree's admin dir as worktrees/<name>):
+        # it is GITDIR_HOST from here on, protected as any gitdir a .git file
+        # names, its other worktrees' admin dirs read-only (#597) but this
+        # one's (_SANDY_OWN_WT_ADMIN), and git in the container finds it
+        # through a translated .git file (below).
+        _SANDY_WT_NAME=""
+        if [ -n "${_SANDY_GD_WTADMIN:-}" ] && [ -n "${_SANDY_GD_COMMON:-}" ]; then
+            [ -n "$_SANDY_GD_PHYS" ] || GITDIR_HOST="$_SANDY_GD_COMMON"
+            _SANDY_WT_NAME="${_SANDY_GD_WTADMIN##*/}"
+            _SANDY_OWN_WT_ADMIN="$GITDIR_HOST/worktrees/$_SANDY_WT_NAME"
+            if [[ "$GITDIR_HOST" == "$HOME"/* ]]; then GITDIR_CONTAINER="/home/sandy/${GITDIR_HOST#$HOME/}"; else GITDIR_CONTAINER="$GITDIR_HOST"; fi
+        fi
         # Spelled in the workspace but lying outside it, through a link the
         # dangerous-symlink gate judges (`vendor -> ~/other`, `gitdir:
         # vendor/.git`): the approval names the link's target, never what
@@ -26059,7 +26199,33 @@ if [ -f "$WORK_DIR/.git" ]; then
         # read as config. Both redirect the host's git when rewritten.
         [ -f "$GITDIR_HOST/commondir" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/commondir:$GITDIR_CONTAINER/commondir:ro")
         [ -f "$GITDIR_HOST/config.worktree" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config.worktree:$GITDIR_CONTAINER/config.worktree:ro")
-        info "  Git submodule: gitdir at $GITDIR_CONTAINER"
+        # packed-refs :ro, as a main checkout's .git/packed-refs (E.10).
+        [ -f "$GITDIR_HOST/packed-refs" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/packed-refs:$GITDIR_CONTAINER/packed-refs:ro")
+        if [ -n "$_SANDY_WT_NAME" ]; then
+            # #582: git in the container reads the worktree's .git file and
+            # its admin dir's gitdir back-pointer, which name HOST paths (git
+            # writes absolute ones by default) that do not exist under the
+            # container's $HOME mapping. So the container gets translated,
+            # read-only copies, written under this launch's own directory
+            # (never a host file a container has used), spelled as it sees
+            # them: .git names the admin dir, the back-pointer names .git.
+            # The host files are never changed; a relative .git file is
+            # translated the same way.
+            _gd_ld="$(_sandy_launch_dir)"
+            mkdir -p "$_gd_ld" 2>/dev/null || true
+            if printf 'gitdir: %s\n' "$GITDIR_CONTAINER/worktrees/$_SANDY_WT_NAME" > "$_gd_ld/worktree-dotgit" \
+               && printf '%s\n' "$SANDY_WORKSPACE/.git" > "$_gd_ld/worktree-gitdir" \
+               && chmod 0644 "$_gd_ld/worktree-dotgit" "$_gd_ld/worktree-gitdir"; then
+                _SANDY_WT_DOTGIT="$_gd_ld/worktree-dotgit"
+                [ -f "$GITDIR_HOST/worktrees/$_SANDY_WT_NAME/gitdir" ] && RUN_FLAGS+=(-v "$_gd_ld/worktree-gitdir:$GITDIR_CONTAINER/worktrees/$_SANDY_WT_NAME/gitdir:ro")
+            else
+                warn "Could not write the container's copy of this worktree's .git file: git in the session may not find its repository."
+            fi
+            unset _gd_ld
+            info "  Git worktree: common dir at $GITDIR_CONTAINER (this worktree: worktrees/$_SANDY_WT_NAME)"
+        else
+            info "  Git submodule: gitdir at $GITDIR_CONTAINER"
+        fi
     elif [ -s "$WORK_DIR/.git" ]; then
         # Not a `gitdir: ` file, or one holding a NUL byte (_sandy_gitfile_read):
         # nothing is mounted for it.
@@ -26159,7 +26325,15 @@ done < <(_sandy_protected_git_files)
 # host's next git command at a directory the agent furnished. git never writes
 # it in normal use. A .git that is a link is left to the symlink gate.
 if [ -f "$WORK_DIR/.git" ] && [ ! -L "$WORK_DIR/.git" ]; then
-    RUN_FLAGS+=(-v "$WORK_DIR/.git:$SANDY_WORKSPACE/.git:ro")
+    # #582: a linked worktree's container gets the translated copy instead
+    # (the host file stays hashed and, on macOS, locked: _SANDY_HASH_EXTRA).
+    if [ -n "${_SANDY_WT_DOTGIT:-}" ]; then
+        RUN_FLAGS+=(-v "$_SANDY_WT_DOTGIT:$SANDY_WORKSPACE/.git:ro")
+        _SANDY_HASH_EXTRA+=("$WORK_DIR/.git")
+        [ ! -f "$GITDIR_HOST/worktrees/$_SANDY_WT_NAME/gitdir" ] || _SANDY_HASH_EXTRA+=("$GITDIR_HOST/worktrees/$_SANDY_WT_NAME/gitdir")
+    else
+        RUN_FLAGS+=(-v "$WORK_DIR/.git:$SANDY_WORKSPACE/.git:ro")
+    fi
 fi
 
 # Pre-existing-debris auto-cleanup: previous sandy versions left empty stub
@@ -26387,7 +26561,7 @@ _protect_submodule_gitdirs() {
 # writable, so `git worktree add` works. The commondir and config.worktree
 # file mounts stay too, inside it: they are what the content check hashes.
 # No process per worktree (the walker's find is the only one).
-_SANDY_OWN_WT_ADMIN=""   # #582 hook: a linked-worktree session sets its own admin dir here
+_SANDY_OWN_WT_ADMIN="${_SANDY_OWN_WT_ADMIN:-}"   # #582: a linked-worktree session set its own admin dir (the git block)
 _protect_worktree_admin_dirs() {
     local _w _n
     while IFS= read -r -d '' _w; do
@@ -28106,6 +28280,27 @@ _sandy_gitdir_check_mounts
 # on the most sensitive of them (_sandy_uchg_lock). Both after every host-side
 # write sandy makes into the workspace (the settings.local.json pin included).
 _sandy_protected_hash_snapshot "$SANDBOX_DIR/.protected-existed-at-launch" "$SANDBOX_DIR/.protected-copies"
+# #582: the gitdir a .git file names (a linked worktree's common dir, a
+# submodule gitdir) is mounted read-write, and what it lacks at launch has no
+# :ro mount, so the session could create it: its config, config.worktree,
+# hooks, info and packed-refs, each absent now, are recorded (#gdabsent) and
+# reported at session end if they appear, as a main checkout's .git paths
+# are. And a linked worktree's session could switch the main checkout's
+# branch through the common dir's HEAD: recorded (#mainhead) and reported.
+if [ -n "${GITDIR_HOST:-}" ] && [ -d "$GITDIR_HOST" ]; then
+    for _gd_f in config config.worktree hooks info packed-refs; do
+        if [ ! -e "$GITDIR_HOST/$_gd_f" ] && [ ! -L "$GITDIR_HOST/$_gd_f" ]; then
+            _sandy_hex "$GITDIR_HOST/$_gd_f" _gd_x
+            printf '#gdabsent\t%s\n' "$_gd_x" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+        fi
+    done
+    if [ -n "${_SANDY_WT_NAME:-}" ] && [ -f "$GITDIR_HOST/HEAD" ] && [ ! -L "$GITDIR_HOST/HEAD" ]; then
+        _gd_h=""; { IFS= read -r _gd_h < "$GITDIR_HOST/HEAD"; } 2>/dev/null || true
+        _sandy_hex "$GITDIR_HOST/HEAD" _gd_x; _sandy_hex "$_gd_h" _gd_f
+        printf '#mainhead\t%s\t%s\n' "$_gd_x" "$_gd_f" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+    fi
+    unset _gd_f _gd_x _gd_h
+fi
 # The git admin dirs that exist now (#gitdir lines): one created in-session has
 # no :ro mount, so the session-end sweep reports it.
 while IFS= read -r _gd_snap; do

@@ -34905,10 +34905,10 @@ else
 fi
 _a6_join s260-wt; _S260_C="$_A6_DIR/s260-wt"
 _S260_OK=0
-{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s260-wt)" ] && grep -qF ".git names a gitdir that is not a git directory" "$_S260_C/out" \
+{ [ "$_A6_RC" = 0 ] && _a6_pair "$(_a6_agent_args s260-wt)" -v "$_S260_C/main/.git:/home/sandy/main/.git" \
   && ! grep -qF "one-time approval" "$_S260_C/out"; } || _S260_OK=$?
 [ "$_S260_OK" = 0 ] || _a6_diag "§260(7)" s260-wt
-check "§260(7) a linked worktree (git worktree add) is still refused by the structural check, before any approval is offered (rc ${_A6_RC:-none})" \
+check "§260(7) a linked worktree (git worktree add) is a recognized relationship (#582): it launches headless with no approval offered, its common dir mounted (§264 has the rest; rc ${_A6_RC:-none})" \
     test "$_S260_OK" = 0
 _a6_join s260-sh; _S260_C="$_A6_DIR/s260-sh"
 _S260_OK=0
@@ -35780,6 +35780,189 @@ check "§263(e) ...and the same approved link with no link inside the git direct
 _a6_done
 unset -f _s263_gd _s263_git _s263_e13 _s263_plant _s263_probe _s263_via
 unset _S263_K _S263_MSG _S263_N _S263_C _S263_L _S263_OK _S263_A _S263_O _S263_W _S263_RUN _S263_G _S263_R _S263_D
+echo ""
+
+# ============================================================
+section "§264: a linked worktree (git worktree add) launches with no prompt: its common dir is mounted and protected like the gitdir of any .git file, shared safely with the main checkout's and other worktrees' sessions, its own admin dir writable and its siblings' :ro, and git in the container finds it through a translated .git file (#582)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. A linked worktree's .git file names <main>/.git/worktrees/<name>,
+# which has HEAD and commondir but no objects/ or refs/, so the R5a
+# structural check refused every linked worktree. Now an admin dir whose
+# commondir names a git directory that physically holds it as
+# worktrees/<name>, and whose gitdir back-pointer names THIS workspace's .git,
+# is a recognized relationship (no prompt, #598's hook); that common dir is
+# mounted (read-write, config/hooks/info/commondir/config.worktree/
+# packed-refs :ro), held in the #596 registry, its other admin dirs :ro
+# (#597) but this one's, and the container gets read-only translated copies
+# of the .git file and this admin dir's gitdir back-pointer, spelled as it
+# sees them (git writes absolute host paths, which do not exist there).
+_s264_git() { git -c user.name=s264 -c user.email=s264@example.invalid -c init.defaultBranch=main -c core.hooksPath= "$@"; }
+_s264_fix() {   # $1 = CASE: CASE/main with one commit and packed refs; CASE/ws its worktree, CASE/wt2 another
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h"
+    _s264_git init -q "$h/main" && _s264_git -C "$h/main" commit -q --allow-empty -m init \
+        && _s264_git -C "$h/main" worktree add -q "$h/ws" -b wt >/dev/null 2>&1 \
+        && _s264_git -C "$h/main" worktree add -q "$h/wt2" -b wt2 >/dev/null 2>&1 \
+        && _s264_git -C "$h/main" pack-refs --all >/dev/null 2>&1
+}
+_s264_ctr() {   # $1 = workspace -> its container name
+    local x b
+    x="$(printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; })"; x="${x%% *}"
+    b="$(basename "$1" | tr -cd 'a-zA-Z0-9._-')"
+    printf 'sandy-%s-%s\n' "${b:-project}" "${x:0:8}"
+}
+# A stub in front of §248's answers inspect -f {{.Id}} NAME as present for a
+# NAME listed in CASE/present (a session still running), gone otherwise.
+_S264_B="$_A6_DIR/s264bin"; mkdir -p "$_S264_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "inspect -f {{.Id}} "*) n="${*##* }"; if grep -qxF "$n" "$A6_LOG/present" 2>/dev/null; then echo deadbeef; fi; exit 0 ;; esac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S264_B/docker"
+chmod +x "$_S264_B/docker"
+_S264_PATH="$_S264_B:$_S248_PATH"
+_s264_run() {   # $1 = CASE  $2 = workspace  [VAR=value ...]
+    local c="$1" w="$2"; shift 2
+    _a6_launch "$c" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin PATH="$_S264_PATH" "$@" -- --workspace "$w" -p fixture
+}
+# (a) a real `git worktree add` (absolute paths, git's default), headless.
+_S264_C=s264-wt; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+_S264_G0="$(cat "$_S264_H/ws/.git")"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_A="$(_a6_agent_args "$_S264_C")"
+_S264_L="$(awk -v d=/home/sandy/ws/.git 'p=="-v" { n=split($0,a,":"); if (a[2]==d) print a[1] } {p=$0}' "$_S264_A" 2>/dev/null | head -n 1)"
+_S264_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S264_A" ] || echo "launch rc $_A6_RC"
+    case "$_S264_G0" in "gitdir: /"*) ;; *) echo "fixture: the .git file is not absolute: $_S264_G0" ;; esac
+    if grep -qF "needs a one-time approval" "$_A6_DIR/$_S264_C/out"; then echo "it asked for an approval"; fi
+    _a6_pair "$_S264_A" -v "$_S264_H/main/.git:/home/sandy/main/.git" || echo "the common dir is not mounted read-write"
+    for _S264_P in config hooks info commondir packed-refs; do
+        _a6_pair "$_S264_A" -v "$_S264_H/main/.git/$_S264_P:/home/sandy/main/.git/$_S264_P:ro" || echo "no :ro mount of the common dir's $_S264_P"
+    done
+    _a6_pair "$_S264_A" -v "$_S264_H/main/.git/worktrees/wt2:/home/sandy/main/.git/worktrees/wt2:ro" || echo "the sibling worktree's admin dir is not :ro"
+    if grep -qxF "$_S264_H/main/.git/worktrees/ws:/home/sandy/main/.git/worktrees/ws:ro" "$_S264_A"; then echo "this worktree's own admin dir is :ro"; fi
+    [ -n "$_S264_L" ] && case "$_S264_L" in "$(_a6_sandbox "$_S264_C")/launch/"*) true ;; *) false ;; esac || echo "the .git mount is not a launch copy: [$_S264_L]"
+    [ "$(cat "$_S264_L" 2>/dev/null)" = "gitdir: /home/sandy/main/.git/worktrees/ws" ] || echo "the container's .git: [$(cat "$_S264_L" 2>/dev/null)]"
+    grep -qxF "$_S264_L:/home/sandy/ws/.git:ro" "$_S264_A" || echo "the translated .git is not :ro"
+    _S264_P="$(awk -v d=/home/sandy/main/.git/worktrees/ws/gitdir 'p=="-v" { n=split($0,a,":"); if (a[2]==d && a[3]=="ro") print a[1] } {p=$0}' "$_S264_A" | head -n 1)"
+    [ "$(cat "$_S264_P" 2>/dev/null)" = /home/sandy/ws/.git ] || echo "the container's gitdir back-pointer: [$(cat "$_S264_P" 2>/dev/null)]"
+    [ "$(cat "$_S264_H/ws/.git")" = "$_S264_G0" ] || echo "the host .git file was changed"
+    [ "$(cat "$_S264_H/main/.git/worktrees/ws/gitdir")" = "$_S264_H/ws/.git" ] || echo "the host back-pointer was changed"
+    _S264_D="$(awk 'p=="-v" { n=split($0,a,":"); print a[2] } {p=$0}' "$_S264_A" | LC_ALL=C sort | uniq -d)"
+    [ -z "$_S264_D" ] || echo "duplicate mount destinations: $(printf '%s' "$_S264_D" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(a)" "$_S264_C"
+check "§264(a) a linked worktree made by git worktree add (absolute paths) launches headless with no prompt: the main .git read-write with config, hooks, info, commondir and packed-refs :ro, the sibling worktree's admin dir :ro but this one's writable, and the container's .git and gitdir back-pointer are read-only launch copies naming the container's paths; the host files are unchanged (mutations: the admin dir not recognized; no translation; own admin dir :ro; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (b) a relative .git file and back-pointer (written by hand): the same.
+_S264_C=s264-rel; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+printf 'gitdir: ../main/.git/worktrees/ws\n' > "$_S264_H/ws/.git"; printf '../../../../ws/.git\n' > "$_S264_H/main/.git/worktrees/ws/gitdir"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_A="$(_a6_agent_args "$_S264_C")"
+_S264_L="$(awk -v d=/home/sandy/ws/.git 'p=="-v" { n=split($0,a,":"); if (a[2]==d) print a[1] } {p=$0}' "$_S264_A" 2>/dev/null | head -n 1)"
+_S264_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S264_A" ] || echo "launch rc $_A6_RC"
+    _a6_pair "$_S264_A" -v "$_S264_H/main/.git:/home/sandy/main/.git" || echo "the common dir is not mounted"
+    [ "$(cat "$_S264_L" 2>/dev/null)" = "gitdir: /home/sandy/main/.git/worktrees/ws" ] || echo "the container's .git: [$(cat "$_S264_L" 2>/dev/null)]"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(b)" "$_S264_C"
+check "§264(b) a relative-path worktree (a hand-written relative .git file and back-pointer) launches the same, translated (${_S264_R:-ok})" \
+    test -z "$_S264_R"
+# (c) tampered admin dirs, each with a back-pointer naming this workspace,
+# refused: (c1) commondir names ~/.ssh (no git dir); (c2) an admin dir the
+# repository plants in the workspace whose commondir names a real git dir
+# elsewhere (which does not hold it); (c3) commondir is a
+# link; (c4) the admin dir's "common dir" has HEAD but no objects/ or refs/;
+# (c5) a sound admin dir of ANOTHER worktree (its back-pointer names that one).
+_S264_C=s264-c1; _S264_H="$_A6_DIR/$_S264_C"; mkdir -p "$_S264_H/ws" "$_S264_H/.ssh/worktrees/x"; printf 'S263-KEY\n' > "$_S264_H/.ssh/id_ed25519"
+printf 'ref: refs/heads/x\n' > "$_S264_H/.ssh/worktrees/x/HEAD"; printf '../..\n' > "$_S264_H/.ssh/worktrees/x/commondir"; printf 'gitdir: ../.ssh/worktrees/x\n' > "$_S264_H/ws/.git"
+printf '%s\n' "$_S264_H/ws/.git" > "$_S264_H/.ssh/worktrees/x/gitdir"
+_S264_C=s264-c2; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; rm -f "$_S264_H/ws/.git"; mkdir -p "$_S264_H/ws/adm/x"
+printf 'ref: refs/heads/x\n' > "$_S264_H/ws/adm/x/HEAD"; printf '%s\n' "$_S264_H/main/.git" > "$_S264_H/ws/adm/x/commondir"; printf '../../.git\n' > "$_S264_H/ws/adm/x/gitdir"; printf 'gitdir: adm/x\n' > "$_S264_H/ws/.git"
+_S264_C=s264-c3; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+printf '../..\n' > "$_S264_H/cd"; rm -f "$_S264_H/main/.git/worktrees/ws/commondir"; ln -s "$_S264_H/cd" "$_S264_H/main/.git/worktrees/ws/commondir"
+_S264_C=s264-c4; _S264_H="$_A6_DIR/$_S264_C"; mkdir -p "$_S264_H/ws" "$_S264_H/half/worktrees/x"; printf 'ref: refs/heads/main\n' > "$_S264_H/half/HEAD"
+printf 'ref: refs/heads/x\n' > "$_S264_H/half/worktrees/x/HEAD"; printf '../..\n' > "$_S264_H/half/worktrees/x/commondir"; printf 'gitdir: ../half/worktrees/x\n' > "$_S264_H/ws/.git"
+printf '%s\n' "$_S264_H/ws/.git" > "$_S264_H/half/worktrees/x/gitdir"
+_S264_C=s264-c5; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+printf 'gitdir: %s\n' "$_S264_H/main/.git/worktrees/wt2" > "$_S264_H/ws/.git"
+for _S264_N in c1 c2 c3 c4 c5; do
+    _S264_C="s264-$_S264_N"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_H/ws"
+    case "$_S264_N" in c1) _S264_P="$_S264_H/.ssh" ;; c4) _S264_P="$_S264_H/half" ;; *) _S264_P="$_S264_H/main/.git" ;; esac
+    _S264_OK=0
+    { [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S264_C")" ] \
+      && grep -qE "names a gitdir that is not a git directory|whose gitdir file names another worktree" "$_A6_DIR/$_S264_C/out" \
+      && ! grep -rqsF -- "$_S264_P:" "$_A6_DIR/$_S264_C/runs"; } || _S264_OK=$?
+    [ "$_S264_OK" = 0 ] || _a6_diag "§264($_S264_N)" "$_S264_C"
+    case "$_S264_N" in
+        c1) _S264_D="whose commondir names a directory that is not a git directory (~/.ssh)" ;;
+        c2) _S264_D="planted in the workspace, whose commondir names a real git directory elsewhere that does not hold it under worktrees/" ;;
+        c3) _S264_D="whose commondir is a link" ;;
+        c4) _S264_D="under a directory with HEAD but no objects/ or refs/" ;;
+        c5) _S264_D="of ANOTHER worktree of the repository (its back-pointer names that one)" ;;
+    esac
+    check "§264($_S264_N) a linked-worktree admin dir $_S264_D is refused: no agent run, nothing of it mounted (mutations: the admin dir not required under worktrees/ of the common dir; the common dir not required to be a git directory; a commondir link followed; the back-pointer not checked; rc ${_A6_RC:-none})" \
+        test "$_S264_OK" = 0
+done
+# (d) the review's link case: node_modules/v -> another repository's .git
+# (outside $HOME here, with a worktree of its own), and `gitdir:
+# node_modules/v/worktrees/feat`: refused (feat names that repository's own
+# worktree, not this workspace).
+_S264_C=s264-nm; _S264_H="$_A6_DIR/$_S264_C"; mkdir -p "$_S264_H/ws/node_modules" "$_S264_H-out"
+_s264_git init -q "$_S264_H-out/victim" && _s264_git -C "$_S264_H-out/victim" commit -q --allow-empty -m init \
+    && _s264_git -C "$_S264_H-out/victim" worktree add -q "$_S264_H-out/feat" -b feat >/dev/null 2>&1 || true
+ln -s "$_S264_H-out/victim/.git" "$_S264_H/ws/node_modules/v"; printf 'gitdir: node_modules/v/worktrees/feat\n' > "$_S264_H/ws/.git"; : > "$_S264_H/present"
+_s264_run "$_S264_C" "$_S264_H/ws"
+_S264_OK=0
+{ [ -d "$_S264_H-out/victim/.git/worktrees/feat" ] && [ "$_A6_RC" != 0 ] && [ -z "$(_a6_agent_args "$_S264_C")" ] \
+  && ! grep -rqsF -- "$_S264_H-out/victim/.git:" "$_A6_DIR/$_S264_C/runs"; } || _S264_OK=$?
+[ "$_S264_OK" = 0 ] || _a6_diag "§264(d)" "$_S264_C"
+check "§264(d) node_modules/v -> another repository's .git plus gitdir: node_modules/v/worktrees/feat is refused: that admin dir is the other repository's own worktree's, and nothing of the repository is mounted (mutation: the back-pointer not checked; rc ${_A6_RC:-none})" \
+    test "$_S264_OK" = 0
+# (e) the main checkout's session and a worktree's run together: the main
+# session ends first (its container gone) while the worktree's runs: the
+# common dir's seed and lock stay; then the worktree session ends: released.
+# (f) the same for two worktrees.
+for _S264_N in e f; do
+    _S264_C="s264-$_S264_N"; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"
+    if [ "$_S264_N" = e ]; then _S264_W1="$_S264_H/main"; else _S264_W1="$_S264_H/wt2"; fi
+    _S264_W2="$_S264_H/ws"
+    _s264_ctr "$_S264_W1" > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W1"
+    _s264_ctr "$_S264_W2" >> "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W2"
+    _S264_R="$( { [ "$(cat "$_S264_H/main/.git/commondir" 2>/dev/null)" = . ] && grep -qxF "$_S264_H/main/.git/config" "$_S264_H/flags" 2>/dev/null || echo "fixture: the first session did not seed and lock the common dir"; } 2>&1)" || true
+    _s264_ctr "$_S264_W2" > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W1"
+    _S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+        [ "$(cat "$_S264_H/main/.git/commondir" 2>/dev/null)" = . ] || echo "the common dir's seed went while the other session runs"
+        grep -qxF "$_S264_H/main/.git/config" "$_S264_H/flags" 2>/dev/null || echo "the common dir's config was unlocked while the other session runs"; } 2>&1)" || true
+    : > "$_S264_H/present"
+    _s264_run "$_S264_C" "$_S264_W2"
+    _S264_R="$_S264_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+        [ ! -e "$_S264_H/main/.git/commondir" ] || echo "the seed outlived both sessions"
+        if grep -qxF "$_S264_H/main/.git/config" "$_S264_H/flags" 2>/dev/null; then echo "the lock outlived both sessions"; fi; } 2>&1)" || true
+    [ -z "$_S264_R" ] || _a6_diag "§264($_S264_N)" "$_S264_C"
+    if [ "$_S264_N" = e ]; then _S264_D="the main checkout's session and a worktree's"; else _S264_D="two worktrees' sessions"; fi
+    check "§264($_S264_N) $_S264_D share the common dir: the first to end leaves its seed and macOS lock to the one still running, and the last releases them (mutation: the common dir not registered in the hold; ${_S264_R:-ok})" \
+        test -z "$_S264_R"
+done
+# (g) what the common dir lacked at launch and has at the end is reported
+# (hooks/<hook>, config.worktree, info), and so is a switch of the main
+# checkout's HEAD.
+_S264_C=s264-new; _s264_fix "$_S264_C"; _S264_H="$_A6_DIR/$_S264_C"; : > "$_S264_H/present"
+rm -rf "$_S264_H/main/.git/hooks" "$_S264_H/main/.git/info"
+_S264_RUN="mkdir -p '$_S264_H/main/.git/hooks' && printf '#!/bin/sh\n' > '$_S264_H/main/.git/hooks/post-checkout'; printf '[core]\n' > '$_S264_H/main/.git/config.worktree'; mkdir -p '$_S264_H/main/.git/info' && printf '* filter=x\n' > '$_S264_H/main/.git/info/attributes'; printf 'ref: refs/heads/wt2\n' > '$_S264_H/main/.git/HEAD'"
+_s264_run "$_S264_C" "$_S264_H/ws" S248_RUN="$_S264_RUN"
+_S264_O="$_A6_DIR/$_S264_C/out"
+_S264_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    for _S264_P in hooks config.worktree info; do
+        awk '/Git files appeared during this session in the git directory/ { on = 1 } on' "$_S264_O" | grep -qF "$_S264_H/main/.git/$_S264_P" || echo "the created $_S264_P is not reported"
+    done
+    grep -qF "The main checkout's HEAD was switched during this session" "$_S264_O" || echo "the main checkout's HEAD switch is not reported"
+    grep -qF "ref: refs/heads/main -> ref: refs/heads/wt2" "$_S264_O" || echo "the HEAD switch does not name both refs"; } 2>&1)" || true
+[ -z "$_S264_R" ] || _a6_diag "§264(g)" "$_S264_C"
+check "§264(g) in a worktree session, hooks/<hook>, config.worktree and info created in the common dir (absent at launch, so not mounted :ro) are reported at session end, and so is a switch of the main checkout's HEAD (mutations: no #gdabsent record; no #mainhead record; ${_S264_R:-ok})" \
+    test -z "$_S264_R"
+_a6_done
+unset -f _s264_git _s264_fix _s264_ctr _s264_run
+unset _S264_C _S264_H _S264_A _S264_L _S264_R _S264_P _S264_D _S264_G0 _S264_N _S264_OK _S264_B _S264_PATH _S264_W1 _S264_W2 _S264_RUN _S264_O
 echo ""
 
 # BEGIN SUMMARY
