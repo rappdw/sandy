@@ -82,7 +82,9 @@ section "Required"
 
 # bash (we're already in it). sandy requires bash 5 or newer and runs under the
 # first `bash` on PATH (#!/usr/bin/env bash). An older one is a WARNING, never a
-# required failure: sandy itself does not check the version. Plain [ ] tests
+# required failure (sandy itself re-runs under a bash 5 it finds, or refuses;
+# `sandy --doctor` therefore reports the bash it re-ran under, and the
+# standalone doctor.sh the one it was started with). Plain [ ] tests
 # and BASH_VERSINFO only, so this runs under bash 3.2 (macOS /bin/bash), which
 # is exactly where it has to work.
 if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] 2>/dev/null; then

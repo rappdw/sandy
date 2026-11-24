@@ -1,5 +1,86 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# --- bash 5 or newer (decided 2026-11-24) ------------------------------------
+# sandy is written for bash 5 and no longer even PARSES under bash 3.2 (macOS
+# /bin/bash). bash runs each top-level command as it reads it, so this block
+# runs before the parser reaches the rest of the file, and it is written for
+# bash 3.2: plain [ ], BASH_VERSINFO, no $( ) holding a case or an
+# apostrophe, nothing newer. Under bash < 5 it re-runs sandy under the first
+# bash 5 or newer at /opt/homebrew/bin, /usr/local/bin or on PATH, with the
+# same arguments, environment and stdin; with none, it says how to get one
+# and exits 1. SANDY_BASH5_REEXEC marks the re-exec, so it is tried once.
+# Between BEGIN and END: test/run-tests.sh extracts this block.
+# BEGIN bash5 guard
+_sandy_bash5_os_id() {   # the Linux distribution ID, as the doctor reads it
+    _sb5_id=unknown
+    if [ -r /etc/os-release ]; then
+        while IFS='=' read -r _sb5_k _sb5_v; do
+            if [ "$_sb5_k" = ID ]; then _sb5_v="${_sb5_v#\"}"; _sb5_v="${_sb5_v%\"}"; _sb5_id="${_sb5_v:-unknown}"; fi
+        done < /etc/os-release
+    fi
+    echo "$_sb5_id"
+}
+# The install line: the same mapping as the doctor's pkg_hint (a test keeps
+# the two equal). $1 = macos|linux|unknown, $2 = the distribution ID.
+_sandy_bash5_pkg_hint() {
+    case "$1" in
+        macos)
+            if command -v brew >/dev/null 2>&1; then
+                echo "brew install bash"
+            else
+                echo "Install Homebrew from https://brew.sh, then: brew install bash"
+            fi ;;
+        linux)
+            case "$2" in
+                debian|ubuntu|raspbian|pop|linuxmint) echo "sudo apt update && sudo apt install -y bash" ;;
+                fedora|rhel|centos|rocky|almalinux)   echo "sudo dnf install -y bash" ;;
+                arch|manjaro|endeavouros)             echo "sudo pacman -S --needed bash" ;;
+                alpine)                               echo "sudo apk add bash" ;;
+                opensuse*|sles)                       echo "sudo zypper install -y bash" ;;
+                *)                                    echo "Install bash via your distro's package manager" ;;
+            esac ;;
+        *) echo "Install bash for your platform" ;;
+    esac
+}
+_sandy_bash5_advice() {   # the whole message, on stdout
+    _sb5_os=unknown
+    case "$(uname -s 2>/dev/null)" in Darwin) _sb5_os=macos ;; Linux) _sb5_os=linux ;; esac
+    _sb5_d=unknown
+    if [ "$_sb5_os" = linux ]; then _sb5_d="$(_sandy_bash5_os_id)"; fi
+    echo "[sandy] ERROR: sandy requires bash 5 or newer; this is bash ${BASH_VERSION%%(*} at ${BASH:-bash}."
+    echo "[sandy]   No bash 5 or newer was found at /opt/homebrew/bin/bash, /usr/local/bin/bash or on PATH."
+    echo "[sandy]   To install one: $(_sandy_bash5_pkg_hint "$_sb5_os" "$_sb5_d")"
+    if [ "$_sb5_os" = macos ]; then
+        if ! command -v brew >/dev/null 2>&1 && command -v port >/dev/null 2>&1; then
+            echo "[sandy]   (or, with MacPorts: sudo port install bash)"
+        fi
+        echo "[sandy]   Then put it first on PATH, in your shell's startup file:"
+        echo "[sandy]     eval \"\$(/opt/homebrew/bin/brew shellenv)\"   # Intel Macs: /usr/local/bin/brew"
+    elif [ "$_sb5_os" = linux ]; then
+        echo "[sandy]   (Most Linux distributions already ship bash 5: check that it is the first bash on PATH.)"
+    fi
+    echo "[sandy]   Then check, in a new terminal: bash --version"
+}
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ] 2>/dev/null; then
+    if [ -z "${SANDY_BASH5_REEXEC:-}" ] && [ -f "$0" ]; then
+        _sb5_ifs="$IFS"; IFS='
+'
+        for _sb5_c in /opt/homebrew/bin/bash /usr/local/bin/bash $(type -ap bash 2>/dev/null); do
+            [ "$_sb5_c" != "${BASH:-}" ] && [ -f "$_sb5_c" ] && [ -x "$_sb5_c" ] || continue
+            if "$_sb5_c" -c '[ "${BASH_VERSINFO[0]}" -ge 5 ]' </dev/null >/dev/null 2>&1; then
+                IFS="$_sb5_ifs"
+                SANDY_BASH5_REEXEC=1; export SANDY_BASH5_REEXEC
+                exec "$_sb5_c" "$0" ${1+"$@"}
+            fi
+        done
+        IFS="$_sb5_ifs"
+    fi
+    _sandy_bash5_advice >&2
+    exit 1
+fi
+unset SANDY_BASH5_REEXEC 2>/dev/null || true
+unset -f _sandy_bash5_os_id _sandy_bash5_pkg_hint _sandy_bash5_advice
+# END bash5 guard
 # When this script started (epoch seconds; never exported): where no
 # /proc/<pid>/stat is (macOS) and ps cannot answer either, the start a hold
 # lock or holder entry records for this pid (_sandy_self_start).
@@ -11418,7 +11499,9 @@ section "Required"
 
 # bash (we're already in it). sandy requires bash 5 or newer and runs under the
 # first `bash` on PATH (#!/usr/bin/env bash). An older one is a WARNING, never a
-# required failure: sandy itself does not check the version. Plain [ ] tests
+# required failure (sandy itself re-runs under a bash 5 it finds, or refuses;
+# `sandy --doctor` therefore reports the bash it re-ran under, and the
+# standalone doctor.sh the one it was started with). Plain [ ] tests
 # and BASH_VERSINFO only, so this runs under bash 3.2 (macOS /bin/bash), which
 # is exactly where it has to work.
 if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] 2>/dev/null; then

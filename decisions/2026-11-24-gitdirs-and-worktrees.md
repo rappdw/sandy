@@ -36,3 +36,11 @@ Options considered and not taken:
 ## Implementation note on decision 2 (#596): who holds a lock
 
 The hold's lock, its holder entries and the #599 claims identify a process by its pid and its start (`/proc/<pid>/stat` field 22 on Linux; `ps -o etime=` against the time sandy started, elsewhere), not by its command line, which could not tell a sandy run as a link named otherwise, a copy, `bash -x -e`, or from a path with two spaces from another program, so a live session's lock could be taken over mid-release and its entry pruned (review, 2026-11-24). A record without a start counts as alive while the pid exists. Every pass of the lock's wait, a takeover included, counts toward its 60 s bound and sleeps, and a takeover guard with no pid after about 1 s, or still there after about 5 s, is stale, so a takeover that cannot succeed ends in the bound instead of a busy loop.
+
+## Decision 5 (2026-11-24): bash < 5
+
+| # | Decision | Choice | Deciding reason |
+|---|----------|--------|-----------------|
+| 5 | sandy started under bash < 5 | Re-exec a bash >= 5 found at /opt/homebrew/bin, /usr/local/bin or on PATH; else a clear message (the running bash, this machine's install advice) and exit 1 | sandy no longer parses under bash 3.2, so "no refusal" only meant a cryptic syntax error and an unreachable doctor warning |
+
+Replaces the 2026-11-21 decision (bash 5 documented as a requirement, never enforced by sandy). Implementation: the guard between `# BEGIN bash5 guard` and `# END bash5 guard` at the top of `sandy`; host-suite §265.

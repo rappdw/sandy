@@ -36170,6 +36170,156 @@ unset -f _s264_git _s264_fix _s264_ctr _s264_run
 unset _S264_C _S264_H _S264_A _S264_L _S264_R _S264_P _S264_D _S264_G0 _S264_N _S264_OK _S264_B _S264_PATH _S264_W1 _S264_W2 _S264_RUN _S264_O
 echo ""
 
+# ============================================================
+section "§265: under bash < 5 sandy re-runs itself under a bash 5 or newer (/opt/homebrew/bin, /usr/local/bin, then PATH), once, with its arguments, environment and stdin; with none it names the bash it runs under and gives this machine's install advice (the doctor's), and exits 1 (decision 2026-11-24)"
+# ============================================================
+# WHY. sandy no longer parses under bash 3.2 (macOS /bin/bash): a run under it
+# died with `syntax error near unexpected token` hundreds of lines in, before
+# anything (even --doctor) could say why, and every section that runs sandy
+# under `env -i PATH=...:/usr/bin:/bin` failed on the maintainer's Mac. The
+# guard at the top of sandy runs before bash parses the rest of the file.
+# Here it is extracted (BEGIN/END markers) and run under this bash with its
+# version test, its two fixed candidates and /etc/os-release pointed at test
+# stand-ins (each rewrite checked to have matched, so no case goes vacuous).
+_S265_D="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^# BEGIN bash5 guard$/,/^# END bash5 guard$/p' "$SANDY_SCRIPT" > "$_S265_D/guard.orig"
+sed -e 's|\[ "${BASH_VERSINFO\[0\]:-0}" -lt 5 \]|[ "${S265_MAJOR:-4}" -lt 5 ]|' \
+    -e "s|/opt/homebrew/bin/bash /usr/local/bin/bash|$_S265_D/hb/bash $_S265_D/ul/bash|" \
+    -e "s|/etc/os-release|$_S265_D/os-release|g" "$_S265_D/guard.orig" > "$_S265_D/guard.sh"
+_S265_R=""
+grep -qF 'S265_MAJOR' "$_S265_D/guard.sh" || _S265_R="$_S265_R the version test was not found;"
+grep -qF "$_S265_D/hb/bash $_S265_D/ul/bash" "$_S265_D/guard.sh" || _S265_R="$_S265_R the candidate list was not found;"
+grep -qF "$_S265_D/os-release" "$_S265_D/guard.sh" || _S265_R="$_S265_R the os-release path was not found;"
+check "§265(pre) the guard is extracted and each test rewrite matched (${_S265_R:-ok})" test -z "$_S265_R"
+# The guard is the first command: everything between `set -euo pipefail` and
+# its BEGIN line is comments, and it ends before the first other function.
+check "§265(top) the guard is the first thing sandy runs after set -euo pipefail, before any other function definition (mutation: the guard moved below code bash 3.2 cannot parse)" \
+    awk 'NR == 2 && $0 != "set -euo pipefail" { exit 1 }
+         NR > 2 && !b && /^# BEGIN bash5 guard$/ { b = NR; next }
+         NR > 2 && !b && $0 !~ /^#/ && $0 !~ /^[[:space:]]*$/ { exit 1 }
+         b && /^# END bash5 guard$/ { e = NR; next }
+         e && /^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/ { f = 1; exit }
+         END { exit (b && e && f) ? 0 : 1 }' "$SANDY_SCRIPT"
+# The probe script: the guard, then a line saying it got past.
+{ printf '#!/usr/bin/env bash\nset -euo pipefail\n'; cat "$_S265_D/guard.sh"; printf 'echo "PASSED marker=${SANDY_BASH5_REEXEC-unset}"\n'; } > "$_S265_D/probe"
+# A stand-in bash: `-c` answers the version probe with S265_RC_<dir> (0 = 5
+# or newer); run with a script, it records its argv, the marker and stdin.
+_s265_stub() {   # $1 = dir  $2 = rc for -c
+    mkdir -p "$_S265_D/$1"
+    printf '#!/bin/sh\nif [ "$1" = -c ]; then exit %s; fi\nprintf "%%s\\n" "$0" "$@" > %q\nprintf "%%s\\n" "${SANDY_BASH5_REEXEC:-}" > %q\n%q > %q\n' \
+        "$2" "$_S265_D/$1.argv" "$_S265_D/$1.marker" "$(command -v cat)" "$_S265_D/$1.stdin" > "$_S265_D/$1/bash"
+    chmod +x "$_S265_D/$1/bash"
+}
+mkdir -p "$_S265_D/tools"; ln -s "$(command -v uname)" "$_S265_D/tools/uname"
+_s265_run() {   # [VAR=value ...] -> output and rc ("rc=N" last), stdin "hello"
+    local o rc=0
+    o="$(printf 'hello\n' | env -u SANDY_BASH5_REEXEC "$@" "$BASH" "$_S265_D/probe" one "two words" "" 2>&1)" || rc=$?
+    printf '%s\nrc=%s\n' "$o" "$rc"
+}
+# (a1) bash 4, a bash 5 at the first fixed place: re-run there, argv, marker
+# and stdin intact.
+_s265_stub hb 0; _s265_stub ul 0
+_S265_O="$(_s265_run PATH="$_S265_D/tools")"
+_S265_R=""
+[ "$(cat "$_S265_D/hb.argv" 2>/dev/null || true)" = "$(printf '%s\n' "$_S265_D/hb/bash" "$_S265_D/probe" one "two words" "")" ] || _S265_R="$_S265_R argv: [$(tr '\n' '|' < "$_S265_D/hb.argv" 2>/dev/null || true)];"
+[ "$(cat "$_S265_D/hb.marker" 2>/dev/null || true)" = 1 ] || _S265_R="$_S265_R no SANDY_BASH5_REEXEC=1 in the re-run;"
+[ "$(cat "$_S265_D/hb.stdin" 2>/dev/null || true)" = hello ] || _S265_R="$_S265_R stdin not passed on;"
+[ ! -e "$_S265_D/ul.argv" ] || _S265_R="$_S265_R the second candidate ran too;"
+check "§265(a1) under bash 4 with a bash 5 at /opt/homebrew/bin, sandy re-runs itself there with the same arguments (an empty one and one with a space included), stdin, and SANDY_BASH5_REEXEC=1 (mutation: no guard; ${_S265_R:-ok})" \
+    test -z "$_S265_R"
+# (a2) the first candidate is too old: the next one is used.
+rm -f "$_S265_D"/*.argv; _s265_stub hb 1; _s265_stub ul 0
+_S265_O="$(_s265_run PATH="$_S265_D/tools")"
+check "§265(a2) a candidate whose version probe fails is skipped and the next (/usr/local/bin) is used (got: $( { tr '\n' '|' < "$_S265_D/ul.argv" 2>/dev/null || true; } | cut -c1-120))" \
+    bash -c '[ -f "$1/ul.argv" ] && [ ! -f "$1/hb.argv" ]' _ "$_S265_D"
+# (a3) none at the fixed places, one on PATH.
+rm -f "$_S265_D"/*.argv; _s265_stub hb 1; _s265_stub ul 1; _s265_stub pathbash 0
+_S265_O="$(_s265_run PATH="$_S265_D/pathbash:$_S265_D/tools")"
+check "§265(a3) ...and a bash 5 found only on PATH is used" \
+    test -f "$_S265_D/pathbash.argv"
+# (a4) the re-run is tried once: with the marker set and still bash 4, no
+# re-exec; the message and exit 1.
+rm -f "$_S265_D"/*.argv; _s265_stub hb 0
+_S265_O="$(printf 'hello\n' | env SANDY_BASH5_REEXEC=1 PATH="$_S265_D/tools" "$BASH" "$_S265_D/probe" 2>&1)" && _S265_RC=0 || _S265_RC=$?
+check "§265(a4) with SANDY_BASH5_REEXEC already set and still under bash 4, no second re-run: the advice and exit 1 (mutation: the marker not checked: it loops; rc $_S265_RC)" \
+    bash -c '[ "$1" = 1 ] && [ ! -f "$2/hb.argv" ] && printf "%s\n" "$3" | grep -qF "sandy requires bash 5 or newer"' _ "$_S265_RC" "$_S265_D" "$_S265_O"
+# (a5) under bash 5 the guard lets sandy run and drops the marker.
+_S265_O="$(_s265_run S265_MAJOR=5 SANDY_BASH5_REEXEC=1 PATH="$_S265_D/tools")"
+check "§265(a5) under bash 5 the guard passes and unsets SANDY_BASH5_REEXEC, so nothing after it sees the marker (got: $(printf '%s' "$_S265_O" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qxF "PASSED marker=unset" && printf "%s\n" "$1" | grep -qx "rc=0"' _ "$_S265_O"
+# (b) no bash 5 anywhere: the message names the running bash, gives this
+# machine's advice, exits 1. uname, brew, port and os-release are stand-ins.
+_s265_os() {   # $1 = Darwin|Linux  $2 = brew|port|none  $3 = os-release ID line or "" -> the output
+    local t="$_S265_D/os-$1-$2"
+    rm -rf "$t"; mkdir -p "$t"
+    printf '#!/bin/sh\necho %s\n' "$1" > "$t/uname"; chmod +x "$t/uname"
+    case "$2" in brew|port) printf '#!/bin/sh\nexit 0\n' > "$t/$2"; chmod +x "$t/$2" ;; esac
+    if [ -n "$3" ]; then printf '%s\nNAME=x\n' "$3" > "$_S265_D/os-release"; else rm -f "$_S265_D/os-release"; fi
+    _s265_stub hb 1; _s265_stub ul 1
+    env -u SANDY_BASH5_REEXEC PATH="$t" "$BASH" "$_S265_D/probe" </dev/null 2>&1 || true
+}
+_S265_V="bash ${BASH_VERSION%%(*} at $BASH"
+_S265_R=""
+_s265_has() {   # $1 = output  $2 = label  then fixed strings that must appear ("!x": must not)
+    local o="$1" l="$2" w; shift 2
+    printf '%s\n' "$o" | grep -qF "this is $_S265_V." || _S265_R="$_S265_R $l: the running bash not named;"
+    for w in "$@"; do
+        case "$w" in
+            !*) if printf '%s\n' "$o" | grep -qF -- "${w#!}"; then _S265_R="$_S265_R $l: has [${w#!}];"; fi ;;
+            *) printf '%s\n' "$o" | grep -qF -- "$w" || _S265_R="$_S265_R $l: no [$w];" ;;
+        esac
+    done
+}
+_s265_has "$(_s265_os Darwin brew "")" mac-brew "To install one: brew install bash" 'eval "$(/opt/homebrew/bin/brew shellenv)"' "Intel Macs: /usr/local/bin/brew" "bash --version" "!MacPorts"
+_s265_has "$(_s265_os Darwin port "")" mac-port "Install Homebrew from https://brew.sh, then: brew install bash" "sudo port install bash" "brew shellenv"
+_s265_has "$(_s265_os Darwin none "")" mac-bare "Install Homebrew from https://brew.sh, then: brew install bash" "!MacPorts"
+_s265_has "$(_s265_os Linux none ID=debian)" debian "sudo apt update && sudo apt install -y bash" "Most Linux distributions already ship bash 5" "bash --version" "!brew install" "!brew shellenv"
+_s265_has "$(_s265_os Linux none 'ID="fedora"')" fedora "sudo dnf install -y bash"
+_s265_has "$(_s265_os Linux none ID=alpine)" alpine "sudo apk add bash"
+_s265_has "$(_s265_os Linux none ID=arch)" arch "sudo pacman -S --needed bash"
+_s265_has "$(_s265_os Linux none 'ID="opensuse-leap"')" opensuse "sudo zypper install -y bash"
+_s265_has "$(_s265_os Linux none ID=gentoo)" other-linux "Install bash via your distro's package manager"
+_s265_has "$(_s265_os Linux none "")" no-os-release "Install bash via your distro's package manager"
+check "§265(b) with no bash 5 to be found, sandy names the bash it runs under and gives this machine's advice: macOS with Homebrew, with MacPorts only, with neither; Linux by distribution (apt, dnf, apk, pacman, zypper, other, no os-release); then the PATH step on macOS and a bash --version check (mutations: a branch dropped; ${_S265_R:-ok})" \
+    test -z "$_S265_R"
+# (c) the install line is the doctor's: the guard's _sandy_bash5_pkg_hint
+# and the doctor's pkg_hint (doctor.sh, generated from the same heredoc
+# sandy --doctor runs) agree for every OS, distribution and brew state.
+sed -n '/^pkg_hint() {/,/^}$/p' "$SANDY_SCRIPT" | head -n 40 > "$_S265_D/doc.sh"
+sed -n '/^_sandy_bash5_pkg_hint() {/,/^}$/p' "$_S265_D/guard.orig" > "$_S265_D/g.sh"
+mkdir -p "$_S265_D/withbrew"; printf '#!/bin/sh\nexit 0\n' > "$_S265_D/withbrew/brew"; chmod +x "$_S265_D/withbrew/brew"
+_S265_R="$(bash -c '. "$1/doc.sh"; . "$1/g.sh"; n=0
+    for b in withbrew nobrew; do
+        for od in macos:x linux:debian linux:ubuntu linux:raspbian linux:pop linux:linuxmint linux:fedora linux:rhel linux:centos linux:rocky \
+                  linux:almalinux linux:arch linux:manjaro linux:endeavouros linux:alpine linux:opensuse-leap linux:opensuse-tumbleweed linux:sles \
+                  linux:gentoo linux:unknown unknown:x; do
+            OS="${od%%:*}"; DISTRO="${od#*:}"
+            d="$(PATH="$1/$b" pkg_hint bash)"; g="$(PATH="$1/$b" _sandy_bash5_pkg_hint "$OS" "$DISTRO")"
+            n=$((n + 1)); [ "$d" = "$g" ] || echo "$b $od: doctor [$d], guard [$g];"
+        done
+    done
+    [ "$n" = 42 ] || echo "only $n cases ran"' _ "$_S265_D" 2>&1)" || true
+check "§265(c) the guard's install advice is the doctor's (pkg_hint bash) for macOS with and without Homebrew, every Linux distribution the doctor knows and an unknown one (mutation: a mapping changed in one copy; ${_S265_R:-ok})" \
+    test -z "$_S265_R"
+# (d) on a Mac whose /bin/bash is older than 5, with a bash 5 installed: the
+# real sandy, run by /bin/bash with a PATH of /usr/bin:/bin only (as the
+# env -i sections run it), re-runs itself and answers --print-version.
+if [ "$(uname -s)" != Darwin ]; then
+    skip "§265(d) macOS only: /bin/bash there is bash 3.2 (here: $(uname -s))"
+elif /bin/bash -c '[ "${BASH_VERSINFO[0]}" -ge 5 ]' 2>/dev/null; then
+    skip "§265(d) this Mac's /bin/bash is already bash 5 or newer"
+elif ! { [ -x /opt/homebrew/bin/bash ] || [ -x /usr/local/bin/bash ]; }; then
+    skip "§265(d) no bash 5 at /opt/homebrew/bin or /usr/local/bin to re-run under"
+else
+    _S265_O="$(cd "$_S265_D" && env -i PATH=/usr/bin:/bin HOME="$_S265_D" SANDY_HOME="$_S265_D/sh" /bin/bash "$SANDY_SCRIPT" --print-version 2>&1)" && _S265_RC=0 || _S265_RC=$?
+    check "§265(d) on this Mac, env -i PATH=/usr/bin:/bin /bin/bash sandy --print-version re-runs under bash 5 and prints the version (rc $_S265_RC; got: $(printf '%s' "$_S265_O" | head -c 200 | tr '\n' ' '))" \
+        bash -c '[ "$1" = 0 ] && printf "%s\n" "$2" | grep -qF "\"schema_version\""' _ "$_S265_RC" "$_S265_O"
+fi
+rm -rf "$_S265_D"
+unset -f _s265_stub _s265_run _s265_os _s265_has
+unset _S265_D _S265_R _S265_O _S265_RC _S265_V
+echo ""
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
