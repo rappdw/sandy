@@ -4123,6 +4123,9 @@ _sandy_pid_alive() {   # $1 = pid  $2 = recorded start
             case "${2#e}${_pa_n#e}" in *[!0-9-]*) return 0 ;; esac
             _pa_d=$(( ${2#e} - ${_pa_n#e} ))
             [ "$_pa_d" -le 3 ] && [ "$_pa_d" -ge -3 ] ;;
+        # Recorded in the other format (p on a host with /proc, e on one
+        # without): only a $SANDY_HOME copied between a Linux and a macOS
+        # host gets here. The two cannot be compared, so alive: fail safe.
         *) return 0 ;;
     esac
 }

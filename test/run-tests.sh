@@ -35063,6 +35063,17 @@ echo ""
 # ============================================================
 section "§261: a git dir two sessions share (a superproject and its submodule checkout) keeps its commondir seed and macOS locks until the last of them ends; --unlock and --reset-sandbox leave what another running session holds (#596); a kept provisional snapshot is judged from its own path (#599)"
 # ============================================================
+# _s261_wrong_start PID: a start that is NOT that process's, in the format
+# this host reads (`p1` where /proc gives p<ticks>, `e1` where ps gives
+# e<epoch>): a record of it makes the live pid a reused one. A start in the
+# other format would be judged alive (cross-format, fail safe), so a fixture
+# that wrote `p1` on macOS proved nothing.
+eval "$(sed -n '/^_sandy_pid_start() {/,/^}$/p' "$SANDY_SCRIPT")"
+_s261_wrong_start() {   # $1 = pid
+    local _ws_s=""
+    _sandy_pid_start "$1" _ws_s || true
+    case "$_ws_s" in p*) echo p1 ;; e*) echo e1 ;; *) echo "UNREADABLE" ;; esac
+}
 _fx_a6; _fx_s248
 # WHY (#596). A superproject session and a session of one of its submodule
 # checkouts both seed and lock .git/modules/<sub>. The first to end removed
@@ -35304,7 +35315,7 @@ check "§261(k) the three-way takeover (e14): a session late with its takeover o
 _S261_Q="$_S261_U/q"; mkdir -p "$_S261_Q"
 sleep 300 </dev/null >/dev/null 2>&1 &
 _S261_PQ=$!
-printf '%s\n%s\n' "$_S261_PQ" p1 > "$_S261_Q/lock"
+printf '%s\n%s\n' "$_S261_PQ" "$(_s261_wrong_start "$_S261_PQ")" > "$_S261_Q/lock"
 _S261_R="$(bash -c '. "$1/fns.sh"; t0=$SECONDS; _sandy_hold_lock "$2"; rc=$?
     [ "$rc" = 0 ] || echo "not taken (rc $rc)"; [ $((SECONDS - t0)) -le 3 ] || echo "waited $((SECONDS - t0)) s for a reused pid"
     [ "$(head -n 1 "$2/lock")" = "$$" ] || echo "the lock is not this session'"'"'s"
@@ -35370,7 +35381,7 @@ check "§261(w) a lock held by a live session run through a link named sb (start
 _S261_Y="$_S261_U/y"; mkdir -p "$_S261_Y/sh" "$_S261_Y/g/.git" "$_S261_Y/sbA"
 sleep 300 </dev/null >/dev/null 2>&1 &
 _S261_PY=$!
-_S261_R="$(bash -c '. "$1/fns.sh"; Y="$2"; p="$3"
+_S261_R="$(bash -c '. "$1/fns.sh"; Y="$2"; p="$3"; w="$4"
     _sandy_container_gone() { return 0; }
     SANDY_HOME="$Y/sh"; SANDBOX_DIR="$Y/sbA"; CONTAINER_NAME=sandy-A; WORK_DIR="$Y/wa"
     _sandy_hold_add "$Y/g/.git"
@@ -35378,9 +35389,9 @@ _S261_R="$(bash -c '. "$1/fns.sh"; Y="$2"; p="$3"
     [ -n "$e" ] || { echo "no holder entry written"; exit 0; }
     grep -q "^start	[pe][0-9]" "$e" || echo "the holder entry records no start: [$(tr "\n" " " < "$e")]"
     _sandy_pid_start "$p" st
-    printf "pid\t%s\nstart\t%s\nws\t00\n" "$p" "$st" > "$Y/own"; printf "pid\t%s\nstart\tp1\nws\t00\n" "$p" > "$Y/reused"
+    printf "pid\t%s\nstart\t%s\nws\t00\n" "$p" "$st" > "$Y/own"; printf "pid\t%s\nstart\t%s\nws\t00\n" "$p" "$w" > "$Y/reused"
     _sandy_hold_holder_alive "$Y/own" sandy-X || echo "a live holder with its own start judged dead"
-    ! _sandy_hold_holder_alive "$Y/reused" sandy-X || echo "a reused pid (another start) judged alive"' _ "$_S261_U" "$_S261_Y" "$_S261_PY" </dev/null 2>&1)" || true
+    ! _sandy_hold_holder_alive "$Y/reused" sandy-X || echo "a reused pid (another start, $w) judged alive"' _ "$_S261_U" "$_S261_Y" "$_S261_PY" "$(_s261_wrong_start "$_S261_PY")" </dev/null 2>&1)" || true
 kill "$_S261_PY" 2>/dev/null || true; wait "$_S261_PY" 2>/dev/null || true
 check "§261(y) a holder entry records its launcher's start; one whose pid is alive with another start is dead once its container is gone, one with its own start is alive (mutations: no start written; the start not read; ${_S261_R:-ok})" \
     test -z "$_S261_R"
@@ -35560,7 +35571,7 @@ _a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIV
 _S261_S="$(_a6_sandbox "$_S261_C")"; _S261_P="$(ls "$_S261_S/.protected-provisional/"*.snap 2>/dev/null | head -n 1)"
 sleep 300 </dev/null >/dev/null 2>&1 &
 _S261_PT=$!
-[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.$_S261_PT.p1"
+[ -z "$_S261_P" ] || mv "$_S261_P" "${_S261_P%.snap}.judging.$_S261_PT.$(_s261_wrong_start "$_S261_PT")"
 _a6_launch "$_S261_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
 kill "$_S261_PT" 2>/dev/null || true; wait "$_S261_PT" 2>/dev/null || true
 _S261_R="$( { [ -n "$_S261_P" ] || echo "fixture: no kept snapshot"
@@ -35646,7 +35657,7 @@ if :; then
         test -z "$_S261_R"
 fi
 _a6_done
-unset -f _s261_gd _s261_fix _s261_ctr _s261_run _s261_holds _s261_both _s261_599
+unset -f _s261_gd _s261_fix _s261_ctr _s261_run _s261_holds _s261_both _s261_599 _s261_wrong_start _sandy_pid_start
 unset _S261_B _S261_PATH _S261_C _S261_W _S261_G _S261_R _S261_RC1 _S261_RC2 _S261_S _S261_DB _S261_P _S261_U _S261_J _S261_K _S261_H _S261_PA _S261_KB _S261_KD _S261_PL _S261_I0 _S261_L _S261_Q _S261_PQ _S261_RD _S261_PL2 _S261_T0 _S261_O1 _S261_O2 _S261_RC _S261_DT _S261_PT
 echo ""
 
