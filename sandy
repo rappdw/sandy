@@ -169,6 +169,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_EFFORT
     SANDY_CPUS
     SANDY_MEM
+    SANDY_PIDS_LIMIT
     SANDY_GPU
     SANDY_SKILL_PACKS
     SANDY_CHANNELS
@@ -262,6 +263,11 @@ SANDY_ENV_ONLY_KEYS=(
 #           is gated, because each agent brings its own host credentials.
 #           Skipped when --agent is given: the flag replaces the workspace
 #           value outright, so there is nothing to approve.
+#   SANDY_PIDS_LIMIT (#603): free when it is no higher than the baseline
+#           (default 4096), so a repo may lower the limit; a higher value
+#           loosens a host-protecting bound and is gated. A value that is not
+#           a valid limit is not gated: the launch refuses it outright, and a
+#           prompt to approve it would only lead to that refusal.
 _sandy_passive_value_privileged() {
     case "$1" in
         # SANDY_EGRESS (2.0.0) is the enum that replaces the booleans below, so
@@ -306,8 +312,22 @@ _sandy_passive_value_privileged() {
                 esac
             done
             return 1 ;;
+        SANDY_PIDS_LIMIT)
+            _sandy_pids_limit_valid "$2" || return 1
+            local _pvp_pl="${3:-$SANDY_PIDS_LIMIT_DEFAULT}"
+            _sandy_pids_limit_valid "$_pvp_pl" || _pvp_pl="$SANDY_PIDS_LIMIT_DEFAULT"
+            [ "$2" -gt "$_pvp_pl" ] && return 0
+            return 1 ;;
     esac
     return 1
+}
+
+# SANDY_PIDS_LIMIT (#603): the agent container's --pids-limit. One definition
+# of the default and of a valid value, shared by the ordered gate above and the
+# launch, so the bound the gate compares is the bound the launch applies.
+SANDY_PIDS_LIMIT_DEFAULT=4096
+_sandy_pids_limit_valid() {
+    [[ "${1:-}" =~ ^[1-9][0-9]{0,8}$ ]]
 }
 
 # The SANDY_AGENT alias "all", expanded. One definition, shared by the agent
@@ -5646,6 +5666,7 @@ SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mod
 SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding modelConfigs.customOverrides (and, on every gemini launch since 2.10.0, security.auth.selectedType and enforcedType, the auth type sandy selected) -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
+SANDY_PIDS_LIMIT|int|4096|^[1-9][0-9]{0,8}$|2.12.0|stable|Process and thread limit for the agent container (docker run --pids-limit). The cgroup pids controller counts THREADS, not just processes, and Claude Code sessions use many threads, so several background sessions under one claude agents daemon ran close to the old fixed 512 and one burst over it ended every session in the sandbox at once (#603). Default 4096: still a bound that stops a fork bomb exhausting the host's PID space, which is what the limit is for. A positive integer of at most 9 digits; anything else refuses the launch. Ordered tier: from a workspace .sandy/config a value at or below the one the environment or host config resolved (default 4096) is passive-safe, so a repo may lower it; a higher value is approval-gated. The egress proxy keeps its own fixed --pids-limit 128.
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
 SANDY_SKILL_PACKS|string|||0.7.10|stable|Comma-separated skill pack names (e.g. 'gstack').
 SANDY_CHANNELS|string|||0.7.6|stable|Comma-separated channel names (e.g. 'telegram,discord').
@@ -12853,6 +12874,8 @@ Environment variables:
                      rules cannot be applied (Linux only)
   SANDY_CPUS         CPU limit for container (default: auto-detected)
   SANDY_MEM          Memory limit for container (default: auto-detected)
+  SANDY_PIDS_LIMIT   Process/thread limit for the container (default: 4096;
+                     counts threads, so size it for every agent session)
   SANDY_GPU          GPU passthrough: "all" for all GPUs, or device IDs
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
@@ -15437,14 +15460,17 @@ _sandy_translate_args() {
 # directly to the parent shell — so the trailer is omitted.
 #
 # Under SANDY_VERBOSE>=1, the trailer also reports the exit code so the user
-# can spot non-zero exits before they're hidden by the pause prompt.
+# can spot non-zero exits before they're hidden by the pause prompt. A third
+# argument of `report` asks for that trailer at every verbosity: the agent view
+# (#603) fronts every background session, and when its daemon died the pane
+# sat in a bare `read` with nothing to say the view had gone, for hours.
 #
 # The `\$?` / `\$_exit` / `\"` escapes are deliberate: they're literal in the
 # returned string and only expand when bash evaluates it later (in the tmux
 # pane via user-setup.sh). The pre-PR-3.2 functions used the same escapes;
 # moving them into one place is the whole point of this helper.
 _sandy_wrap_cmd_exit_pause() {
-    local label="$1" cmd="$2"
+    local label="$1" cmd="$2" report="${3:-}"
     if [ "$_sandy_is_headless" = "true" ]; then
         printf '%s' "$cmd"
         return 0
@@ -15456,7 +15482,7 @@ _sandy_wrap_cmd_exit_pause() {
     if [ -n "${_SANDY_AW_PATH:-}" ]; then
         cmd="$(printf '%q' "$_SANDY_AW_PATH") $cmd"
     fi
-    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ] || [ "$report" = "report" ]; then
         printf '%s' "${cmd}; _exit=\$?; echo ''; echo \"[sandy] ${label} exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
     else
         printf '%s' "${cmd}; read -p ''"
@@ -15790,7 +15816,7 @@ build_claude_agents_cmd() {
                 fi ;;
         esac
     done
-    _sandy_wrap_cmd_exit_pause "Claude Code agent view" "$cmd"
+    _sandy_wrap_cmd_exit_pause "Claude Code agent view" "$cmd" report
 }
 
 # #427: does this sandbox hold an INTERACTIVE codex session for this workspace?
@@ -18447,7 +18473,7 @@ _load_sandy_config() {
     # any workspace value is exported over them. Taken even when the file is
     # absent, so a missing .sandy/config cannot defer it to .sandy/.secrets.
     if [ "$tier" = "passive" ] && [ "${_SANDY_PASSIVE_BASE_TAKEN:-0}" != "1" ]; then
-        for _base_k in SANDY_AGENT SANDY_CLAUDE_AUTH SANDY_GEMINI_AUTH SANDY_CODEX_AUTH SANDY_OPENCODE_AUTH SANDY_GROK_AUTH; do
+        for _base_k in SANDY_AGENT SANDY_CLAUDE_AUTH SANDY_GEMINI_AUTH SANDY_CODEX_AUTH SANDY_OPENCODE_AUTH SANDY_GROK_AUTH SANDY_PIDS_LIMIT; do
             printf -v "_SANDY_PASSIVE_BASE_${_base_k}" '%s' "${!_base_k:-}"
         done
         _SANDY_PASSIVE_BASE_TAKEN=1
@@ -22155,6 +22181,13 @@ if ! [[ "$AVAILABLE_MEM_GB" =~ ^[0-9]+$ ]] || [ "$AVAILABLE_MEM_GB" -eq 0 ]; the
 fi
 SANDY_CPUS="${SANDY_CPUS:-$AVAILABLE_CPUS}"
 SANDY_MEM="${SANDY_MEM:-$(( AVAILABLE_MEM_GB > 2 ? AVAILABLE_MEM_GB - 1 : 2 ))g}"
+# The pids limit counts threads (#603). Refuse a bad value rather than fall
+# back: a silent default would look like the operator's setting working.
+SANDY_PIDS_LIMIT="${SANDY_PIDS_LIMIT:-$SANDY_PIDS_LIMIT_DEFAULT}"
+if ! _sandy_pids_limit_valid "$SANDY_PIDS_LIMIT"; then
+    error "SANDY_PIDS_LIMIT must be a positive integer of at most 9 digits (got '$SANDY_PIDS_LIMIT'; default $SANDY_PIDS_LIMIT_DEFAULT)."
+    exit 1
+fi
 
 # Preflight: SSH agent mode on macOS requires socat and python3 for the relay
 if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
@@ -25985,13 +26018,13 @@ RUN_FLAGS+=(--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER)
 # holds it, and root runs nothing after the entrypoint's gosu drop;
 # no-new-privileges keeps the agent at the host uid from regaining it.
 RUN_FLAGS+=(--cap-add KILL)
-RUN_FLAGS+=(--pids-limit 512)
+RUN_FLAGS+=(--pids-limit "$SANDY_PIDS_LIMIT")
 # --init (#392): Docker's own init (docker-init/tini) becomes PID 1 and reaps
 # every process that gets orphaned in the container. Without it PID 1 is the
 # entrypoint chain -- and in daemon mode `exec tail -f /dev/null`, which never
 # calls wait() -- so each orphan (a backgrounded shell job, a tool subprocess
 # whose parent exited first, a git helper) stayed a zombie holding one of the
-# 512 slots above until the container was recreated. A long-lived session
+# --pids-limit slots above until the container was recreated. A long-lived session
 # eventually hit the limit, fork() failed for everything including the agent,
 # and the session died with nothing in its transcript. It also forwards
 # signals, so `docker stop` ends the session on SIGTERM instead of waiting out

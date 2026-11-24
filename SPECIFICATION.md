@@ -173,7 +173,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `MIRROR_MODEL`, `SANDY_CLAUDE_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_USAGE`, `SANDY_CLAUDE_ACTIVITY`, `SANDY_CODEX_ACTIVITY`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_CROSS_SESSION_INBOUND`, `SANDY_RELAY`, `SANDY_OFFLINE`, `SANDY_GH_ACCOUNT`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_PIDS_LIMIT`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `MIRROR_MODEL`, `SANDY_CLAUDE_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_USAGE`, `SANDY_CLAUDE_ACTIVITY`, `SANDY_CODEX_ACTIVITY`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_CROSS_SESSION_INBOUND`, `SANDY_RELAY`, `SANDY_OFFLINE`, `SANDY_GH_ACCOUNT`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -219,6 +219,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_EFFORT` | passive | unset | 1.6.0 | stable | Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding modelConfigs.customOverrides (and, on every gemini launch since 2.10.0, security.auth.selectedType and enforcedType, the auth type sandy selected) -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value. |
 | `SANDY_CPUS` | passive | unset | 0.1.0 | stable | CPU limit for container (default: auto-detected). |
 | `SANDY_MEM` | passive | unset | 0.1.0 | stable | Memory limit for container (e.g. '8g'; default: auto-detected). |
+| `SANDY_PIDS_LIMIT` | passive | `4096` | 2.12.0 | stable | Process and thread limit for the agent container (docker run --pids-limit). The cgroup pids controller counts THREADS, not just processes, and Claude Code sessions use many threads, so several background sessions under one claude agents daemon ran close to the old fixed 512 and one burst over it ended every session in the sandbox at once (#603). Default 4096: still a bound that stops a fork bomb exhausting the host's PID space, which is what the limit is for. A positive integer of at most 9 digits; anything else refuses the launch. Ordered tier: from a workspace .sandy/config a value at or below the one the environment or host config resolved (default 4096) is passive-safe, so a repo may lower it; a higher value is approval-gated. The egress proxy keeps its own fixed --pids-limit 128. |
 | `SANDY_GPU` | passive | unset | 0.7.5 | stable | GPU passthrough: 'all', or device IDs like '0' / '0,1'. |
 | `SANDY_SKILL_PACKS` | passive | unset | 0.7.10 | stable | Comma-separated skill pack names (e.g. 'gstack'). |
 | `SANDY_CHANNELS` | passive | unset | 0.7.6 | stable | Comma-separated channel names (e.g. 'telegram,discord'). |
@@ -762,7 +763,7 @@ Add entries to all four arrays (`SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_P
 --cap-drop ALL
 --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER
 --cap-add KILL
---pids-limit 512
+--pids-limit <SANDY_PIDS_LIMIT>   # default 4096 (#603)
 --init
 --read-only
 --tmpfs /tmp:exec,size=1G
@@ -842,7 +843,7 @@ If the host UID differs from the image default (1001), sandy generates custom `p
 
 - **CPU**: Auto-detected from `docker info` (number of CPUs), overridable via `SANDY_CPUS`
 - **Memory**: Auto-detected as `available - 1GB` (minimum 2GB), overridable via `SANDY_MEM`
-- **PIDs**: Hard limit of 512 processes
+- **PIDs**: `--pids-limit`, default 4096, overridable via `SANDY_PIDS_LIMIT` (a positive integer of at most 9 digits; anything else refuses the launch). The cgroup pids controller counts **threads**, not just processes: size it for every agent session the sandbox runs, background sessions under the agent view included. The fixed 512 before #603 was reached by about six background Claude sessions plus a parallel test run, and the failed fork ended every session at once. From a workspace `.sandy/config`, a value no higher than what the environment or host config resolved (default 4096) is passive; a higher one is approval-gated.
 - **Tmpfs**: `/tmp` = 1GB, `/home/sandy` = 2GB (persistent mounts bypass tmpfs)
 
 ---
@@ -1316,7 +1317,7 @@ Decided in `decisions/2026-10-12-named-claude-sessions.md`; the facts it rests o
 
 **When they apply** (host block `# BEGIN named claude sessions`, before the cross-session block): claude selected **and** not headless **and** not `--remote` **and** not `--provision` **and** `SANDY_CLAUDE_SESSIONS` (env-only) is not `0`. Otherwise one `info` line names why and nothing changes. When they apply, sandy writes `launch/<id>/sessions/<slug>/{name,receives[,session][,create][,resume][,args][,feature_args]}`, mounts that directory `:ro` at `/opt/sandy/sessions` and forwards `SANDY_CLAUDE_SESSIONS_ACTIVE=1` (always forwarded, as `0` when inactive). `args` is `$SANDBOX_DIR/agent-args.claude.<slug>` after `_sandy_filter_agent_args`. Refusals (exit `1`, `.fatal` marker so `--start` exits `6`): a malformed file; `SANDY_CHANNELS` set with no file claiming `channels`; a selected feature declaring `receives: ["cross_session"]` with no file claiming `cross_session`.
 
-**Routing.** A file claiming `cross_session` resolves the inbound posture to `accept` with `cross_session_inbound_source` `session:<slug>` (below an explicit `SANDY_CROSS_SESSION_INBOUND`, above a feature's declared need), and the `agent_args` of features declaring `receives: ["cross_session"]` are diverted from the shared claude args (`SANDY_AGENT_ARGS_CLAUDE`) to that session's `feature_args` (`_SANDY_FM_AA_DIVERT`; the marker's `agent_args` still records them, since they were passed). `SANDY_CHANNELS` is forwarded in a combo too, and the host Telegram relay does not start, because the pane is agent view.
+**Routing.** A file claiming `cross_session` resolves the inbound posture to `accept` with `cross_session_inbound_source` `session:<slug>` (below an explicit `SANDY_CROSS_SESSION_INBOUND`, above a feature's declared need), and the `agent_args` of features declaring `receives: ["cross_session"]` are diverted from the shared claude args (`SANDY_AGENT_ARGS_CLAUDE`) to that session's `feature_args` (`_SANDY_FM_AA_DIVERT`; the marker's `agent_args` still records them, since they were passed). `SANDY_CHANNELS` is forwarded in a combo too, and the host Telegram relay does not start, because the pane is agent view. The agent view's pane always reports its exit, `[sandy] Claude Code agent view exited (code: N)`, then waits for Enter, at every `SANDY_VERBOSE` level (#603); other panes report the code only at `SANDY_VERBOSE>=1`.
 
 **Bring-up** (`_sandy_claude_sessions_up` in `user-setup.sh`, after feature entries start and **before** the tmux session exists). For each session, one `claude agents --json --all` lookup (node parses it): the file's `session:` id must be a background job's `sessionId` (else `missing`); otherwise the background jobs whose `name` equals the file's `name` (a job's `sessionId` starts with its short `id`; a copy takes its prompt as its name, so it never matches) decide `resume` (exactly one), `create` (none) or `ambiguous` (several). Then **exactly one** call:
 
@@ -1546,8 +1547,8 @@ An image built before this can still carry an empty version file, and an empty v
 | User | Non-root (`sandy`, mapped to host UID) |
 | Privilege escalation | `--security-opt no-new-privileges:true` |
 | Capabilities | `--cap-drop ALL`, add back only SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER, KILL |
-| Process limit | `--pids-limit 512` |
-| Init / zombie reaping | `--init` (2.5.0, #392): Docker's `docker-init` is PID 1, reaps orphaned processes and forwards signals. Without it an orphan became a permanent zombie holding one of the 512 slots |
+| Process limit | `--pids-limit <SANDY_PIDS_LIMIT>`, default 4096 (counts threads; 512 before #603) |
+| Init / zombie reaping | `--init` (2.5.0, #392): Docker's `docker-init` is PID 1, reaps orphaned processes and forwards signals. Without it an orphan became a permanent zombie holding one of the `--pids-limit` slots |
 | Network | Per-instance isolated bridge, LAN blocked |
 | Tmpfs | `/tmp` (1GB), `/home/sandy` (2GB) |
 
@@ -2156,7 +2157,7 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 |---|---|---|
 | Container memory | `available_GB - 1`, min 2GB | Auto-detected from `docker info --format '{{.MemTotal}}'`, converted via `/1073741824`; falls back to `3g` if detection fails (4GB assumed − 1) |
 | Container CPUs | All available (from `docker info --format '{{.NCPU}}'`) | Default 2 if detection fails |
-| PID limit | 512 | `--pids-limit 512` |
+| PID limit | 4096 | `--pids-limit <SANDY_PIDS_LIMIT>`; the limit counts threads (#603) |
 | PID 1 | `docker-init` | `--init` (2.5.0, #392); the entrypoint chain and, in daemon mode, `tail -f /dev/null` run beneath it |
 | tmpfs `/tmp` | 1 GB, exec | `--tmpfs /tmp:exec,size=1G` |
 | tmpfs `/home/sandy` | 2 GB, exec | `--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001` |
@@ -2932,7 +2933,7 @@ A client with no TTY skips the pre-pass entirely; every gate then fails closed i
 --cap-add SETUID --cap-add SETGID
 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER
 --cap-add KILL
---pids-limit 512
+--pids-limit <SANDY_PIDS_LIMIT>   # default 4096 (#603)
 --init
 --read-only
 --tmpfs /tmp:exec,size=1G

@@ -980,14 +980,17 @@ _sandy_translate_args() {
 # directly to the parent shell — so the trailer is omitted.
 #
 # Under SANDY_VERBOSE>=1, the trailer also reports the exit code so the user
-# can spot non-zero exits before they're hidden by the pause prompt.
+# can spot non-zero exits before they're hidden by the pause prompt. A third
+# argument of `report` asks for that trailer at every verbosity: the agent view
+# (#603) fronts every background session, and when its daemon died the pane
+# sat in a bare `read` with nothing to say the view had gone, for hours.
 #
 # The `\$?` / `\$_exit` / `\"` escapes are deliberate: they're literal in the
 # returned string and only expand when bash evaluates it later (in the tmux
 # pane via user-setup.sh). The pre-PR-3.2 functions used the same escapes;
 # moving them into one place is the whole point of this helper.
 _sandy_wrap_cmd_exit_pause() {
-    local label="$1" cmd="$2"
+    local label="$1" cmd="$2" report="${3:-}"
     if [ "$_sandy_is_headless" = "true" ]; then
         printf '%s' "$cmd"
         return 0
@@ -999,7 +1002,7 @@ _sandy_wrap_cmd_exit_pause() {
     if [ -n "${_SANDY_AW_PATH:-}" ]; then
         cmd="$(printf '%q' "$_SANDY_AW_PATH") $cmd"
     fi
-    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ] || [ "$report" = "report" ]; then
         printf '%s' "${cmd}; _exit=\$?; echo ''; echo \"[sandy] ${label} exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
     else
         printf '%s' "${cmd}; read -p ''"
@@ -1333,7 +1336,7 @@ build_claude_agents_cmd() {
                 fi ;;
         esac
     done
-    _sandy_wrap_cmd_exit_pause "Claude Code agent view" "$cmd"
+    _sandy_wrap_cmd_exit_pause "Claude Code agent view" "$cmd" report
 }
 
 # #427: does this sandbox hold an INTERACTIVE codex session for this workspace?
