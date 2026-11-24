@@ -34939,6 +34939,252 @@ unset -f _s260_git _s260_repo _s260_pty _s260_refused _s260_mounted _s260_sep _s
 unset _S260_K _S260_MSG _S260_SRC _S260_PTY _S260_D _S260_C _S260_N _S260_T _S260_OK _S260_R _S260_G _S260_P
 echo ""
 
+# ============================================================
+section "§261: a git dir two sessions share (a superproject and its submodule checkout) keeps its commondir seed and macOS locks until the last of them ends; --unlock and --reset-sandbox leave what another running session holds (#596); a kept provisional snapshot is judged from its own path (#599)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY (#596). A superproject session and a session of one of its submodule
+# checkouts both seed and lock .git/modules/<sub>. The first to end removed
+# the seed the other's container had mounted :ro (on Linux a host rm of a
+# file that is a mount point in another mount namespace detaches the mount)
+# and, on macOS, cleared the locks the other had recorded as `preset`. Now
+# every git dir a session seeds or locks is registered in a hold
+# ($SANDY_HOME/gitdir-holds/<key>/holder.<container>), the seeds and flags
+# set there are listed in the hold, and only the last holder releases them.
+# Another holder is alive while its launcher pid runs or its container is not
+# known gone (Docker unreachable counts as there).
+#
+# The stub in front of the §248 ones answers `docker inspect -f {{.Id}} NAME`
+# per container: present for a NAME listed in $S261_PRESENT, unreachable for
+# one in $S261_UNKNOWN, gone otherwise. A session whose container stays
+# present at its end keeps its hold, as a running one does; its launcher pid
+# is gone, so only the container keeps it alive.
+_S261_B="$_A6_DIR/s261bin"; mkdir -p "$_S261_B"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in "inspect -f {{.Id}} "*)\n'
+  printf '    n="${*##* }"\n'
+  printf '    if [ -n "${S261_UNKNOWN:-}" ] && grep -qxF "$n" "$S261_UNKNOWN" 2>/dev/null; then echo "failed to connect to the docker API at unix:///var/run/docker.sock: connect: no such file or directory" >&2; exit 1; fi\n'
+  printf '    if [ -n "${S261_PRESENT:-}" ] && grep -qxF "$n" "$S261_PRESENT" 2>/dev/null; then echo deadbeef; fi\n'
+  printf '    exit 0 ;;\nesac\n'
+  printf 'exec %q "$@"\n' "$_S248_B/docker"; } > "$_S261_B/docker"
+chmod +x "$_S261_B/docker"
+_S261_PATH="$_S261_B:$_S248_PATH"
+_s261_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
+# CASE/ws a superproject (.git, .gitmodules declaring sub, .git/modules/sub);
+# CASE/ws/sub its submodule checkout (.git FILE naming that gitdir).
+_s261_fix() {   # $1 = CASE
+    local w="$_A6_DIR/$1/ws"
+    _s261_gd "$w/.git"; _s261_gd "$w/.git/modules/sub"
+    printf '[submodule "sub"]\n\tpath = sub\n\turl = ./sub\n' > "$w/.gitmodules"
+    mkdir -p "$w/sub"; printf 'gitdir: ../.git/modules/sub\n' > "$w/sub/.git"
+    : > "$_A6_DIR/$1/present"; : > "$_A6_DIR/$1/unknown"
+}
+_s261_ctr() {   # $1 = workspace -> its container name, as sandy names it
+    local h b
+    h="$(printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; })"; h="${h%% *}"
+    b="$(basename "$1" | tr -cd 'a-zA-Z0-9._-')"
+    printf 'sandy-%s-%s\n' "${b:-project}" "${h:0:8}"
+}
+_s261_run() {   # $1 = CASE  $2 = workspace  [VAR=value ...]
+    local c="$1" w="$2"; shift 2
+    _a6_launch "$c" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 A6_OS=Darwin \
+        S261_PRESENT="$_A6_DIR/$c/present" S261_UNKNOWN="$_A6_DIR/$c/unknown" PATH="$_S261_PATH" "$@" -- --workspace "$w" -p fixture
+}
+_s261_holds() { ls "$_A6_DIR/$1/sh/gitdir-holds" 2>/dev/null | wc -l | tr -d ' '; }
+# _s261_both CASE: the superproject session starts first (it seeds the
+# submodule gitdir's commondir and locks its config), then the submodule
+# session starts beside it (it finds both already set), and both run on (their
+# containers present). Then the superproject's container is gone, so the
+# superproject session has ended; its end is made by its next launch here
+# (the launch-start release of what it left, then that session's own end).
+_s261_both() {   # $1 = CASE
+    local w="$_A6_DIR/$1/ws"
+    _s261_fix "$1"
+    _s261_ctr "$w" > "$_A6_DIR/$1/present"
+    _s261_run "$1" "$w"
+    _s261_ctr "$w/sub" >> "$_A6_DIR/$1/present"
+    _s261_run "$1" "$w/sub"
+    _s261_ctr "$w/sub" > "$_A6_DIR/$1/present"
+}
+# (a) the superproject session ends while the submodule session runs on: the
+# shared submodule gitdir keeps its seed and lock; the superproject's own .git
+# is released.
+_S261_C=s261-share; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_S261_R="$( { [ -f "$_S261_G/commondir" ] && grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "fixture: the superproject session did not seed and lock the submodule gitdir"; } 2>&1)" || true
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ "$(cat "$_S261_G/commondir" 2>/dev/null)" = . ] || echo "the submodule gitdir's seed was removed under the session still using it"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "its config was unlocked under the session still using it"
+    grep -qF "Left the commondir seed and file locks of $_S261_G (held by $(_s261_ctr "$_S261_W/sub"))" "$_A6_DIR/$_S261_C/out" || echo "the superproject session does not say it left them"
+    [ ! -e "$_S261_W/.git/commondir" ] || echo "the superproject's own .git seed was kept"
+    if grep -qxF "$_S261_W/.git/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the superproject's own .git/config stayed locked"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(a)" "$_S261_C"
+check "§261(a) the superproject session, which seeded and locked the submodule gitdir, ends while its submodule checkout's session runs on: that gitdir keeps its seeded commondir and its macOS lock, and says so; the superproject's own .git is released (on 2.11.1 both went; mutation: the hold release ignoring other holders; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (b) then the submodule session ends (its container gone; its end is made by
+# its next launch): released, by the last holder, though another set them.
+: > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_S261_W/sub"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S261_G/commondir" ] || echo "the seed outlived its last holder"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the lock outlived its last holder"; fi
+    [ "$(_s261_holds "$_S261_C")" = 0 ] || echo "holds left: $(ls "$_A6_DIR/$_S261_C/sh/gitdir-holds" | tr '\n' ' ')"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(b)" "$_S261_C"
+check "§261(b) ...and once the submodule session has ended too, the seed and lock the superproject session set are released by it, the last holder, and no hold is left (mutation: the last holder releasing only its own record; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (c) the other holder's container state is unknown (Docker unreachable for
+# it): it counts as alive.
+_S261_C=s261-unk; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+: > "$_A6_DIR/$_S261_C/present"; _s261_ctr "$_S261_W/sub" > "$_A6_DIR/$_S261_C/unknown"
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ "$(cat "$_S261_G/commondir" 2>/dev/null)" = . ] || echo "the seed was removed while the other holder's container state is unknown"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "unlocked while the other holder's container state is unknown"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(c)" "$_S261_C"
+check "§261(c) a holder whose container cannot be judged (Docker unreachable) counts as alive: the shared gitdir keeps its seed and lock (mutation: unknown counted as gone; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (d) a stale holder: its launcher is gone and so is its container: pruned,
+# and the session ending releases as the last holder.
+_S261_C=s261-stale; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+: > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ ! -e "$_S261_G/commondir" ] || echo "the seed was kept for a holder that is gone"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the lock was kept for a holder that is gone"; fi
+    [ ! -e "$_A6_DIR/$_S261_C/sh/gitdir-holds/$(ls "$_A6_DIR/$_S261_C/sh/gitdir-holds" 2>/dev/null | head -n 1)/holder.$(_s261_ctr "$_S261_W/sub")" ] || echo "the stale holder entry was not pruned"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(d)" "$_S261_C"
+check "§261(d) a stale holder (its launcher and its container both gone) is pruned, and the session ending releases the shared gitdir's seed and lock as its last holder (mutation: no pruning; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (e) --unlock of the superproject refuses while the submodule session still
+# holds the shared gitdir, naming it; once that one is gone it unlocks.
+_S261_C=s261-unlock; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --unlock --workspace "$_S261_W"
+_S261_R="$( { [ "$_A6_RC" = 1 ] || echo "--unlock rc $_A6_RC, want 1"
+    grep -qF "a git dir of this workspace is also used by another running session" "$_A6_DIR/$_S261_C/out" || echo "no refusal"
+    grep -qF "$_S261_G (container $(_s261_ctr "$_S261_W/sub")" "$_A6_DIR/$_S261_C/out" || echo "the holder is not named"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "unlocked anyway"; } 2>&1)" || true
+: > "$_A6_DIR/$_S261_C/present"
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --unlock --workspace "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "--unlock rc $_A6_RC once the other session is gone"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the shared gitdir stayed locked"; fi
+    if grep -qxF "$_S261_W/.git/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the superproject's own .git/config stayed locked"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(e)" "$_S261_C"
+check "§261(e) --unlock refuses while another running session holds a git dir of the workspace, naming the dir and the session, and unlocks it once that session is gone (mutation: --unlock ignoring other holders; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (f) --reset-sandbox (which asks no Docker) of the superproject names the
+# shared gitdir it leaves, releases nothing through the holds, and leaves its
+# entries there; what sandy set in its git dirs is still released by the
+# last holder (here the superproject's next session, once the submodule
+# session is gone).
+_S261_C=s261-reset; _s261_both "$_S261_C"; _S261_W="$_A6_DIR/$_S261_C/ws"; _S261_G="$_S261_W/.git/modules/sub"
+_a6_launch "$_S261_C" A6_OS=Darwin S261_PRESENT="$_A6_DIR/$_S261_C/present" S261_UNKNOWN="$_A6_DIR/$_S261_C/unknown" PATH="$_S261_PATH" -- --reset-sandbox --workspace "$_S261_W" --keep-history --yes
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "--reset-sandbox rc $_A6_RC"
+    grep -qF "Shares git dirs with another session" "$_A6_DIR/$_S261_C/out" || echo "the plan does not say so"
+    grep -qF "  $_S261_G (container $(_s261_ctr "$_S261_W/sub")" "$_A6_DIR/$_S261_C/out" || echo "the plan does not name the dir and its holder"
+    [ "$(cat "$_S261_G/commondir" 2>/dev/null)" = . ] || echo "the shared seed was removed"
+    grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null || echo "the shared lock was cleared"; } 2>&1)" || true
+: > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_S261_W"
+_S261_R="$_S261_R$( { [ "$_A6_RC" = 0 ] || echo "launch after the reset rc $_A6_RC"
+    [ ! -e "$_S261_G/commondir" ] || echo "the shared seed was never released after the reset"
+    if grep -qxF "$_S261_G/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the shared lock was never released after the reset"; fi
+    if grep -qxF "$_S261_W/.git/config" "$_A6_DIR/$_S261_C/flags" 2>/dev/null; then echo "the superproject's own .git/config lock was stranded by the reset"; fi; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(f)" "$_S261_C"
+check "§261(f) --reset-sandbox of the superproject names the shared gitdir and its other holder, keeps that dir's seed and lock, and strands nothing: the next session to end releases what sandy set in its git dirs, its own .git included (mutation: the hold lists not consulted by the last holder; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (i) the registry is never written through a link: a link planted at
+# $SANDY_HOME/gitdir-holds is replaced by a directory of sandy's own, and
+# what it pointed at is left untouched.
+_S261_C=s261-link; _s261_fix "$_S261_C"; mkdir -p "$_A6_DIR/$_S261_C/sh" "$_A6_DIR/$_S261_C-elsewhere"
+ln -s "$_A6_DIR/$_S261_C-elsewhere" "$_A6_DIR/$_S261_C/sh/gitdir-holds"
+_s261_ctr "$_A6_DIR/$_S261_C/ws" > "$_A6_DIR/$_S261_C/present"
+_s261_run "$_S261_C" "$_A6_DIR/$_S261_C/ws"
+_S261_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
+    [ -z "$(ls -A "$_A6_DIR/$_S261_C-elsewhere")" ] || echo "written through the link: $(ls -A "$_A6_DIR/$_S261_C-elsewhere" | tr '\n' ' ')"
+    [ -d "$_A6_DIR/$_S261_C/sh/gitdir-holds" ] && [ ! -L "$_A6_DIR/$_S261_C/sh/gitdir-holds" ] || echo "the registry is not a directory of its own"
+    [ "$(_s261_holds "$_S261_C")" != 0 ] || echo "no hold recorded (the session's container is still present)"; } 2>&1)" || true
+[ -z "$_S261_R" ] || _a6_diag "§261(i)" "$_S261_C"
+check "§261(i) a link planted at \$SANDY_HOME/gitdir-holds is replaced by sandy's own directory, never written through (mutation: the registry created with mkdir -p; ${_S261_R:-ok})" \
+    test -z "$_S261_R"
+# (g) #599: a kept provisional snapshot is judged from its own path. --stop's
+# direct teardown of a supervisor-less daemon judges the pairs a provisional
+# session kept, and takes no workspace lock, so a launch of the workspace can
+# run beside it. The interleaving is made deterministic by a git stub: at the
+# judgement's core.hooksPath read (the only git call --stop makes here) it
+# plays the launch, which (g1) writes its own snapshot at the live name, or
+# (g2) sweeps that name, as a launch's stale-snapshot sweep does. Before #599
+# the judgement moved the pair to the live name, so (g1) lost the launch's own
+# snapshot to the judgement's removal and (g2) lost the judged snapshot
+# mid-report (its content check found nothing).
+_s261_599() {   # $1 = CASE  $2 = write|sweep
+    local c="$1" w="$_A6_DIR/$1/ws" sb g
+    mkdir -p "$w/.git/objects" "$w/.git/refs"; printf 'ref: refs/heads/main\n' > "$w/.git/HEAD"; printf '[core]\n' > "$w/.git/config"
+    printf 'export S261=1\n' > "$w/.envrc"
+    _a6_launch "$c" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S248_PATH"
+    sb="$(_a6_sandbox "$c")"
+    printf 'changed\n' >> "$w/.envrc"; mkdir -p "$w/.vscode"; printf '{}\n' > "$w/.vscode/tasks.json"
+    g="$_A6_DIR/$c/gitbin"; mkdir -p "$g"
+    { printf '#!/bin/sh\n'
+      printf 'case "$*" in *core.hooksPath*) if [ ! -e %q ]; then : > %q\n' "$_A6_DIR/$c/played" "$_A6_DIR/$c/played"
+      if [ "$2" = write ]; then printf "        printf '#launch-own\\\\n' > %q\n" "$sb/.protected-existed-at-launch"
+      else printf '        rm -f %q\n' "$sb/.protected-existed-at-launch"; fi
+      printf '    fi ;;\nesac\nexec %q "$@"\n' "$(command -v git)"; } > "$g/git"
+    chmod +x "$g/git"; : > "$_A6_DIR/$c/mounts"
+    _a6_launch "$c" A6_OS=Darwin S248_DPID=2147480000 S248_SESS="$(basename "$sb")" S248_MOUNTS="$_A6_DIR/$c/mounts" \
+        S248_GONE="$_A6_DIR/$c/gone" PATH="$g:$_S261_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$w"
+}
+# A daemon container of the workspace with no live supervisor, as §248's
+# daemon stub plays it: the labels --stop reads, then gone once removed.
+_S261_DB="$_A6_DIR/s261dbin"; mkdir -p "$_S261_DB"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in\n'
+  printf '    "ps -q "*) echo c0ffee0000000001; exit 0 ;;\n'
+  printf '    *sandy.daemon_pid*) echo "$S248_DPID"; exit 0 ;;\n'
+  printf '    *sandy.session*) if [ -n "${S248_GONE:-}" ] && [ -e "$S248_GONE" ]; then echo "Error: No such object" >&2; exit 1; fi; echo "$S248_SESS"; exit 0 ;;\n'
+  printf '    *Mounts*) cat "$S248_MOUNTS"; exit 0 ;;\n'
+  printf '    *State.Running*) echo true; exit 0 ;;\n'
+  printf '    "rm -f c0ffee"*) if [ -n "${S248_GONE:-}" ]; then : > "$S248_GONE"; fi; exit 0 ;;\n'
+  printf '    exec*|stop*) exit 0 ;;\n'
+  printf 'esac\nexec %q "$@"\n' "$_S248_B/docker"; } > "$_S261_DB/docker"
+chmod +x "$_S261_DB/docker"
+if :; then
+    _s261_599 s261-599w write
+    _S261_S="$(_a6_sandbox s261-599w)"; _S261_W="$_A6_DIR/s261-599w/ws"
+    _S261_R="$( { [ -e "$_A6_DIR/s261-599w/played" ] || echo "the interleaving did not happen (no core.hooksPath read during the judgement; rc $_A6_RC)"
+        [ "$(cat "$_S261_S/.protected-existed-at-launch" 2>/dev/null)" = '#launch-own' ] || echo "the concurrent launch's own snapshot was lost: [$(cat "$_S261_S/.protected-existed-at-launch" 2>/dev/null | head -c 80)]"
+        grep -qF "$_S261_W/.vscode/" "$_S261_S/.session-end-report" 2>/dev/null || echo "the judgement does not name the .vscode/ written after the provisional report"
+        [ -z "$(ls -A "$_S261_S/.protected-provisional" 2>/dev/null)" ] || echo "left: $(ls -A "$_S261_S/.protected-provisional")"; } 2>&1)" || true
+    [ -z "$_S261_R" ] || _a6_diag "§261(g1)" s261-599w
+    check "§261(g1) --stop's judgement of a kept provisional snapshot, with a launch writing its own snapshot meanwhile: the launch's snapshot survives and the judgement still reports the earlier session (mutation: the pair moved to the live name and removed from there, as before #599; ${_S261_R:-ok})" \
+        test -z "$_S261_R"
+    _s261_599 s261-599s sweep
+    _S261_S="$(_a6_sandbox s261-599s)"; _S261_W="$_A6_DIR/s261-599s/ws"
+    _S261_R="$( { [ -e "$_A6_DIR/s261-599s/played" ] || echo "the interleaving did not happen (rc $_A6_RC)"
+        awk '/Protected files CHANGED during this session/ { on = 1 } on' "$_S261_S/.session-end-report" 2>/dev/null | grep -qF "$_S261_W/.envrc" || echo "the content check of the judged snapshot found nothing: it was swept mid-judgement"; } 2>&1)" || true
+    [ -z "$_S261_R" ] || _a6_diag "§261(g2)" s261-599s
+    check "§261(g2) ...and with a launch sweeping the live snapshot name meanwhile, the judgement still completes: its content check names the changed .envrc (mutation: judged from the live name; ${_S261_R:-ok})" \
+        test -z "$_S261_R"
+    # (h) --stop's own report of the live snapshot leaves it alone while a
+    # live launch holds the workspace lock: it is that launch's.
+    _S261_C=s261-599l; _S261_W="$_A6_DIR/$_S261_C/ws"; mkdir -p "$_S261_W"; _S261_S="$(_a6_sandbox "$_S261_C")"; mkdir -p "$_S261_S"
+    printf '%s\n' '#launch-own' '#gitdirs-recorded' > "$_S261_S/.protected-existed-at-launch"; : > "$_A6_DIR/$_S261_C/mounts"
+    sleep 60 </dev/null >/dev/null 2>&1 &
+    _S261_P=$!
+    mkdir -p "${_S261_S%/*}/.${_S261_S##*/}.lock"; printf '%s\n' "$_S261_P" > "${_S261_S%/*}/.${_S261_S##*/}.lock/pid"
+    _a6_launch "$_S261_C" S248_DPID=2147480000 S248_SESS="$(basename "$_S261_S")" S248_MOUNTS="$_A6_DIR/$_S261_C/mounts" \
+        S248_GONE="$_A6_DIR/$_S261_C/gone" PATH="$_S261_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S261_W"
+    kill "$_S261_P" 2>/dev/null || true; wait "$_S261_P" 2>/dev/null || true
+    _S261_R="$( { [ "$(head -n 1 "$_S261_S/.protected-existed-at-launch" 2>/dev/null)" = '#launch-own' ] || echo "the live snapshot of the running launch was taken"
+        grep -qF "A launch of this workspace is running (pid $_S261_P)" "$_A6_DIR/$_S261_C/out" || echo "not said"; } 2>&1)" || true
+    [ -z "$_S261_R" ] || _a6_diag "§261(h)" "$_S261_C"
+    check "§261(h) --stop's direct teardown leaves the live snapshot alone while a live launch holds the workspace lock, and says so (mutation: no lock check; ${_S261_R:-ok})" \
+        test -z "$_S261_R"
+fi
+_a6_done
+unset -f _s261_gd _s261_fix _s261_ctr _s261_run _s261_holds _s261_both _s261_599
+unset _S261_B _S261_PATH _S261_C _S261_W _S261_G _S261_R _S261_RC1 _S261_RC2 _S261_S _S261_DB _S261_P
+echo ""
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

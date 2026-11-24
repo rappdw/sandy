@@ -3613,7 +3613,7 @@ x" ]; then return 0; fi
 # Lines of an earlier launch's record that still name sandy's file are kept,
 # so a later cleanup removes them.
 _sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
-    local _rec _k _h _i _keep="" _g _d _w _a
+    local _rec _k _h _i _keep="" _g _d _w _a _dirs
     _sandy_commondir_record "$2" _rec
     _sandy_commondir_fix_dirs "$1" "$2"
     if [ -f "$_rec" ]; then
@@ -3622,27 +3622,44 @@ _sandy_commondir_seed() {   # $1 = workspace  $2 = sandbox
         done < "$_rec"
     fi
     printf '%s' "$_keep" > "$_rec"
-    _sandy_commondir_seed_enabled || { [ -s "$_rec" ] || rm -f "$_rec"; return 0; }
+    # #596: every git dir seeded here (and locked later) is registered as held
+    # by this session first, so another session sharing it keeps its seed and
+    # locks until both have ended.
+    _dirs=""
     for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
         [ -d "$_g" ] && [ ! -L "$_g" ] || continue
         case "$_g" in "$1"/*) _a="$1" ;; *) _a="$_g" ;; esac
         if _sandy_path_symlink_component "$1" "$_g" >/dev/null 2>&1 && [ "$_a" = "$1" ]; then continue; fi
-        _sandy_commondir_seed_one "$_a" "$_g" "$_rec"
+        _dirs="$_dirs$_a"$'\t'"$_g"$'\n'
         while IFS= read -r _d; do
-            [ -n "$_d" ] && _sandy_commondir_seed_one "$_a" "$_d" "$_rec"
+            [ -n "$_d" ] && _dirs="$_dirs$_a"$'\t'"$_d"$'\n'
         done < <(_sandy_git_admin_dirs_of "$_g")
     done
+    while IFS=$'\t' read -r _a _d; do
+        [ -n "$_d" ] && _sandy_hold_add "$_d"
+    done <<< "$_dirs"
+    if _sandy_commondir_seed_enabled; then
+        while IFS=$'\t' read -r _a _d; do
+            [ -n "$_d" ] && _sandy_commondir_seed_one "$_a" "$_d" "$_rec"
+        done <<< "$_dirs"
+    fi
     [ -s "$_rec" ] || rm -f "$_rec"
+    _sandy_hold_sync "$2"
     return 0
 }
 # Session end: remove each commondir sandy created that is still exactly
 # what it created. One the session changed stays (the content report names it).
-_sandy_commondir_unseed() {   # $1 = sandbox
-    local _rec _k _h _i _f
+# One in a git dir this sandbox holds is the hold's (#596): skipped here.
+_sandy_commondir_unseed() {   # $1 = sandbox (or a hold dir)
+    local _rec _k _h _i _f _skip
     _sandy_commondir_record "$1" _rec
     [ -f "$_rec" ] || return 0
+    _sandy_hold_skipset "$1" _skip
     while IFS=$'\t' read -r _k _h _i; do
         [ "$_k" = seeded ] || continue
+        if [ -n "$_skip" ] && _sandy_unhex "$_h" _f; then
+            case "$_skip" in *$'\n'"${_f%/*}"$'\n'*) continue ;; esac
+        fi
         if _sandy_commondir_is_ours "$_h" "$_i"; then
             _sandy_unhex "$_h" _f && rm -f "$_f"
         fi
@@ -3650,6 +3667,260 @@ _sandy_commondir_unseed() {   # $1 = sandbox
     rm -f "$_rec"
     return 0
 }
+# --- Git dir hold registry (#596) --------------------------------------------
+# Two sessions can share one git directory: a superproject session and a
+# session of one of its submodule checkouts both seed and lock
+# .git/modules/<sub>. A seed or a lock there is released only by the LAST
+# session that holds that git dir, so one session's end never removes a seed
+# another session's container has mounted :ro, nor clears the macOS locks it
+# relies on. Private state, never mounted, under $SANDY_HOME/gitdir-holds/
+# (0700): one directory (0700) per git dir, named for its physical path (`x`
+# and the path in hex, or `s` and its SHA-256 when that is longer than 200
+# characters), holding:
+#   path               the physical path, hex
+#   holder.<container> one per session holding it: pid<TAB><launcher pid>,
+#                      ws<TAB><workspace, hex>; <container> is sandy-<sandbox>
+#   .commondir-seeded  the commondir files sandy created in it (the record
+#   .uchg-locked       format) and the macOS flags sandy set there, whichever
+#                      session did: what the last holder releases
+#   lock               a short mutex (noclobber create; a dead pid's is taken)
+# A session registers (_sandy_hold_add) every git dir _sandy_commondir_seed and
+# _sandy_uchg_lock act on before it seeds or locks anything there, and lists
+# them in $SANDBOX_DIR/.gitdir-holds (<key><TAB><dir as spelled, hex>). Its
+# own records keep their lines, but its own unlock and unseed skip any line in
+# a held dir: the hold releases those (_sandy_hold_release), and only when no
+# other holder remains. Another holder counts as alive while its launcher pid
+# runs or its container is not known gone (_sandy_container_gone: Docker not
+# reachable counts as there); one that is neither is pruned. A crashed
+# session's entry only keeps the protections longer.
+_sandy_hold_root() { printf '%s/gitdir-holds' "$SANDY_HOME"; }
+# A directory of the registry: created 0700 when absent; a link or a
+# non-directory there is removed first (never written through).
+_sandy_hold_mkdir() {   # $1 = directory
+    if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then rm -f "$1" 2>/dev/null || return 1; fi
+    [ -d "$1" ] || mkdir -m 700 "$1" 2>/dev/null || [ -d "$1" ] || return 1
+    [ -d "$1" ] && [ ! -L "$1" ]
+}
+# The physical path of directory $1 into variable $2, its key into $3.
+_sandy_hold_key() {   # $1 = dir  $2 $3 = variables
+    local _hk_p _hk_x
+    _hk_p="$(CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$_hk_p" ] || return 1
+    while case "$_hk_p" in //*) true ;; *) false ;; esac; do _hk_p="${_hk_p#/}"; done
+    _sandy_hex "$_hk_p" _hk_x
+    if [ ${#_hk_x} -gt 200 ]; then
+        _hk_x="$(printf '%s' "$_hk_p" | sha256)"; _hk_x="s${_hk_x%% *}"
+    else
+        _hk_x="x$_hk_x"
+    fi
+    printf -v "$2" '%s' "$_hk_p"; printf -v "$3" '%s' "$_hk_x"
+}
+# Take / drop the mutex of hold dir $1. Taking it waits up to about 5 s for a
+# live holder; one whose pid is gone is taken over. Returns 1 when it could not
+# be taken (the caller then keeps what it would have released).
+_sandy_hold_lock() {   # $1 = hold dir
+    local _hl_n=0 _hl_p _hl_c=""
+    case $- in *C*) _hl_c=1 ;; esac
+    while :; do
+        [ -d "$1" ] && [ ! -L "$1" ] || return 1
+        set -C
+        if { printf '%s\n' "$$" > "$1/lock"; } 2>/dev/null; then
+            [ -n "$_hl_c" ] || set +C
+            return 0
+        fi
+        [ -n "$_hl_c" ] || set +C
+        _hl_p=""
+        { IFS= read -r _hl_p < "$1/lock"; } 2>/dev/null || true
+        case "$_hl_p" in ''|*[!0-9]*) ;; *)
+            if ! kill -0 "$_hl_p" 2>/dev/null; then rm -f "$1/lock" 2>/dev/null || true; continue; fi ;;
+        esac
+        _hl_n=$((_hl_n + 1))
+        [ "$_hl_n" -lt 100 ] || return 1
+        sleep 0.05
+    done
+}
+_sandy_hold_unlock() { rm -f "$1/lock" 2>/dev/null || true; }
+# Register this session (sandbox $SANDBOX_DIR, container $CONTAINER_NAME,
+# workspace $WORK_DIR) as a holder of git dir $1. Once per dir per launch.
+_sandy_hold_add() {   # $1 = git dir, as spelled
+    local _ha_p _ha_k _ha_r _ha_d _ha_x _ha_s _ha_t
+    [ -n "${CONTAINER_NAME:-}" ] && [ -n "${SANDBOX_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] || return 0
+    case $'\n'"${_SANDY_HOLD_ADDED:-}" in *$'\n'"$1"$'\n'*) return 0 ;; esac
+    _SANDY_HOLD_ADDED="${_SANDY_HOLD_ADDED:-}$1"$'\n'
+    _sandy_hold_key "$1" _ha_p _ha_k || return 0
+    _ha_r="$SANDY_HOME/gitdir-holds"
+    _sandy_hold_mkdir "$_ha_r" || { warn "Could not use $_ha_r: a git dir this session shares may lose its protections early."; return 0; }
+    _ha_d="$_ha_r/$_ha_k"
+    _sandy_hex "$_ha_p" _ha_x; _sandy_hex "$WORK_DIR" _ha_s
+    # A last holder may remove the hold while this waits for its lock: then
+    # it is created afresh (three tries).
+    for _ha_t in 1 2 3; do
+        _sandy_hold_mkdir "$_ha_d" || return 0
+        if _sandy_hold_lock "$_ha_d"; then
+            [ -f "$_ha_d/path" ] || printf '%s\n' "$_ha_x" > "$_ha_d/path"
+            printf 'pid\t%s\nws\t%s\n' "$$" "$_ha_s" > "$_ha_d/holder.$CONTAINER_NAME"
+            _sandy_hold_unlock "$_ha_d"
+            break
+        fi
+        [ -d "$_ha_d" ] || continue
+        # A lock that stays busy: registered without it (holding only ever
+        # keeps protections longer).
+        printf 'pid\t%s\nws\t%s\n' "$$" "$_ha_s" > "$_ha_d/holder.$CONTAINER_NAME" 2>/dev/null || true
+        break
+    done
+    _sandy_hex "$1" _ha_x
+    printf '%s\t%s\n' "$_ha_k" "$_ha_x" >> "$SANDBOX_DIR/.gitdir-holds"
+    return 0
+}
+# True when holder file $1 is alive: its launcher pid runs, or its container
+# ($2) is not known gone.
+_sandy_hold_holder_alive() {   # $1 = holder file  $2 = container
+    local _hh_k _hh_v _hh_p=""
+    while IFS=$'\t' read -r _hh_k _hh_v; do [ "$_hh_k" != pid ] || _hh_p="$_hh_v"; done 2>/dev/null < "$1"
+    case "$_hh_p" in ''|*[!0-9]*) ;; *) if kill -0 "$_hh_p" 2>/dev/null; then return 0; fi ;; esac
+    ! _sandy_container_gone "$2"
+}
+# The spelled dirs sandbox $1 holds, newline-separated, into variable $2.
+_sandy_hold_skipset() {   # $1 = sandbox  $2 = variable
+    local _hs_k _hs_x _hs_d _hs_o=$'\n'
+    if [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ]; then
+        while IFS=$'\t' read -r _hs_k _hs_x; do
+            _sandy_unhex "$_hs_x" _hs_d && [ -n "$_hs_d" ] && _hs_o="$_hs_o$_hs_d"$'\n'
+        done < "$1/.gitdir-holds"
+    fi
+    [ "$_hs_o" != $'\n' ] || _hs_o=""
+    printf -v "$2" '%s' "$_hs_o"
+}
+# Copy the seeds and the flags sandbox $1's records hold for a held dir into
+# that dir's hold, so the last holder releases them whichever session made
+# them (a flag only once it is set: ctime recorded).
+_sandy_hold_sync() {   # $1 = sandbox
+    local _sy_hf="$1/.gitdir-holds" _sy_r _sy_k _sy_h _sy_x _sy_y _sy_f _sy_d _sy_hk _sy_hx _sy_hd _sy_t _sy_l _sy_root
+    [ -f "$_sy_hf" ] && [ ! -L "$_sy_hf" ] || return 0
+    _sy_root="$SANDY_HOME/gitdir-holds"
+    for _sy_r in .commondir-seeded .uchg-locked; do
+        [ -f "$1/$_sy_r" ] || continue
+        while IFS=$'\t' read -r _sy_k _sy_h _sy_x _sy_y; do
+            case "$_sy_r:$_sy_k" in
+                .commondir-seeded:seeded) _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x" ;;
+                .uchg-locked:locked) [ -n "$_sy_y" ] && [ "$_sy_y" != - ] || continue
+                                     _sy_l="$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'"$_sy_y" ;;
+                *) continue ;;
+            esac
+            _sandy_unhex "$_sy_h" _sy_f || continue
+            _sy_d="${_sy_f%/*}"; _sy_hd=""
+            while IFS=$'\t' read -r _sy_hk _sy_hx; do
+                _sandy_unhex "$_sy_hx" _sy_t || continue
+                if [ "$_sy_t" = "$_sy_d" ]; then _sy_hd="$_sy_root/$_sy_hk"; break; fi
+            done < "$_sy_hf"
+            [ -n "$_sy_hd" ] && [ -d "$_sy_hd" ] && [ ! -L "$_sy_hd" ] || continue
+            if [ -f "$_sy_hd/$_sy_r" ]; then
+                _sy_t=""
+                while IFS= read -r _sy_t; do
+                    case "$_sy_t" in "$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"|"$_sy_k"$'\t'"$_sy_h"$'\t'"$_sy_x"$'\t'*) _sy_t=HIT; break ;; esac
+                done < "$_sy_hd/$_sy_r"
+                [ "$_sy_t" != HIT ] || continue
+            fi
+            printf '%s\n' "$_sy_l" >> "$_sy_hd/$_sy_r"
+        done < "$1/$_sy_r"
+    done
+    return 0
+}
+# The held dirs of sandbox $1 that another holder (not container $2) alive
+# still holds: one "<dir><TAB><holder container><TAB><its workspace>" line
+# each, on stdout. Read-only. With $3 = nodocker no container is asked about:
+# every other holder counts (--reset-sandbox asks no Docker).
+_sandy_hold_others() {   # $1 = sandbox  $2 = container  [$3 = nodocker]
+    local _ho_k _ho_x _ho_d _ho_e _ho_n _ho_kk _ho_v _ho_w _ho_root
+    [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ] || return 0
+    _ho_root="$SANDY_HOME/gitdir-holds"
+    while IFS=$'\t' read -r _ho_k _ho_x; do
+        _ho_d="$_ho_root/$_ho_k"
+        [ -d "$_ho_d" ] && [ ! -L "$_ho_d" ] || continue
+        for _ho_e in "$_ho_d"/holder.*; do
+            [ -f "$_ho_e" ] || continue
+            _ho_n="${_ho_e##*/holder.}"
+            [ "$_ho_n" != "$2" ] || continue
+            [ "${3:-}" = nodocker ] || _sandy_hold_holder_alive "$_ho_e" "$_ho_n" || continue
+            _ho_w=""
+            while IFS=$'\t' read -r _ho_kk _ho_v; do [ "$_ho_kk" != ws ] || _sandy_unhex "$_ho_v" _ho_w; done 2>/dev/null < "$_ho_e"
+            _sandy_unhex "$_ho_x" _ho_x
+            printf '%s\t%s\t%s\n' "$_ho_x" "$_ho_n" "$_ho_w"
+            break
+        done
+    done < "$1/.gitdir-holds"
+    return 0
+}
+# Session end, for sandbox $1 (workspace $2) whose container $3 is known gone:
+# drop its holder entry from each git dir it holds, prune holders that are
+# neither running nor have a container, and, where none is left, release what
+# the hold lists (the macOS flags, then the commondir seeds) and remove the
+# hold. Where another holder remains, nothing is released; each such dir is
+# named in _SANDY_HOLD_KEPT ("<dir> (held by <container>)" lines).
+_sandy_hold_release() {   # $1 = sandbox  $2 = workspace  $3 = container
+    local _hr_k _hr_x _hr_d _hr_e _hr_n _hr_o _hr_root _hr_p _hr_dead
+    _SANDY_HOLD_KEPT=""
+    [ -f "$1/.gitdir-holds" ] && [ ! -L "$1/.gitdir-holds" ] || return 0
+    _hr_root="$SANDY_HOME/gitdir-holds"
+    while IFS=$'\t' read -r _hr_k _hr_x; do
+        _hr_d="$_hr_root/$_hr_k"
+        [ -d "$_hr_d" ] && [ ! -L "$_hr_d" ] || continue
+        _sandy_unhex "$_hr_x" _hr_p || _hr_p="$_hr_k"
+        if ! _sandy_hold_lock "$_hr_d"; then
+            _SANDY_HOLD_KEPT="$_SANDY_HOLD_KEPT$_hr_p (its hold is busy)"$'\n'
+            continue
+        fi
+        # Its own entry goes with the hold (last holder) or with the lock.
+        _hr_o=""; _hr_dead=""
+        for _hr_e in "$_hr_d"/holder.*; do
+            [ -f "$_hr_e" ] || continue
+            _hr_n="${_hr_e##*/holder.}"
+            [ "$_hr_n" != "$3" ] || continue
+            if _sandy_hold_holder_alive "$_hr_e" "$_hr_n"; then _hr_o="$_hr_o${_hr_o:+, }$_hr_n"; else _hr_dead="$_hr_dead$_hr_e"$'\n'; fi
+        done
+        if [ -n "$_hr_o" ]; then
+            _SANDY_HOLD_KEPT="$_SANDY_HOLD_KEPT$_hr_p (held by $_hr_o)"$'\n'
+            # Stale ones pruned, this one dropped, the lock released: one rm.
+            local -a _hr_rm=("$_hr_d/holder.$3" "$_hr_d/lock")
+            while IFS= read -r _hr_e; do [ -z "$_hr_e" ] || _hr_rm+=("$_hr_e"); done <<< "$_hr_dead"
+            rm -f "${_hr_rm[@]}" 2>/dev/null || true
+            continue
+        fi
+        # The last holder: what sandy set in this git dir, by any session.
+        if [ -f "$_hr_d/.uchg-locked" ]; then _sandy_uchg_unlock "$_hr_d" "$2" || true; fi
+        if [ -f "$_hr_d/.commondir-seeded" ]; then _sandy_commondir_unseed "$_hr_d"; fi
+        if [ -f "$_hr_d/.uchg-locked" ]; then
+            # A flag the unlock could not clear stays listed (sandy --unlock).
+            rm -f "$_hr_d/holder.$3" "$_hr_d/lock" 2>/dev/null || true
+        else
+            # Nothing left to release and no holder: the hold goes, its lock
+            # with it (a session adding itself now waits on that lock, then
+            # finds no directory and creates a fresh one).
+            rm -rf "$_hr_d" 2>/dev/null || _sandy_hold_unlock "$_hr_d"
+        fi
+    done < "$1/.gitdir-holds"
+    return 0
+}
+# Every release path of a session's protections (cleanup, --stop's direct
+# teardown, a launch's stale-record cleanup, --unlock, --reset-sandbox), for
+# sandbox $1 (workspace $2) whose container $3 is known gone: the holds
+# first, then the session's own records (whose lines in held dirs it skips),
+# then its list of holds. Says which shared git dirs it left protected.
+# Returns the unlock's status (1: a flag sandy set could not be cleared).
+_sandy_release_session_protections() {   # $1 = sandbox  $2 = workspace  $3 = container
+    local _rp_rc=0 _rp_l
+    _sandy_hold_release "$1" "$2" "$3"
+    if [ -f "$(_sandy_uchg_record "$1")" ]; then _sandy_uchg_unlock "$1" "$2" || _rp_rc=1; fi
+    _sandy_commondir_unseed "$1"
+    rm -f "$1/.gitdir-holds" 2>/dev/null || true
+    if [ -n "${_SANDY_HOLD_KEPT:-}" ]; then
+        while IFS= read -r _rp_l; do
+            [ -n "$_rp_l" ] && info "Left the commondir seed and file locks of $_rp_l to the session that still uses it."
+        done <<< "$_SANDY_HOLD_KEPT"
+    fi
+    return "$_rp_rc"
+}
+
 _sandy_uchg_is_set() {
     case ",$(exec stat -f '%Sf' "$1" 2>/dev/null)," in *,uchg,*) return 0 ;; esac
     return 1
@@ -3737,7 +4008,7 @@ _sandy_uchg_lock() {
         [ -n "$_ino" ] || continue
         _lines="${_lines}locked"$'\t'"$_hx"$'\t'"$_ino"$'\t'-$'\n'
     done < <(_sandy_uchg_targets "$2")
-    [ -n "$_lines" ] || return 0
+    [ -n "$_lines" ] || { _sandy_hold_sync "$1"; return 0; }
     _sandy_uchg_write_record "$_rec" "$_kept$_lines" || { warn "Could not record the macOS file locks; not locking."; return 0; }
     while IFS=$'\t' read -r _k _h _x _y; do
         [ -n "$_k" ] || continue
@@ -3762,6 +4033,7 @@ _sandy_uchg_lock() {
     done <<< "$_lines"
     _sandy_uchg_write_record "$_rec" "$_kept$_lines2" || true
     [ -z "$_failed" ] || warn "Could not lock (chflags uchg):$_failed"
+    _sandy_hold_sync "$1"
     return 0
 }
 # $1 = sandbox dir  $2 = workspace. Clears exactly the flags the record says
@@ -3770,9 +4042,11 @@ _sandy_uchg_lock() {
 # through no link. Returns 0 when no lock of sandy's is left, 1 otherwise
 # (each named).
 _sandy_uchg_unlock() {
-    local _rec _k _h _x _y _f _s _lnk _keep="" _rc=0 _ul_i _ul_c
+    local _rec _k _h _x _y _f _s _lnk _keep="" _rc=0 _ul_i _ul_c _skip
     _sandy_uchg_record "$1" _rec
     [ -f "$_rec" ] || return 0
+    # #596: a flag in a git dir this sandbox holds is the hold's to clear.
+    _sandy_hold_skipset "$1" _skip
     if ! command -v chflags >/dev/null 2>&1; then
         warn "Files sandy locked on this workspace are listed in $_rec, but chflags is not available to unlock them."
         return 1
@@ -3791,6 +4065,9 @@ _sandy_uchg_unlock() {
                 continue
             fi
             _sandy_hex "$_f" _h
+        fi
+        if [ -n "$_skip" ]; then
+            case "$_skip" in *$'\n'"${_f%/*}"$'\n'*) continue ;; esac
         fi
         _sandy_uchg_show "$_f" _s
         { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
@@ -4077,9 +4354,12 @@ _sandy_note_session_created_sandy_dir() {
 # the snapshot. It used to be inline in cleanup(); it is a function so that
 # --stop's direct teardown of a supervisor-less daemon runs exactly the same
 # checks (it used to run only the content check).
-# $1 = sandbox dir  $2 = workspace. Returns 0 always.
+# $1 = sandbox dir  $2 = workspace  [$3 = the snapshot, default
+# $1/.protected-existed-at-launch]. Returns 0 always.
 _sandy_session_end_protected_report() {
     local SANDBOX_DIR="$1" WORK_DIR="$2"
+    # #599: the snapshot judged ($3; default the live one), read from its own path.
+    local _snapf="${3:-$1/.protected-existed-at-launch}"
     local _new_protected _changed_protected _replaced_protected _pd _pf _fp0 _cfg_hooks
     local _sandy_df_flagged _rm_args _rm_links _seen_links _e _p _lnk _tgt _lhex0 _lhex _hchg
     # One measurement of each directory for the whole report (_sandy_path_identity).
@@ -4097,7 +4377,7 @@ _sandy_session_end_protected_report() {
     # legitimate ("set up .vscode/settings.json for this project") or a
     # prompt injection. Surface the change, let the user decide.
     if [ -n "${SANDBOX_DIR:-}" ] \
-            && [ -f "$SANDBOX_DIR/.protected-existed-at-launch" ] \
+            && [ -f "$_snapf" ] \
             && [ -n "${WORK_DIR:-}" ]; then
         _new_protected=()
         _changed_protected=()
@@ -4108,7 +4388,7 @@ _sandy_session_end_protected_report() {
             local -a _pre=()
             { while IFS= read -r _pd || [ -n "$_pd" ]; do
                 case "$_pd" in ""|"#"*) ;; *) _pre+=("$WORK_DIR/$_pd") ;; esac
-            done < "$SANDBOX_DIR/.protected-existed-at-launch"; } 2>/dev/null || true
+            done < "$_snapf"; } 2>/dev/null || true
             _sandy_path_identity_prefill ${_pre[@]+"${_pre[@]}"} || true
         fi
         while IFS= read -r _pd; do
@@ -4116,14 +4396,14 @@ _sandy_session_end_protected_report() {
             # Only flag dirs that DIDN'T exist at launch but DO now (with content).
             # One that existed at launch is reported only if the session REPLACED
             # it (a separate list: it was the user's, so no removal is offered).
-            if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = "$_pd"; then
-                if _sandy_replaced_since_launch "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+            if _sandy_snap_scan "$_snapf" = "$_pd"; then
+                if _sandy_replaced_since_launch "$_pd" "$_snapf"; then
                     _replaced_protected+=("$_pd")
                 fi
                 continue
             fi
             # ...or that existed with no overlay (a #content fingerprint) and changed.
-            _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" '#content' "$_pd" _fp0 || true
+            _sandy_snap_scan "$_snapf" '#content' "$_pd" _fp0 || true
             _fp0="${_fp0#x}"
             if [ -n "$_fp0" ]; then
                 if [ -d "$WORK_DIR/$_pd" ] && { [ "$_fp0" = unhashable ] \
@@ -4146,8 +4426,8 @@ _sandy_session_end_protected_report() {
         # persists to the host workspace and otherwise goes unreported.
         while IFS= read -r _pf; do
             [ -z "$_pf" ] && continue
-            if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = "$_pf"; then
-                if _sandy_replaced_since_launch "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+            if _sandy_snap_scan "$_snapf" = "$_pf"; then
+                if _sandy_replaced_since_launch "$_pf" "$_snapf"; then
                     _replaced_protected+=("$_pf")
                 fi
                 continue
@@ -4162,8 +4442,8 @@ _sandy_session_end_protected_report() {
         # flag it if it now exists with content. git hooks fire on the user's next
         # host git operation, so this belongs in the same warning.
         _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
-        if [ -n "$_cfg_hooks" ] && _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = "$_cfg_hooks"; then
-            if _sandy_replaced_since_launch "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch"; then
+        if [ -n "$_cfg_hooks" ] && _sandy_snap_scan "$_snapf" = "$_cfg_hooks"; then
+            if _sandy_replaced_since_launch "$_cfg_hooks" "$_snapf"; then
                 _replaced_protected+=("$_cfg_hooks")
             fi
         elif [ -n "$_cfg_hooks" ] \
@@ -4176,7 +4456,7 @@ _sandy_session_end_protected_report() {
         # nor the container can reach, so that approval prompt can say who
         # wrote it. Runs in the daemon supervisor's cleanup too (--stop).
         _sandy_df_flagged=false
-        if _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" session-end; then
+        if _sandy_note_session_created_sandy_dir "$_snapf" session-end; then
             _sandy_df_flagged=true
         fi
         if [ ${#_new_protected[@]} -gt 0 ] || [ ${#_changed_protected[@]} -gt 0 ]; then
@@ -4194,7 +4474,7 @@ _sandy_session_end_protected_report() {
                     _tgt="$(readlink "$WORK_DIR/$_lnk" 2>/dev/null || echo '?')"
                     # Target at launch, hex-encoded (#link<TAB>link<TAB>hex); "x" alone = recorded
                     # with an unreadable target, nothing = not there at launch.
-                    _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" '#link' "$_lnk" _lhex0 || true
+                    _sandy_snap_scan "$_snapf" '#link' "$_lnk" _lhex0 || true
                     _sandy_link_hex "$WORK_DIR/$_lnk" _lhex || true
                     _lhex="x$_lhex"
                     if [ -n "$_lhex0" ] && [ "$_lhex0" = "$_lhex" ]; then
@@ -4284,19 +4564,19 @@ _sandy_session_end_protected_report() {
         fi
         # Protected FILES whose contents changed although mounted :ro (#hash
         # records; _sandy_protected_hash_snapshot). Reported, never restored.
-        _sandy_protected_hash_changed "$SANDBOX_DIR/.protected-existed-at-launch" _hchg || true
+        _sandy_protected_hash_changed "$_snapf" _hchg || true
         _sandy_protected_hash_report "$_hchg" "$SANDBOX_DIR/.protected-copies"
         # .env files created or changed in-session (#envfile records; only
         # when the launch recorded them).
-        _sandy_env_file_report "$SANDBOX_DIR/.protected-existed-at-launch" "$WORK_DIR"
+        _sandy_env_file_report "$_snapf" "$WORK_DIR"
         # Git admin dirs created in-session (#gitdir records; only when the
         # launch got as far as recording them).
-        if _sandy_snap_scan "$SANDBOX_DIR/.protected-existed-at-launch" = '#gitdirs-recorded'; then
-            _sandy_git_admin_report "$SANDBOX_DIR/.protected-existed-at-launch"
+        if _sandy_snap_scan "$_snapf" = '#gitdirs-recorded'; then
+            _sandy_git_admin_report "$_snapf"
         fi
         # Kept while the container may still write (cleanup(), #584): the
         # workspace is judged against it again once the container is gone.
-        [ "${_SANDY_SNAP_KEEP:-}" = 1 ] || rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
+        [ "${_SANDY_SNAP_KEEP:-}" = 1 ] || rm -f "$_snapf"
     fi
     return 0
 }
@@ -4347,10 +4627,14 @@ _sandy_session_report_add() {
 # $3 = stop it is only recorded (--stop prints the record once it is done, so
 # printing it here too would show it twice). When it cannot be recorded it is
 # printed. $4 names the report function (default: the whole report,
-# _sandy_session_end_protected_report). Returns 0 always.
+# _sandy_session_end_protected_report); $5 the snapshot it judges (default
+# $1/.protected-existed-at-launch), passed to it as its $3 (#599: a kept
+# snapshot is judged where it lies, never moved to the live name a launch
+# uses). Returns 0 always.
 _sandy_session_end_report() {
     local _sb="$1" _wd="$2" _by="${3:-}" _fn="${4:-_sandy_session_end_protected_report}" _t="" _um
-    [ -n "$_sb" ] && [ -n "$_wd" ] && [ -f "$_sb/.protected-existed-at-launch" ] || return 0
+    local _sf="${5:-$1/.protected-existed-at-launch}"
+    [ -n "$_sb" ] && [ -n "$_wd" ] && [ -f "$_sf" ] || return 0
     if [ -n "$_by" ] && [ -d "$_sb" ] && [ ! -L "$_sb" ]; then
         _um="$(umask)"; umask 077
         _t="$(mktemp "$_sb/.session-report.XXXXXX" 2>/dev/null)" || _t=""
@@ -4360,10 +4644,10 @@ _sandy_session_end_report() {
         if [ -n "$_by" ]; then
             printf "${YELLOW:-}[sandy]${NC:-} Could not record this session-end report in %s; it is printed here only.\n" "$_sb" >&2
         fi
-        "$_fn" "$_sb" "$_wd" || true
+        "$_fn" "$_sb" "$_wd" "$_sf" || true
         return 0
     fi
-    "$_fn" "$_sb" "$_wd" 2>"$_t" || true
+    "$_fn" "$_sb" "$_wd" "$_sf" 2>"$_t" || true
     if [ -s "$_t" ]; then
         if ! _sandy_session_report_add "$_sb" "$_t" "$_by" || [ "$_by" = supervisor ] || [ "$_by" = rejudge ]; then
             cat "$_t" >&2
@@ -4373,11 +4657,12 @@ _sandy_session_end_report() {
     return 0
 }
 # The content check alone (protected FILES whose contents changed): what a
-# snapshot that is not a launch's can support. $1 = sandbox  $2 = workspace.
+# snapshot that is not a launch's can support. $1 = sandbox  $2 = workspace
+# [$3 = the snapshot, default $1/.protected-existed-at-launch].
 _sandy_session_end_content_report() {
-    local WORK_DIR="$2"
-    _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$1/.protected-existed-at-launch")" "$1/.protected-copies"
-    [ "${_SANDY_SNAP_KEEP:-}" = 1 ] || rm -f "$1/.protected-existed-at-launch"
+    local WORK_DIR="$2" _snapf="${3:-$1/.protected-existed-at-launch}"
+    _sandy_protected_hash_report "$(_sandy_protected_hash_changed "$_snapf")" "$1/.protected-copies"
+    [ "${_SANDY_SNAP_KEEP:-}" = 1 ] || rm -f "$_snapf"
     return 0
 }
 # --stop's direct teardown of a supervisor-less daemon, once its container is
@@ -4393,16 +4678,33 @@ _sandy_session_end_content_report() {
 # The gitdir a .git file names is not derived again (see
 # _sandy_unsupervised_daemon_protect), so only the top-level .git is walked
 # for admin dirs and links. $1 = sandbox dir. Returns 0 always.
+#
+# #599: --stop holds no workspace lock, so a launch of the workspace can run
+# beside it. While a live launch holds the workspace lock the live snapshot is
+# that launch's (its stale sweep, then its own): left alone. Otherwise it is
+# claimed by renaming it to a name of --stop's own first, judged there and
+# removed, so a launch that starts meanwhile can neither delete it
+# mid-judgement nor lose its own new snapshot to this removal.
 _sandy_unsupervised_stop_report() {
-    local _snap="$1/.protected-existed-at-launch" SANDY_ALLOW_WORKFLOW_EDIT=0 GITDIR_HOST=""
+    local _snap="$1/.protected-existed-at-launch" SANDY_ALLOW_WORKFLOW_EDIT=0 GITDIR_HOST="" _cl _lk
     [ -f "$_snap" ] || return 0
-    if grep -qx '#gitdirs-recorded' "$_snap" 2>/dev/null; then
-        if grep -qx '#workflow-edit-allowed' "$_snap" 2>/dev/null; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
-        _sandy_session_end_report "$1" "$WORK_DIR" stop
-    else
-        _sandy_session_end_report "$1" "$WORK_DIR" stop _sandy_session_end_content_report
+    _lk="${1%/*}/.${1##*/}.lock"
+    if [ -d "$_lk" ]; then
+        _sandy_lock_state "$_lk"
+        if [ "${_SANDY_LOCK_STATE:-}" = live ]; then
+            printf "${YELLOW:-}[sandy]${NC:-} A launch of this workspace is running (pid %s): its session-end report covers the workspace; this one is not made.\n" "${_SANDY_LOCK_PID:-?}" >&2
+            return 0
+        fi
     fi
-    rm -f "$_snap"
+    _cl="$_snap.stop.$$"
+    mv "$_snap" "$_cl" 2>/dev/null || return 0
+    if grep -qx '#gitdirs-recorded' "$_cl" 2>/dev/null; then
+        if grep -qx '#workflow-edit-allowed' "$_cl" 2>/dev/null; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
+        _sandy_session_end_report "$1" "$WORK_DIR" stop _sandy_session_end_protected_report "$_cl"
+    else
+        _sandy_session_end_report "$1" "$WORK_DIR" stop _sandy_session_end_content_report "$_cl"
+    fi
+    rm -f "$_cl"
     return 0
 }
 # --- Provisional session-end reports (#584) ---------------------------------
@@ -4457,7 +4759,7 @@ _sandy_provisional_advice() {   # $1 = daemon flag  $2 = container
 # also prints it (--stop prints the record at its end). A pair whose
 # container is still not known gone stays, and is named in one line.
 _sandy_provisional_rejudge() {   # $1 = sandbox  $2 = launch|stop
-    local _sb="$1" _d _f _id _k _v _c _dm _g _gh _left="" _by=rejudge _n=0
+    local _sb="$1" _d _f _id _k _v _c _dm _g _gh _left="" _by=rejudge _n=0 _cl
     _d="$(_sandy_provisional_dir "$_sb")"
     [ -d "$_d" ] && [ ! -L "$_d" ] || return 0
     [ "${2:-}" != stop ] || _by=rejudge-stop
@@ -4475,12 +4777,13 @@ _sandy_provisional_rejudge() {   # $1 = sandbox  $2 = launch|stop
             _left="$_left${_left:+; }$(_sandy_provisional_advice "$_dm" "${_c:-?}")"
             continue
         fi
-        # The live snapshot name is free here: a launch has not written its
-        # own yet, and --stop's own report has removed the one it judged.
-        if [ -e "$_sb/.protected-existed-at-launch" ] || [ -L "$_sb/.protected-existed-at-launch" ]; then
-            _left="$_left${_left:+; }the next launch"; continue
-        fi
-        mv -f "$_d/$_id.snap" "$_sb/.protected-existed-at-launch" 2>/dev/null || continue
+        # #599: claimed by renaming it within the directory (one rename
+        # wins, so a --stop and a launch judging at once never judge one
+        # twice) and judged where it lies: never moved to the live name a
+        # concurrent launch sweeps and writes.
+        _cl="$_d/$_id.judging.$$"
+        mv "$_d/$_id.snap" "$_cl" 2>/dev/null || continue
+        [ -f "$_cl" ] && [ ! -L "$_cl" ] || { rm -f "$_cl" 2>/dev/null || true; continue; }
         _gh=""
         if [ -n "$_g" ] && _sandy_unhex "$_g" _gh && [ -n "$_gh" ]; then
             case "$_gh" in /*) [ -d "$_gh" ] && [ ! -L "$_gh" ] || _gh="" ;; *) _gh="" ;; esac
@@ -4491,14 +4794,14 @@ _sandy_provisional_rejudge() {   # $1 = sandbox  $2 = launch|stop
         fi
         ( GITDIR_HOST="$_gh"
           SANDY_ALLOW_WORKFLOW_EDIT=0
-          if _sandy_snap_scan "$_sb/.protected-existed-at-launch" = '#workflow-edit-allowed'; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
-          if _sandy_snap_scan "$_sb/.protected-existed-at-launch" = '#gitdirs-recorded'; then
-              _sandy_session_end_report "$_sb" "$WORK_DIR" "$_by"
+          if _sandy_snap_scan "$_cl" = '#workflow-edit-allowed'; then SANDY_ALLOW_WORKFLOW_EDIT=1; fi
+          if _sandy_snap_scan "$_cl" = '#gitdirs-recorded'; then
+              _sandy_session_end_report "$_sb" "$WORK_DIR" "$_by" _sandy_session_end_protected_report "$_cl"
           else
-              _sandy_session_end_report "$_sb" "$WORK_DIR" "$_by" _sandy_session_end_content_report
+              _sandy_session_end_report "$_sb" "$WORK_DIR" "$_by" _sandy_session_end_content_report "$_cl"
           fi ) || true
         [ "$_by" != rejudge ] || printf "${YELLOW:-}[sandy]${NC:-} ==== End of the earlier session's report (recorded; sandy --ack-report --workspace %s acknowledges it) ====\n\n" "$(printf '%q' "$WORK_DIR")" >&2
-        rm -f "$_sb/.protected-existed-at-launch" "$_d/$_id.info"
+        rm -f "$_cl" "$_d/$_id.info"
         _n=$((_n + 1))
     done
     if [ -n "$_left" ]; then
@@ -8643,6 +8946,18 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         printf '  - %-30s %s\n' "$_rs_bn" "$_rs_sz"
         _rs_n=$((_rs_n + 1))
     done
+    # #596: the git dirs this sandbox holds a share in with another session:
+    # their seed and locks are released by whichever holder ends last.
+    _rs_holds_others=""
+    if [ -f "$_rs_dir/.gitdir-holds" ]; then
+        _rs_holds_others="$(_sandy_hold_others "$_rs_dir" "sandy-$_rs_name" nodocker)"
+        if [ -n "$_rs_holds_others" ]; then
+            printf 'Shares git dirs with another session; their commondir seed and file locks stay, for the last of them to release:\n'
+            while IFS=$'\t' read -r _rs_ho_d _rs_ho_c _rs_ho_w; do
+                [ -n "$_rs_ho_d" ] && printf '  %s (container %s%s)\n' "$_rs_ho_d" "$_rs_ho_c" "${_rs_ho_w:+, workspace $_rs_ho_w}"
+            done <<< "$_rs_holds_others"
+        fi
+    fi
     if [ -n "$(ls -A "$_rs_dir/.protected-provisional" 2>/dev/null)" ]; then
         printf 'Drops a pending session-end judgement: an earlier session'"'"'s report was provisional (its container may have\n'
         printf '  outlived it), and .protected-provisional/ holds the launch snapshot it is to be judged against.\n'
@@ -8711,6 +9026,11 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
             error "Non-interactive; pass --yes to reset without a prompt."; exit 1
         fi
     fi
+    # #596: --reset-sandbox asks no Docker, so it cannot tell whether a
+    # holder's container is gone: it releases nothing through the git dir
+    # holds and leaves this sandbox's entries in them (pruned by the next
+    # session to end once its container is gone). What sandy set in a held
+    # dir is listed in the hold, so the last holder still releases it.
     # #339: MAKE THE TREE WRITABLE BEFORE DESTROYING IT, or the destroy is not
     # all-or-nothing. Go's module cache is 0444 files inside 0555 directories,
     # and a 0555 directory denies its OWNER the write needed to unlink its
@@ -9867,7 +10187,7 @@ if [[ "${1:-}" == "--unlock" ]]; then
     _ulk_base="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"; _ulk_base="${_ulk_base:-project}"
     _ulk_sb="$SANDY_HOME/sandboxes/${_ulk_base}-${_ulk_hash}"
     _ulk_rec="$(_sandy_uchg_record "$_ulk_sb")"
-    if [ ! -f "$_ulk_rec" ] || ! grep -q $'^locked\t' "$_ulk_rec" 2>/dev/null; then
+    if { [ ! -f "$_ulk_rec" ] || ! grep -q $'^locked\t' "$_ulk_rec" 2>/dev/null; } && [ ! -f "$_ulk_sb/.gitdir-holds" ]; then
         info "No files of $WORK_DIR are locked by sandy. Nothing to do."
         exit 0
     fi
@@ -9905,15 +10225,28 @@ if [[ "${1:-}" == "--unlock" ]]; then
         error "  Remove it first: docker rm -f sandy-${_ulk_base}-${_ulk_hash}, then run sandy --unlock again."
         exit 1
     fi
-    info "Files sandy locked in $WORK_DIR:"
-    while IFS=$'\t' read -r _ulk_k _ulk_r _ulk_x; do
-        [ "$_ulk_k" = locked ] && info "  $(_sandy_uchg_show "$(_sandy_unhex "$_ulk_r")")"
-    done < "$_ulk_rec"
+    # #596: a git dir this workspace shares with another running session (a
+    # superproject and its submodule checkout) keeps its locks and seed until
+    # that session ends too: --unlock leaves the whole workspace locked then.
+    _ulk_others="$(_sandy_hold_others "$_ulk_sb" "sandy-${_ulk_base}-${_ulk_hash}")"
+    if [ -n "$_ulk_others" ]; then
+        error "--unlock: a git dir of this workspace is also used by another running session, so its locks stay until that session ends:"
+        while IFS=$'\t' read -r _ulk_k _ulk_r _ulk_x; do
+            [ -n "$_ulk_k" ] && error "  $_ulk_k (container $_ulk_r${_ulk_x:+, workspace $_ulk_x})"
+        done <<< "$_ulk_others"
+        exit 1
+    fi
+    if [ -f "$_ulk_rec" ]; then
+        info "Files sandy locked in $WORK_DIR:"
+        while IFS=$'\t' read -r _ulk_k _ulk_r _ulk_x; do
+            [ "$_ulk_k" = locked ] && info "  $(_sandy_uchg_show "$(_sandy_unhex "$_ulk_r")")"
+        done < "$_ulk_rec"
+    fi
     if [ "$_ulk_dry" = true ]; then
         info "(dry run: nothing changed)"
         exit 0
     fi
-    if _sandy_uchg_unlock "$_ulk_sb" "$WORK_DIR"; then
+    if _sandy_release_session_protections "$_ulk_sb" "$WORK_DIR" "sandy-${_ulk_base}-${_ulk_hash}"; then
         info "Unlocked."
         exit 0
     fi
@@ -16929,13 +17262,11 @@ if [ "$SANDY_STOP" = "true" ]; then
             # The macOS file locks the dead supervisor's session set: cleared
             # only when no launch holds the workspace now (one that took the
             # lock in between owns the record, and clears it itself).
-            if [ "$_sandy_stop_ok" = true ] && [ "$_sandy_stop_reap_rc" -eq 0 ] && [ ! -d "$_sandy_stop_lock" ] \
-               && [ -f "$(_sandy_uchg_record "$SANDY_HOME/sandboxes/$_sandy_stop_session")" ]; then
-                _sandy_uchg_unlock "$SANDY_HOME/sandboxes/$_sandy_stop_session" "$WORK_DIR" \
-                    || warn "Some files the session locked are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
-            fi
+            # #596: through the git dir holds, so one another running session
+            # shares keeps its seed and locks.
             if [ "$_sandy_stop_ok" = true ] && [ "$_sandy_stop_reap_rc" -eq 0 ] && [ ! -d "$_sandy_stop_lock" ]; then
-                _sandy_commondir_unseed "$SANDY_HOME/sandboxes/$_sandy_stop_session"
+                _sandy_release_session_protections "$SANDY_HOME/sandboxes/$_sandy_stop_session" "$WORK_DIR" "sandy-$_sandy_stop_session" \
+                    || warn "Some files the session locked are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
             fi
         fi
         _sandy_session_report_show "$_sandy_stop_sb" "$WORK_DIR"
@@ -21262,10 +21593,17 @@ rm -rf "$SANDBOX_DIR/launch" "$SANDBOX_DIR"/claude/.*.sandy-launch.* "$SANDBOX_D
        "$SANDBOX_DIR"/codex/*.sandy-launch.* 2>/dev/null || true
 # macOS file locks a session that never reached its cleanup left set: the
 # workspace lock is held, so no session of this workspace is running, and the
-# record is stale. Cleared before any of sandy's own writes into the workspace.
-if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ]; then
-    if _sandy_uchg_unlock "$SANDBOX_DIR" "$WORK_DIR"; then
-        info "Unlocked the files an earlier session of this workspace left locked."
+# record is stale. Cleared before any of sandy's own writes into the workspace,
+# once that session's container is known gone (2.12.0), and through the git
+# dir holds (#596): a git dir another running session shares keeps its seed
+# and locks. A container that may still be there keeps them all; this
+# launch's own session end releases them.
+if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ] || [ -f "$SANDBOX_DIR/.gitdir-holds" ]; then
+    _sandy_had_uchg=""; [ ! -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ] || _sandy_had_uchg=1
+    if ! _sandy_container_gone "sandy-${SANDBOX_NAME}"; then
+        warn "The container sandy-${SANDBOX_NAME} of an earlier session may still exist: the file locks and seeds it left stay until this session ends."
+    elif _sandy_release_session_protections "$SANDBOX_DIR" "$WORK_DIR" "sandy-${SANDBOX_NAME}"; then
+        [ -z "$_sandy_had_uchg" ] || info "Unlocked the files an earlier session of this workspace left locked."
     else
         warn "Some files an earlier session locked are still locked: see $(_sandy_uchg_record "$SANDBOX_DIR")"
     fi
@@ -23655,14 +23993,14 @@ cleanup() {
     # this teardown) comes back as a directory Docker creates for the missing
     # -v source, which breaks every git command in the workspace. So when the
     # container may still exist, both are kept, and said so.
+    # A git dir another running session shares keeps them until that session
+    # ends too (#596, _sandy_release_session_protections).
     if [ -n "${SANDBOX_DIR:-}" ] && [ -n "${WORK_DIR:-}" ] \
-       && { [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ] || [ -f "$(_sandy_commondir_record "$SANDBOX_DIR")" ]; }; then
+       && { [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ] || [ -f "$(_sandy_commondir_record "$SANDBOX_DIR")" ] \
+            || [ -f "$SANDBOX_DIR/.gitdir-holds" ]; }; then
         if [ "$_sandy_cl_gone" = 1 ]; then
-            if [ -f "$(_sandy_uchg_record "$SANDBOX_DIR")" ]; then
-                _sandy_uchg_unlock "$SANDBOX_DIR" "$WORK_DIR" \
-                    || warn "Some files sandy locked for this session are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
-            fi
-            _sandy_commondir_unseed "$SANDBOX_DIR"
+            _sandy_release_session_protections "$SANDBOX_DIR" "$WORK_DIR" "${CONTAINER_NAME:-sandy-${SANDBOX_NAME:-}}" \
+                || warn "Some files sandy locked for this session are still locked; run: sandy --unlock --workspace $(printf '%q' "$WORK_DIR")"
         else
             warn "The container ${CONTAINER_NAME} may still exist, so the macOS file locks and the seeded commondir files are kept."
             warn "  Once it is gone, $(_sandy_provisional_advice "${SANDY_DAEMON_SUPERVISOR:-0}" "${CONTAINER_NAME:-}") clears them (or sandy --unlock)."
