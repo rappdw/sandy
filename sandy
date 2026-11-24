@@ -3063,9 +3063,29 @@ _sandy_ws_physical() {
 # it names, resolved as the mount code has always resolved it (a logical `cd`
 # from the workspace). Shared by the gitdir mount and by the by-name sweep, so
 # the sweep judges exactly the directory that is mounted.
+# 2.12.0 (#598): the value is read as git reads it (_sandy_gitfile_read), so
+# a path holding a space (a submodule named "my lib") is the path git uses.
+# Before, every whitespace character was deleted from it.
 _sandy_gitdir_rel() {
     [ -f "$WORK_DIR/.git" ] || return 0
-    sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]'
+    local _gr_v
+    _sandy_gitfile_read "$WORK_DIR/.git" _gr_v
+    printf '%s' "$_gr_v"
+}
+# The path a .git FILE $1 names, into variable $2, as git reads one: the
+# file's content with its trailing newlines and carriage returns removed,
+# after a leading `gitdir: `. Without that prefix it names nothing ("").
+# No process.
+_sandy_gitfile_read() {   # $1 = file  $2 = variable to set
+    local _gf_c=""
+    printf -v "$2" '%s' ""
+    [ -f "$1" ] || return 0
+    IFS= read -r -d '' _gf_c < "$1" 2>/dev/null || true
+    while :; do
+        case "$_gf_c" in *$'\n'|*$'\r') _gf_c="${_gf_c%?}" ;; *) break ;; esac
+    done
+    case "$_gf_c" in 'gitdir: '*) printf -v "$2" '%s' "${_gf_c#gitdir: }" ;; esac
+    return 0
 }
 # The directory is spelled under $WORK_DIR whenever it lies physically in the
 # workspace, however the value spells it (`//ws/x`, `/./`, `..`, a linked
@@ -3086,6 +3106,320 @@ _sandy_gitdir_host() {   # $1 = the gitdir value -> the directory, or nothing
 # deeper than six levels got nothing.
 _sandy_is_gitdir() {
     [ -d "$1" ] && [ ! -L "$1" ] && [ -e "$1/HEAD" ] && [ -d "$1/objects" ] && [ -d "$1/refs" ]
+}
+
+# --- #598 (2.12.0): a gitdir outside the workspace ---------------------------
+# The gitdir a .git FILE names is mounted READ-WRITE (git must write its
+# objects and refs). When it lies outside the workspace, being a git directory
+# (the R5a structural check) says nothing about whose it is: `gitdir:
+# ../other/.git` names a sibling repository the user owns, and the agent
+# could rewrite its history. So outside the workspace the directory must be one
+# sandy recognizes, or be approved once:
+#   inside      (_sandy_gitdir_host spells it under $WORK_DIR): unchanged.
+#   submodule   the gitdir git uses for this workspace as a submodule of the
+#               repository that contains it (_sandy_gitdir_submodule_of): no prompt.
+#   (#582 will add a linked worktree's admin directory as a second recognized
+#   relationship, in _sandy_gitdir_judge, beside the submodule test. Today one
+#   has no objects/ and is refused by the structural check before this.)
+#   anything else (a --separate-git-dir, a sibling repository, a "submodule"
+#   no .gitmodules declares): the one-time approval of _sandy_gitdir_gate,
+#   recorded per workspace and target in $SANDBOX_DIR/.sandy-approved-gitdir
+#   (never mounted). Headless and non-TTY launches refuse. Asked in the
+#   --start approval pass (_sandy_approve_only_finish), on the client's tty.
+#   SANDY_AUTO_APPROVE_PRIVILEGED does not answer it, as it does not answer
+#   the dangerous-symlink gate: no new host directory is handed to the agent
+#   read-write without a person saying so.
+# Every path here is PHYSICAL (`cd -P`, `pwd -P`): the workspace's ancestors
+# are those of where it physically lies, so a workspace reached through a link
+# is judged where it is, and so is the gitdir.
+
+# The physical path of directory $1 into variable $2 (a leading `//` dropped);
+# 1 when it cannot be entered.
+_sandy_phys_dir() {   # $1 = directory  $2 = variable to set
+    local _pd_o
+    _pd_o="$(CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P)" || return 1
+    while case "$_pd_o" in //*) true ;; *) false ;; esac; do _pd_o="${_pd_o#/}"; done
+    [ -n "$_pd_o" ] || return 1
+    printf -v "$2" '%s' "$_pd_o"
+}
+# The submodules .gitmodules file $1 declares, as the parallel arrays
+# _SANDY_GM_NAMES and _SANDY_GM_PATHS (each submodule.<name>.path). Read by git
+# (`git config -z -f`, run from / so that no repository's own config is read)
+# when git is on PATH, else by _sandy_gitmodules_parse. A file that is a link,
+# and a name or path holding a newline, give nothing: sandy never matches them.
+_sandy_gitmodules_read() {   # $1 = .gitmodules
+    local _gm_r _gm_k _gm_v _gm_nl=$'\n'
+    _SANDY_GM_NAMES=(); _SANDY_GM_PATHS=()
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    if command -v git >/dev/null 2>&1; then
+        while IFS= read -r -d '' _gm_r; do
+            case "$_gm_r" in *"$_gm_nl"*) ;; *) continue ;; esac
+            _gm_k="${_gm_r%%"$_gm_nl"*}"; _gm_v="${_gm_r#*"$_gm_nl"}"
+            case "$_gm_v" in *"$_gm_nl"*) continue ;; esac
+            case "$_gm_k" in submodule.?*.path) ;; *) continue ;; esac
+            _gm_k="${_gm_k#submodule.}"; _gm_k="${_gm_k%.path}"
+            _SANDY_GM_NAMES+=("$_gm_k"); _SANDY_GM_PATHS+=("$_gm_v")
+        done < <(cd / && exec git config -z -f "$1" --get-regexp '^submodule\..*\.path$' 2>/dev/null)
+        return 0
+    fi
+    while IFS= read -r _gm_k && IFS= read -r _gm_v; do
+        _SANDY_GM_NAMES+=("${_gm_k#N}"); _SANDY_GM_PATHS+=("${_gm_v#P}")
+    done < <(_sandy_gitmodules_parse "$1")
+    return 0
+}
+# A host without git: the subset of git-config syntax .gitmodules uses, read
+# the way git reads it -- `[submodule "<name>"]` (the name in double quotes,
+# with \" and \\), section and key names in any case, `path = <value>` with
+# leading and trailing blanks dropped, double quotes removed, \" \\ \t \n \b
+# decoded, and a # or ; outside quotes starting a comment; a key may follow
+# the header on its line. Prints "N<name>" and "P<path>" lines, one pair per
+# submodule.<name>.path. Anything it does not follow (a continued line, the
+# old `[submodule.name]` form, a name or value holding a newline) is skipped,
+# so a declaration it misreads is only one sandy does not recognize.
+_sandy_gitmodules_parse() {   # $1 = .gitmodules
+    awk '
+    function val(s,    o, i, c, n, q, keep) {
+        o = ""; q = 0; keep = 0; n = length(s); i = 1
+        while (i <= n && !q && (substr(s, i, 1) == " " || substr(s, i, 1) == "\t")) i++
+        for (; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "\\") {
+                if (i == n) { BAD = 1; return "" }
+                i++; c = substr(s, i, 1)
+                if (c == "n") c = "\n"; else if (c == "t") c = "\t"; else if (c == "b") c = "\b"
+                else if (c != "\"" && c != "\\") { BAD = 1; return "" }
+                o = o c; keep = length(o); continue
+            }
+            if (c == "\"") { q = !q; keep = length(o); continue }
+            if (!q && (c == "#" || c == ";")) break
+            o = o c
+            if (q || (c != " " && c != "\t")) keep = length(o)
+        }
+        if (q) { BAD = 1; return "" }
+        return substr(o, 1, keep)
+    }
+    function keyline(s,    k, v) {
+        if (!match(s, /^[ \t]*[A-Za-z][A-Za-z0-9-]*/)) return
+        k = tolower(substr(s, RSTART, RLENGTH)); sub(/^[ \t]+/, "", k)
+        s = substr(s, RSTART + RLENGTH)
+        if (k != "path" || NAME == "") return
+        if (!match(s, /^[ \t]*=/)) return
+        BAD = 0; v = val(substr(s, RLENGTH + 1))
+        if (BAD || index(v, "\n") || index(NAME, "\n")) return
+        print "N" NAME; print "P" v
+    }
+    {
+        line = $0; sub(/\r$/, "", line)
+        if (line ~ /^[ \t]*\[/) {
+            NAME = ""
+            if (!match(line, /^[ \t]*\[[ \t]*[Ss][Uu][Bb][Mm][Oo][Dd][Uu][Ll][Ee][ \t]+"/)) next
+            rest = substr(line, RLENGTH + 1); nm = ""; ok = 0
+            for (i = 1; i <= length(rest); i++) {
+                c = substr(rest, i, 1)
+                if (c == "\\") { i++; nm = nm substr(rest, i, 1); continue }
+                if (c == "\"") { ok = 1; break }
+                nm = nm c
+            }
+            if (!ok) next
+            rest = substr(rest, i + 1)
+            if (!match(rest, /^[ \t]*\]/)) next
+            NAME = nm; rest = substr(rest, RLENGTH + 1)
+            if (NAME == "") next
+            keyline(rest); next
+        }
+        keyline(line)
+    }' "$1" 2>/dev/null || true
+}
+# A submodule name git would use as a directory under modules/: not empty, not
+# absolute, no `..` or `.` or empty component, no backslash (git refuses `..`
+# around either separator; sandy refuses the backslash outright).
+_sandy_submodule_name_ok() {   # $1 = name
+    local _sn_r="$1/" _sn_c
+    case "$1" in ''|/*|*\\*) return 1 ;; esac
+    while [ -n "$_sn_r" ]; do
+        _sn_c="${_sn_r%%/*}"; _sn_r="${_sn_r#*/}"
+        case "$_sn_c" in ''|.|..) return 1 ;; esac
+    done
+    return 0
+}
+# True when physical gitdir $2 is the one git uses for working tree $1 (a
+# physical path) as a submodule. The superproject is the NEAREST ancestor of
+# $1 holding a .git entry, as git finds it; its .gitmodules (a regular file)
+# must declare a submodule whose path is $1 relative to it, and $2 must be
+# <its gitdir>/modules/<the NAME of that submodule> exactly (git names the
+# directory by the name, not the path). Its gitdir is its .git directory, or -- for a
+# submodule of a submodule -- the gitdir its .git FILE names, which must in
+# turn be recognized the same way, up to 8 levels.
+_sandy_gitdir_submodule_of() {   # $1 = working tree  $2 = gitdir  [$3 = depth]
+    local _sm_w="$1" _sm_t="$2" _sm_d="${3:-0}" _sm_s _sm_rel _sm_g _sm_gl _sm_i _sm_n _sm_p
+    [ "$_sm_d" -lt 8 ] || return 1
+    _sm_s="$_sm_w"
+    while :; do
+        [ "$_sm_s" != / ] || return 1
+        _sm_s="${_sm_s%/*}"; [ -n "$_sm_s" ] || _sm_s=/
+        if [ -e "${_sm_s%/}/.git" ] || [ -L "${_sm_s%/}/.git" ]; then break; fi
+    done
+    _sm_rel="${_sm_w#"${_sm_s%/}"/}"
+    [ -f "${_sm_s%/}/.gitmodules" ] && [ ! -L "${_sm_s%/}/.gitmodules" ] || return 1
+    if [ -L "${_sm_s%/}/.git" ]; then
+        return 1
+    elif [ -d "${_sm_s%/}/.git" ]; then
+        _sandy_is_gitdir "${_sm_s%/}/.git" || return 1
+        _sm_g="${_sm_s%/}/.git"
+    else
+        _sandy_gitfile_read "${_sm_s%/}/.git" _sm_gl
+        [ -n "$_sm_gl" ] || return 1
+        case "$_sm_gl" in /*) ;; *) _sm_gl="${_sm_s%/}/$_sm_gl" ;; esac
+        _sandy_phys_dir "$_sm_gl" _sm_g || return 1
+        _sandy_is_gitdir "$_sm_g" || return 1
+        _sandy_gitdir_submodule_of "$_sm_s" "$_sm_g" $((_sm_d + 1)) || return 1
+    fi
+    # Read after the recursion: it fills the same arrays.
+    _sandy_gitmodules_read "${_sm_s%/}/.gitmodules"
+    _sm_i=0
+    while [ "$_sm_i" -lt ${#_SANDY_GM_NAMES[@]} ]; do
+        _sm_n="${_SANDY_GM_NAMES[$_sm_i]}"; _sm_p="${_SANDY_GM_PATHS[$_sm_i]}"; _sm_i=$((_sm_i + 1))
+        while [ "${_sm_p%/}" != "$_sm_p" ]; do _sm_p="${_sm_p%/}"; done
+        [ "$_sm_p" = "$_sm_rel" ] || continue
+        _sandy_submodule_name_ok "$_sm_n" || continue
+        # $2 is physical and so is $_sm_g, so an equal spelling is the same
+        # directory with no link anywhere below the superproject's gitdir
+        # (modules/<name> a link to another repository is not recognized).
+        [ "$_sm_g/modules/$_sm_n" != "$_sm_t" ] || return 0
+    done
+    return 1
+}
+# _sandy_gitdir_judge GITDIR_REL GITDIR_HOST: what the gitdir a .git file
+# names is, without asking or writing anything (the launch and the
+# --approvals report both call it). Sets _SANDY_GD_VERDICT:
+#   none       no gitdir is named
+#   notgit     not a git directory by structure (refused; nothing can approve it)
+#   sandy      outside the workspace, in sandy's own state (refused, as #209
+#              refuses a link there)
+#   inside     in the workspace
+#   submodule  outside, this workspace's submodule gitdir
+#   approved   outside, unrecognized, approved for this workspace and target
+#   pending    outside, unrecognized, nothing approved
+#   changed    outside, unrecognized, the approval names another directory
+# and _SANDY_GD_PHYS (the physical gitdir, when outside), _SANDY_GD_PREV (the
+# directory an approval names, for `changed`), _SANDY_GD_AT (its date).
+_sandy_gitdir_judge() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
+    local _gj_w _gj_f _gj_a _gj_b _gj_ws _gj_tg _gj_sh
+    _SANDY_GD_VERDICT=none; _SANDY_GD_PHYS=""; _SANDY_GD_PREV=""; _SANDY_GD_AT=""
+    [ -n "$1" ] || return 0
+    if [ -z "$2" ] || [ ! -f "$2/HEAD" ] || [ ! -d "$2/objects" ] || [ ! -d "$2/refs" ]; then
+        _SANDY_GD_VERDICT=notgit; return 0
+    fi
+    case "$2" in "$WORK_DIR"|"$WORK_DIR"/*) _SANDY_GD_VERDICT=inside; return 0 ;; esac
+    if ! _sandy_phys_dir "$2" _SANDY_GD_PHYS || ! _sandy_phys_dir "$WORK_DIR" _gj_w; then
+        _SANDY_GD_VERDICT=notgit; return 0
+    fi
+    if [ -d "${SANDY_HOME:-}" ] && _sandy_phys_dir "$SANDY_HOME" _gj_sh; then
+        case "$_SANDY_GD_PHYS/" in "${_gj_sh%/}"/*) _SANDY_GD_VERDICT=sandy; return 0 ;; esac
+    fi
+    if _sandy_gitdir_submodule_of "$_gj_w" "$_SANDY_GD_PHYS"; then
+        _SANDY_GD_VERDICT=submodule; return 0
+    fi
+    # (#582: a linked worktree's admin directory is recognized here.)
+    _SANDY_GD_VERDICT=pending
+    _gj_f="${SANDBOX_DIR:-}/.sandy-approved-gitdir"
+    [ -n "${SANDBOX_DIR:-}" ] && [ -f "$_gj_f" ] && [ ! -L "$_gj_f" ] || return 0
+    while IFS=$'\t' read -r _gj_a _gj_b || [ -n "$_gj_a" ]; do
+        case "$_gj_a" in
+            '# approved: '*) _SANDY_GD_AT="${_gj_a#'# approved: '}"; continue ;;
+            ''|'#'*) continue ;;
+        esac
+        _sandy_unhex "$_gj_a" _gj_ws || continue
+        _sandy_unhex "${_gj_b:-}" _gj_tg || continue
+        if [ "$_gj_ws" = "$_gj_w" ] && [ "$_gj_tg" = "$_SANDY_GD_PHYS" ]; then
+            _SANDY_GD_VERDICT=approved; return 0
+        fi
+        _SANDY_GD_VERDICT=changed; _SANDY_GD_PREV="$_gj_tg"
+    done < "$_gj_f"
+    return 0
+}
+# Record the approval of gitdir $2 for workspace $1 (both physical): one
+# file, replaced whole (mktemp + mv in the sandbox dir; a link at its path is
+# removed first, never written through). Only the latest approval is kept, so
+# a changed target asks again.
+_sandy_gitdir_record() {   # $1 = workspace  $2 = gitdir
+    local _gw_f="$SANDBOX_DIR/.sandy-approved-gitdir" _gw_t _gw_hw _gw_ht
+    _sandy_hex "$1" _gw_hw; _sandy_hex "$2" _gw_ht
+    if [ -L "$_gw_f" ]; then rm -f "$_gw_f" || return 1; fi
+    if [ -e "$_gw_f" ] && [ ! -f "$_gw_f" ]; then return 1; fi
+    _gw_t="$(mktemp "$SANDBOX_DIR/.sandy-approved-gitdir.XXXXXX" 2>/dev/null)" || return 1
+    if printf '# approved: %s\n%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_gw_hw" "$_gw_ht" > "$_gw_t" \
+       && mv -f "$_gw_t" "$_gw_f"; then
+        return 0
+    fi
+    rm -f "$_gw_t" 2>/dev/null || true
+    return 1
+}
+# The launch's gate (R5a and #598): refuses a gitdir that is not a git
+# directory, then, for one outside the workspace that sandy does not
+# recognize, asks once (or refuses without a terminal). Leaves the verdict
+# in _SANDY_GD_* for the mount.
+_sandy_gitdir_gate() {   # $1 = GITDIR_REL  $2 = GITDIR_HOST
+    local _gg_w _gg_reply=""
+    _sandy_gitdir_judge "$1" "$2"
+    case "$_SANDY_GD_VERDICT" in
+        notgit)
+            echo "[sandy] ERROR: .git names a gitdir that is not a git directory: '$1'" >&2
+            echo "[sandy]        Resolved to: ${2:-<unresolvable>}" >&2
+            echo "[sandy]        Refusing to bind-mount it. A .git FILE is repository content, so an" >&2
+            echo "[sandy]        arbitrary path there would mount a host directory of the repository's" >&2
+            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/." >&2
+            _sandy_daemon_fatal
+            exit 1 ;;
+        sandy)
+            error_lit "The .git file names a git directory inside sandy's own state: $_SANDY_GD_PHYS"
+            error "  Mounting \$SANDY_HOME into a sandbox would expose operator state the agent must not reach. Nothing was started."
+            _sandy_daemon_fatal
+            exit 1 ;;
+        pending|changed) ;;
+        *) return 0 ;;
+    esac
+    _sandy_phys_dir "$WORK_DIR" _gg_w || _gg_w="$WORK_DIR"
+    warn "This workspace's .git file names a git directory outside the workspace:"
+    warn_lit "  gitdir: $1"
+    warn_lit "  which is $_SANDY_GD_PHYS"
+    if [ "$_SANDY_GD_VERDICT" = changed ]; then
+        warn_lit "  The approval on record is for a different directory: $_SANDY_GD_PREV"
+    fi
+    warn "It is not the submodule git directory of a repository that contains this workspace, so"
+    warn "sandy cannot tell how it relates to this workspace. Mounted, it is READ-WRITE: the agent gets"
+    warn "read-write access to that repository's history (its objects, refs and branches); its config,"
+    warn "hooks and info stay read-only."
+    if [ ! -t 0 ]; then
+        error "This git directory needs a one-time approval, but stdin is not a terminal."
+        error "Approve it once by launching sandy interactively in this workspace:"
+        error_lit "  cd '$WORK_DIR' && sandy      # answer y at the prompt, then exit"
+        error "then retry (e.g. 'sandy --start'). SANDY_AUTO_APPROVE_PRIVILEGED does not approve it."
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    printf "\033[0;33m[sandy] Mount it read-write for this workspace? [y/N] \033[0m"
+    read -r _gg_reply || _gg_reply=""
+    if [[ ! "$_gg_reply" =~ ^[Yy]$ ]]; then
+        error "Aborting. Nothing was mounted; the .git file names: $1"
+        exit 1
+    fi
+    if ! _sandy_gitdir_record "$_gg_w" "$_SANDY_GD_PHYS"; then
+        error_lit "Could not record the approval in $SANDBOX_DIR/.sandy-approved-gitdir; nothing was started."
+        exit 1
+    fi
+    info "  Recorded the approval (.sandy-approved-gitdir): asked again only if the .git file names another directory."
+    _SANDY_GD_VERDICT=approved
+    return 0
+}
+# The --start approval pass: the same gate, for the gitdir the launch mounts.
+_sandy_gitdir_gate_workspace() {
+    local _gw_r _gw_h
+    [ -f "$WORK_DIR/.git" ] || return 0
+    _gw_r="$(_sandy_gitdir_rel)"
+    [ -n "$_gw_r" ] || return 0
+    _gw_h="$(_sandy_gitdir_host "$_gw_r")"
+    _sandy_gitdir_gate "$_gw_r" "$_gw_h"
 }
 # The submodule gitdirs under modules/ directory $1 that get the :ro overlay,
 # NUL-separated: walked with no depth limit and without following links. A
@@ -4419,7 +4753,7 @@ SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2
 SANDY_RELAY|bool|||1.11.0|deprecated|REMOVED in 2.6.0 (#382) after its 2.5.0 announcement: setting it from ANY source (environment, host config or a workspace .sandy/config), to any value, is a HARD ERROR naming the replacement -- add the sandbox to a feature manifest's "sandboxes": {"exclude": [...]}. There is deliberately no per-feature off switch and no replacement key. The key stays in the passive tier only so the loader recognizes it and fails rather than silently ignoring it as unknown.
 SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
 SANDY_GH_ACCOUNT|string||^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$|2.9.0|stable|Which forwarded gh account is active in the container. Sandy forwards every account the host's gh is logged in to; without this it picks: the only account; else the account named like origin's owner; else the first account GitHub says can push to origin (one API call per account at launch -- what an org-owned repo needs, since no account is named like the org); else the host's active gh account. Chosen on the host at launch, recorded in the session marker as github{account,reason}, and shown by sandy --accounts. The push check is skipped with SANDY_OFFLINE=1. Set it where more than one account can push and the choice is a preference, or host-wide so switching the host's active gh account does not change sandboxes. A name that is not one of the host's accounts warns and falls back to that automatic choice. Passive-safe: it only chooses among tokens already forwarded.
-SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
+SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Nor, for the same reason, does it answer the 2.12.0 approval of a git directory outside the workspace that a .git file names (#598). Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_CHANNEL|enum:release,dev|||2.8.0|stable|Which build `sandy --upgrade` installs (install.sh reads the same variable). Unset (default): the latest GitHub release, the version the update notice names; a dev or rc build newer than that release is left alone. release: the same, except that it also replaces a newer dev or rc build with the release. dev: the head of main, pinned to its commit and recording it, so --version tells dev builds apart and the next dev upgrade compares commits. Env-only: it is read before any config file is loaded. A failed release lookup is an error, never a silent fallback to main.
 SANDY_CLAUDE_SESSIONS|enum:0,1|1||2.9.0|stable|Set to 0 for one launch to ignore the workspace's named Claude sessions (.sandy/sessions/*.md) and get an ordinary claude pane. Default 1: on an interactive or --start launch with claude selected, each session file brings up one named background Claude Code session (created when missing, resumed when found) and the claude pane runs Claude Code's agent view. Env-only, so a committed config cannot switch an operator's agents off.
@@ -8224,8 +8558,8 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     fi
 
     # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage),
-    # agent-args.<agent> files, and, with --keep-approvals, the approved-symlinks
-    # list. The next launch re-materializes pip/uv/npm/go/cargo + agent state
+    # agent-args.<agent> files, and, with --keep-approvals, the approval lists
+    # (symlinks, and the #598 gitdir). The next launch re-materializes pip/uv/npm/go/cargo + agent state
     # from scratch. What survives is what an operator set and nothing else
     # recreates: agent-args.<agent> files are operator state (see sandy's
     # "per-agent args" block) -- destroying them would silently un-configure a
@@ -8240,7 +8574,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # preserve the one thing the reset is most likely being run to clear.
     # claude/projects/ is not here either: --keep-history keeps it by emptying
     # claude/ AROUND it in the destroy loop below, not through this predicate.
-    _rs_keep() { case "$1" in WORKSPACE.json|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    _rs_keep() { case "$1" in WORKSPACE.json|agent-args.*) return 0 ;; .sandy-approved-symlinks.list|.sandy-approved-gitdir) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
     # #333: --keep-history keeps claude/projects/ and NOTHING else, and an
     # operator who chose it "in order not to lose history" was not told what it
     # does not reach -- a daemon's delivery ledger under claude/, another
@@ -8252,7 +8586,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # destroyed entry that is not one of those is named. That keeps sandy
     # uncoupled from consumers (the reason option 1 on #333 was declined) while
     # still naming a directory nobody here has heard of.
-    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|launch|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|launch|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list|.sandy-approved-gitdir) return 0 ;; esac; return 1; }
     _rs_not_kept() {
         local _e _c _bn _n=0
         for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -18765,6 +19099,10 @@ _sandy_approve_only_finish() {
         exit 0
     fi
     mkdir -p "$SANDBOX_DIR"
+    # #598: the gitdir a .git file names, judged (and, outside the workspace
+    # and unrecognized, asked about) before the symlink gate, as the launch
+    # judges it before its scan.
+    _sandy_gitdir_gate_workspace
     _sandy_resolve_symlinks
     if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
         if ! _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; then
@@ -19665,8 +20003,32 @@ _sandy_resolve_symlinks() {
                 if [ -n "$_new" ]; then _rs="refused"; else _rs="approved"; _rby="approval_file"; fi
             fi
         fi
+        # #598: the gitdir a .git file names is judged by this gate too, as
+        # its `gitdir` member, and the gate's status is the more severe of the
+        # two (refused > changed > pending > approved > not_applicable): both
+        # refuse a launch that cannot ask. Judged by the launch's own
+        # _sandy_gitdir_judge; nothing is written.
+        local _gdr="" _gdh="" _gds=not_applicable _gdrel=none _gdt="" _gdat="" _gdn _gdo=0
+        if [ -f "$WORK_DIR/.git" ]; then
+            _gdr="$(_sandy_gitdir_rel)"
+            [ -z "$_gdr" ] || _gdh="$(_sandy_gitdir_host "$_gdr")"
+        fi
+        _sandy_gitdir_judge "$_gdr" "$_gdh"
+        case "$_SANDY_GD_VERDICT" in
+            inside) _gdrel=inside_workspace; _gdt="$_gdh" ;;
+            submodule) _gdrel=submodule; _gdt="$_SANDY_GD_PHYS" ;;
+            notgit) _gdrel=not_a_git_directory; _gds=refused; _gdt="$_gdh" ;;
+            sandy) _gdrel=sandy_state; _gds=refused; _gdt="$_SANDY_GD_PHYS" ;;
+            approved|pending|changed) _gdrel=unrecognized; _gds="$_SANDY_GD_VERDICT"; _gdt="$_SANDY_GD_PHYS"; _gdat="$_SANDY_GD_AT" ;;
+        esac
+        for _gdn in "$_rs" "$_gds"; do
+            case "$_gdn" in refused) _gdn=4 ;; changed) _gdn=3 ;; pending) _gdn=2 ;; approved) _gdn=1 ;; *) _gdn=0 ;; esac
+            [ "$_gdn" -le "$_gdo" ] || _gdo="$_gdn"
+        done
+        case "$_gdo" in 4) _rs=refused ;; 3) _rs=changed ;; 2) _rs=pending ;; 1) _rs=approved ;; *) _rs=not_applicable ;; esac
+        if [ "$_rs" = approved ]; then _rby="approval_file"; else _rby=""; fi
         _sandy_approve_report_add symlinks "$_rs" "$_rh" "$_rl" "$_rby" "" launch_refused \
-            "\"symlinks\":$(_sandy_json_str_array "$_cur"),\"new\":$(_sandy_json_str_array "$_new")"
+            "\"symlinks\":$(_sandy_json_str_array "$_cur"),\"new\":$(_sandy_json_str_array "$_new"),\"gitdir\":{\"status\":\"$_gds\",\"relationship\":\"$_gdrel\",\"target\":$(_sandy_json_or_null "$_gdt"),\"approval_file\":$(_sandy_json_or_null "${SANDBOX_DIR:+$SANDBOX_DIR/.sandy-approved-gitdir}"),\"approved_at\":$(_sandy_json_or_null "$_gdat")}"
         return 0
     fi
 
@@ -24904,29 +25266,34 @@ if [ -f "$WORK_DIR/.git" ]; then
         # next `git push`. _sandy_resolve_symlinks cannot see any of it: `.git`
         # is a regular FILE, not a link, so the scan finds nothing to approve.
         #
-        # The gate is STRUCTURAL rather than a path prefix, because a legitimate
-        # submodule gitdir is deliberately outside $WORK_DIR (it lives under the
-        # superproject) and a --separate-git-dir may be anywhere the user chose.
-        # "Is it actually a git directory" is the property that separates those
-        # from ~/.ssh, ~/.aws and /etc, and it needs no canonicalization. A
-        # directory an attacker could already furnish with HEAD/objects/refs is
-        # one they can already write, so the check gives nothing away.
-        if [ -z "$GITDIR_HOST" ] || [ ! -f "$GITDIR_HOST/HEAD" ] || \
-           [ ! -d "$GITDIR_HOST/objects" ] || [ ! -d "$GITDIR_HOST/refs" ]; then
-            echo "[sandy] ERROR: .git names a gitdir that is not a git directory: '$GITDIR_REL'" >&2
-            echo "[sandy]        Resolved to: ${GITDIR_HOST:-<unresolvable>}" >&2
-            echo "[sandy]        Refusing to bind-mount it. A .git FILE is repository content, so an" >&2
-            echo "[sandy]        arbitrary path there would mount a host directory of the repository's" >&2
-            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/." >&2
-            _sandy_daemon_fatal
-            exit 1
-        fi
+        # The first gate is STRUCTURAL ("is it actually a git directory":
+        # HEAD, objects/, refs/), which separates a gitdir from ~/.ssh, ~/.aws
+        # and /etc and needs no canonicalization. It runs first, wherever the
+        # directory lies.
+        #
+        # #598 (2.12.0): structure alone is NOT enough outside the workspace.
+        # 1.14.0 reasoned that a directory an attacker could furnish with
+        # HEAD/objects/refs is one they can already write, so the check gives
+        # nothing away. A sibling repository the user owns is the
+        # counterexample: `gitdir: ../other/.git` passes the check, and the
+        # agent then gets read-write access to that repository's objects and
+        # refs, so it can rewrite its history. A gitdir outside the workspace
+        # is mounted only when sandy recognizes the relationship (this
+        # workspace's submodule gitdir under the superproject that contains
+        # it) or the user approved that directory for this workspace once
+        # (_sandy_gitdir_gate; headless and non-TTY launches refuse).
+        _sandy_gitdir_gate "$GITDIR_REL" "$GITDIR_HOST"
         if [[ "$GITDIR_HOST" == "$HOME"/* ]]; then
             _gitdir_rel="${GITDIR_HOST#$HOME/}"
             GITDIR_CONTAINER="/home/sandy/$_gitdir_rel"
         else
             GITDIR_CONTAINER="$GITDIR_HOST"
         fi
+        # Outside the workspace the mount source is the physical directory the
+        # gate judged, so re-pointing a link along the spelled path between
+        # the gate and docker run cannot mount another one. (The container
+        # path stays the spelled one: the .git file resolves to it there.)
+        [ -z "$_SANDY_GD_PHYS" ] || GITDIR_HOST="$_SANDY_GD_PHYS"
         _sandy_commondir_seed "$WORK_DIR" "$SANDBOX_DIR"
         RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_CONTAINER")
         # R5b: the gitdir is mounted RW because git must write it (index, refs,
@@ -24948,6 +25315,9 @@ if [ -f "$WORK_DIR/.git" ]; then
         [ -f "$GITDIR_HOST/commondir" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/commondir:$GITDIR_CONTAINER/commondir:ro")
         [ -f "$GITDIR_HOST/config.worktree" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config.worktree:$GITDIR_CONTAINER/config.worktree:ro")
         info "  Git submodule: gitdir at $GITDIR_CONTAINER"
+    elif [ -s "$WORK_DIR/.git" ]; then
+        # Not a `gitdir: ` file, so git cannot use it either; nothing is mounted for it.
+        warn "The workspace's .git file does not start with 'gitdir: ', so it names no git directory; none is mounted for it (git in the session will not find a repository)."
     fi
 fi
 _sandy_resolve_symlinks

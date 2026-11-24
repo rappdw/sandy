@@ -160,7 +160,7 @@ Abridged from the real output of `sandy --print-schema` (2.11.1): every field sh
         "base_type": "bool",
         "since": "0.11.2",
         "stability": "internal",
-        "description": "Bypass TWO of the three launch approval gates: ...",
+        "description": "Bypass TWO of the launch approval gates: ...",
         "sources": ["env"]
       },
       {
@@ -1000,7 +1000,9 @@ What each **launch approval gate** would decide for one workspace, without grant
      "approved_by": "approval_file", "approved_at": "2026-04-15T10:00:00Z", "if_unanswered": "keys_dropped",
      "keys": ["ANTHROPIC_API_KEY", "SANDY_SSH"], "sources": [".sandy/.secrets", ".sandy/config"]},
     {"gate": "symlinks", "status": "not_applicable", "hash": null, "approval_file": "/Users/drapp/.sandy/sandboxes/zork-a1b2c3d4/.sandy-approved-symlinks.list",
-     "approved_by": null, "approved_at": null, "if_unanswered": "launch_refused", "symlinks": [], "new": []},
+     "approved_by": null, "approved_at": null, "if_unanswered": "launch_refused", "symlinks": [], "new": [],
+     "gitdir": {"status": "not_applicable", "relationship": "none", "target": null,
+                "approval_file": "/Users/drapp/.sandy/sandboxes/zork-a1b2c3d4/.sandy-approved-gitdir", "approved_at": null}},
     {"gate": "dockerfile", "status": "changed", "hash": "51c2…", "approval_file": "/Users/drapp/.sandy/approvals/dockerfile-abc123….list",
      "approved_by": null, "approved_at": "2026-04-16T09:30:00Z", "if_unanswered": "base_image",
      "dockerfile": "/Users/drapp/dev/foo/zork/.sandy/Dockerfile", "context_files": ["Dockerfile", "setup.sh"], "session_created": false}
@@ -1013,12 +1015,12 @@ What each **launch approval gate** would decide for one workspace, without grant
 - **`gates`** — always exactly three, in this order. `status` is one of:
   - `approved` — the launch proceeds with it; `approved_by` says why: `approval_file` (the stored hash matches) or `auto_approve` (`SANDY_AUTO_APPROVE_PRIVILEGED=1` in this environment — the key and Dockerfile gates only; the symlink gate never honours it).
   - `pending` — no approval on record. A terminal launch would ask; one without a terminal applies `if_unanswered`.
-  - `changed` — an approval exists for **different content** (a key value, or any build-context file, changed since). Same consequence as `pending`; `approved_at` is the date of the approval that no longer matches.
-  - `refused` — symlinks only: an escape **not** in the approved list. The launch hard-errors on it and no prompt can answer it (by design — see "Persistent symlink approval"); `new` names the entries.
+  - `changed` — an approval exists for **different content** (a key value, or any build-context file, changed since; for `symlinks`, 2.12.0, a `.git` file now naming another directory than the one approved). Same consequence as `pending`; `approved_at` is the date of the approval that no longer matches.
+  - `refused` — symlinks only: an escape **not** in the approved list, or (2.12.0) a `.git` file naming a directory that is not a git directory or lies in `$SANDY_HOME`. The launch hard-errors on it and no prompt can answer it (by design — see "Persistent symlink approval"); `new` names the entries.
   - `not_applicable` — the workspace asks for nothing this gate governs.
 - **`if_unanswered`** — what a launch that cannot ask does: `keys_dropped` (the session runs without them), `launch_refused` (exit `1`; `--start` exit `6`), `base_image` (the agent image runs instead of the project image).
 - **`hash`** — what the approval is keyed on, exactly as the writer stores it as the approval file's first line: the key set's hash (it encodes the values, as the stored one does), the build-context hash (`_sandy_context_hash`), and for symlinks the sha256 of the sorted `link -> target` list. `null` when not applicable.
-- **Gate-specific members.** `passive_privileged`: `keys` (NAMES only — values are credentials and never appear) and `sources` (workspace-relative). `symlinks`: `symlinks` and `new`, in the approved list's own `link -> target` form. `dockerfile`: `dockerfile` (path), `context_files` (what the approval covers and the build is sent; contents not reported), and `session_created` (bool: a sandy session created this `.sandy/` — #295's flag, which the next approval prompt leads with; the report reads it and never clears it).
+- **Gate-specific members.** `passive_privileged`: `keys` (NAMES only — values are credentials and never appear) and `sources` (workspace-relative). `symlinks`: `symlinks` and `new`, in the approved list's own `link -> target` form, and (added additively in 2.12.0, #598) `gitdir`, the verdict on the git directory a workspace `.git` FILE names (SPECIFICATION.md E.8): `status` (`not_applicable`, `approved`, `pending`, `changed` — approved for another directory — or `refused`), `relationship` (`none` — no `.git` file naming one; `inside_workspace`; `submodule` — recognized, mounted with no prompt; `unrecognized` — outside the workspace, needs the one-time approval; `not_a_git_directory` and `sandy_state`, both refused), `target` (the physical directory, `null` with `none`), `approval_file` (`<sandbox>/.sandy-approved-gitdir`) and `approved_at` (the date the approval on record was given, or `null`). The gate's own `status` is the more severe of the links' verdict and this one (`refused` > `changed` > `pending` > `approved` > `not_applicable`): both refuse a launch that cannot ask, and `SANDY_AUTO_APPROVE_PRIVILEGED` answers neither. The gitdir verdict rides on this gate rather than being a fourth, so `gates` keeps its three entries. `dockerfile`: `dockerfile` (path), `context_files` (what the approval covers and the build is sent; contents not reported), and `session_created` (bool: a sandy session created this `.sandy/` — #295's flag, which the next approval prompt leads with; the report reads it and never clears it).
 - **`unresolved`** — the gates whose status is `pending`, `changed` or `refused`. `[]` means an unattended launch gets everything this workspace asks for.
 - **`complete: false`** — no report: a bad argument, a missing workspace, or the launch path stopped **before reaching the gates** (an invalid config value, a removed key such as `SANDY_RELAY`). `error` says which; `gates` is then `[]` or partial and must not be read as a verdict. Run `sandy` in the workspace to see the launch's own message.
 

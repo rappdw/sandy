@@ -580,6 +580,16 @@ _a6_diag() {   # $1 = label  $2 = CASE
     printf '    \033[0;33m^ %s: rc %s, output (last 400 bytes): %s\033[0m\n' \
         "$1" "${_A6_RC:-none}" "$(tail -c 400 "$_A6_DIR/$2/out" 2>/dev/null | tr '\n' ' ' | cat -v)"
 }
+# _a6_gitdir_approve CASE TARGET: the approval a "y" at the #598 gitdir prompt
+# records (written by sandy's own _sandy_gitdir_record), for a fixture whose
+# .git file names a git directory outside its workspace that is no submodule
+# gitdir, as a --separate-git-dir is not.
+_A6_GDREC="$(sed -n '/^_sandy_hex() {/,/^}$/p; /^_sandy_gitdir_record() {/,/^}$/p' "$SANDY_SCRIPT")"
+_a6_gitdir_approve() {   # $1 = CASE  $2 = the git directory
+    local s
+    s="$(_a6_sandbox "$1")"; mkdir -p "$s"
+    SANDBOX_DIR="$s" bash -c "$_A6_GDREC"$'\n''_sandy_gitdir_record "$1" "$2"' _ "$_A6_DIR/$1/ws" "$(cd -P "$2" && pwd -P)"
+}
 
 # --- Independent launches run side by side (§236-§239) ----------------------
 # A launch through these stubs is a few hundred short-lived processes, about a
@@ -13405,7 +13415,12 @@ _fx_sandbox_dir
 _S130_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 # The block, after the two helpers it resolves the gitdir with (shared with
 # the by-name symlink sweep).
-sed -n '/^_sandy_gitdir_rel() {/,/^}$/p; /^_sandy_gitdir_host() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S130_DIR/gitblk.sh"
+: > "$_S130_DIR/gitblk.sh"
+for _f in _sandy_gitdir_rel _sandy_gitfile_read _sandy_gitdir_host _sandy_ws_physical _sandy_is_gitdir _sandy_phys_dir _sandy_gitmodules_read \
+          _sandy_gitmodules_parse _sandy_submodule_name_ok _sandy_gitdir_submodule_of _sandy_gitdir_judge _sandy_gitdir_gate; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
+done
+unset _f
 awk '/^if \[ -f "\$WORK_DIR\/\.git" \]; then$/,/^fi$/' "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
 sed -n '/^_sandy_is_protected_rel() {/,/^}$/p'   "$SANDY_SCRIPT"  > "$_S130_DIR/pred.sh"
 sed -n '/^_sandy_protected_files() {/,/^}$/p'    "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
@@ -13441,13 +13456,17 @@ _s130_git() {   # _s130_git <gitdir-line> [missing-marker]
              "$d/home/dev/super/.git/modules/vendor/lib/refs" \
              "$d/home/dev/super/vendor/lib" "$d/home/.ssh"
     printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
+    # The superproject declares the submodule (#598: an outside gitdir is
+    # mounted with no prompt only as this workspace's submodule gitdir).
+    mkdir -p "$d/home/dev/super/.git/objects" "$d/home/dev/super/.git/refs"; printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/HEAD"
+    printf '[submodule "vendor/lib"]\n\tpath = vendor/lib\n' > "$d/home/dev/super/.gitmodules"
     printf '[core]\n'               > "$d/home/dev/super/.git/modules/vendor/lib/config"; mkdir -p "$d/home/dev/super/.git/modules/vendor/lib/objects" "$d/home/dev/super/.git/modules/vendor/lib/refs"; printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
     printf 'PRIVATE-KEY\n'          > "$d/home/.ssh/id_ed25519"
     [ -n "${2:-}" ] && rm -rf "$d/home/dev/super/.git/modules/vendor/lib/$2"
     printf '%s\n' "$1" > "$d/home/dev/super/vendor/lib/.git"
     (
         trap - ERR; set +e
-        info() { :; }
+        info() { :; }; warn() { :; }; warn_lit() { :; }; error() { :; }; error_lit() { :; }
         _sandy_daemon_fatal() { return 0; }
         HOME="$d/home"; WORK_DIR="$d/home/dev/super/vendor/lib"; RUN_FLAGS=()
         . "$_S130_DIR/gitblk.sh" >/dev/null 2>&1 || exit $?
@@ -28383,6 +28402,7 @@ _s248_wt() {   # $1 = CASE: ws/.git -> ../realgit, with commondir and a submodul
     mkdir -p "$_A6_DIR/$1/ws" "$g/objects" "$g/refs" "$g/modules/sub"
     printf 'ref: refs/heads/main\n' > "$g/HEAD"; printf '[core]\n' > "$g/config"; printf '../main\n' > "$g/commondir"
     printf '[core]\n' > "$g/modules/sub/config"; mkdir -p "$g/modules/sub/objects" "$g/modules/sub/refs"; printf 'ref: refs/heads/main\n' > "$g/modules/sub/HEAD"; printf 'gitdir: ../realgit\n' > "$_A6_DIR/$1/ws/.git"
+    _a6_gitdir_approve "$1" "$g"   # #598: outside the workspace and no submodule gitdir
 }
 _s248_wta() {   # $1 = workspace: .git/worktrees/wt1 (commondir) and wt2 (commondir, config.worktree)
     local n
@@ -34397,7 +34417,7 @@ check "§258(e2) a launch whose teardown cannot reach the docker daemon (inspect
 # after the provisional report is reported.
 _S258_C=s258-gitf; _S258_W="$_A6_DIR/$_S258_C/ws"; _S258_G="$_A6_DIR/$_S258_C/realgit"
 mkdir -p "$_S258_W" "$_S258_G/objects" "$_S258_G/refs"; printf 'ref: refs/heads/main\n' > "$_S258_G/HEAD"; printf '[core]\n' > "$_S258_G/config"
-printf 'gitdir: ../realgit\n' > "$_S258_W/.git"
+printf 'gitdir: ../realgit\n' > "$_S258_W/.git"; _a6_gitdir_approve "$_S258_C" "$_S258_G"   # #598
 _a6_launch "$_S258_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_SURVIVE=1 PATH="$_S258_PATH"
 _S258_R="$( { grep -q "^gitdir	[0-9a-f]" "$(ls "$(_a6_sandbox "$_S258_C")/.protected-provisional/"*.info 2>/dev/null | head -n 1)" 2>/dev/null || echo "the gitdir was not recorded beside the kept snapshot (rc $_A6_RC)"; } 2>&1)" || true
 mkdir -p "$_S258_G/worktrees/new"; printf 'ref: refs/heads/new\n' > "$_S258_G/worktrees/new/HEAD"
@@ -34591,6 +34611,332 @@ rm -rf "$_S259_D"
 _a6_done
 unset -f _s259_gd _s259_case _s259_fix _s259_plant
 unset _S259_K _S259_KINDS _S259_N _S259_C _S259_W _S259_G _S259_L _S259_OK _S259_R _S259_D
+echo ""
+
+# ============================================================
+section "§260: a gitdir a .git FILE names outside the workspace is mounted only for a recognized relationship (this workspace's submodule gitdir, nested ones included) or after a one-time approval naming it, kept per workspace and target; headless launches refuse, the --start pass asks on the client tty, SANDY_AUTO_APPROVE_PRIVILEGED does not approve it, and a linked worktree's admin dir is still refused (#598)"
+# ============================================================
+_fx_a6
+# WHY. R5a (1.14.0) accepted any gitdir that is a git directory by structure
+# (HEAD, objects/, refs/), wherever it lies, on the premise that a directory an
+# attacker could furnish so is one they can already write. A sibling
+# repository the user owns is the counterexample: a workspace whose .git file
+# says `gitdir: ../other/.git` launched with no prompt and that repository's
+# objects and refs mounted READ-WRITE, so the agent could rewrite its history.
+# Decision (2.12.0, option A): outside the workspace, a gitdir is mounted with
+# no prompt only when it is this workspace's submodule gitdir (the nearest
+# enclosing repository's .gitmodules declares this path, and the gitdir is
+# <its gitdir>/modules/<NAME>); anything else asks once, recorded per workspace
+# and target in the sandbox; a launch that cannot ask refuses.
+#
+# Every fixture is a real git layout made by git itself (submodule add,
+# --separate-git-dir, worktree add), except the fakes in (4), which are shaped
+# to pass for a submodule gitdir and are not one. The submodule names hold a
+# space and differ from their paths: git names modules/<dir> by the NAME.
+_S260_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_S260_MSG="This git directory needs a one-time approval, but stdin is not a terminal."
+_s260_git() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+        GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
+        git -c protocol.file.allow=always -c init.defaultBranch=main -c advice.detachedHead=false "$@" >/dev/null 2>&1
+}
+_s260_repo() { _s260_git init -q "$1" && _s260_git -C "$1" commit -q --allow-empty -m init; }
+_S260_SRC="$_A6_DIR/s260-src"; _s260_repo "$_S260_SRC"
+# Not named pty.py: a script of that name shadows the module it imports.
+_S260_PTY="$_A6_DIR/s260-ptydrive.py"
+cat > "$_S260_PTY" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]; argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try: os.execvp(argv[0], argv)
+    finally: os._exit(127)
+buf = b''; sent = False; deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try: d = os.read(fd, 4096)
+        except OSError: break
+        if not d: break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode()); sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+rc = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 128 + os.WTERMSIG(st)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+sys.stdout.write('\nPTYDRIVE_RC=%d\n' % rc)
+PY
+# _a6_launch on a pty that answers the first [y/N] with $2; _A6_RC is sandy's.
+_s260_pty() {   # $1 = CASE  $2 = answer  [VAR=value ...] [-- sandy-args ...]
+    local c="$_A6_DIR/$1" ans="$2" envs args; shift 2
+    envs=(); args=(-p fixture)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
+    rm -rf "$c/runs"; mkdir -p "$c/ws" "$c/sh" "$c/runs"; : > "$c/events.log"
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$c/ws" && env PATH="$_A6_DIR/bin:$PATH" HOME="$c" SANDY_HOME="$c/sh" \
+            A6_LOG="$c" A6_WS="$c/ws" A6_CWS=/home/sandy/ws A6_OS=Linux SANDY_EGRESS=off SANDY_OFFLINE=1 \
+            ${envs[@]+"${envs[@]}"} python3 "$_S260_PTY" "$ans" bash "$_A6_SCRIPT" ${args[@]+"${args[@]}"} </dev/null >"$c/out" 2>&1
+    ) || true
+    _A6_RC="$(sed -n 's/^PTYDRIVE_RC=\([0-9][0-9]*\).*/\1/p' "$c/out")"
+    [ -n "$_A6_RC" ] || _A6_RC=lost
+}
+# Refused by the gate without a terminal: rc 1, no agent run, the message and
+# the target named, no approval recorded, and the target in no docker argv.
+_s260_refused() {   # $1 = CASE  $2 = the target (physical)
+    [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args "$1")" ] && grep -qF -- "$_S260_MSG" "$_A6_DIR/$1/out" \
+        && grep -qF -- "$2" "$_A6_DIR/$1/out" && [ ! -e "$(_a6_sandbox "$1")/.sandy-approved-gitdir" ] \
+        && ! grep -rqsF -- "$2" "$_A6_DIR/$1/runs"
+}
+# Launched (rc 0) with the gitdir mounted from $2 at $3, asked nothing.
+_s260_mounted() {   # $1 = CASE  $2 = host  $3 = container
+    [ "$_A6_RC" = 0 ] && _a6_pair "$(_a6_agent_args "$1")" -v "$2:$3" && ! grep -qF "one-time approval" "$_A6_DIR/$1/out"
+}
+
+# (1) Real submodules, made by `git submodule add`: one in $HOME (the
+# superproject), named "lib one" at path ws; and one nested, "inner lib" at ws
+# in submodule "mid" (path mid) of s260-nest.
+_S260_D="$_A6_DIR/s260-sub"; _s260_repo "$_S260_D"; _s260_git -C "$_S260_D" submodule add -q --name "lib one" "$_S260_SRC" ws
+_a6_bg s260-sub _a6_launch s260-sub "${_S260_K[@]}"
+_S260_D="$_A6_DIR/s260-nest"; _s260_repo "$_S260_D"; _s260_git -C "$_S260_D" submodule add -q --name mid "$_S260_SRC" mid
+_s260_git -C "$_S260_D/mid" submodule add -q --name "inner lib" "$_S260_SRC" ws
+_a6_bg s260-nest/mid _a6_launch s260-nest/mid "${_S260_K[@]}"
+# (2) --separate-git-dir, spelled through a link (store -> store-real), with a
+# second separate git dir beside it: headless, then approved at the real
+# prompt (a pty answering y, in the approval pass), then launched, then the
+# .git file pointed at the other directory.
+_s260_sep() {
+    local c="$_A6_DIR/s260-sep"
+    _a6_launch s260-sep "${_S260_K[@]}"; cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"
+    _s260_pty s260-sep y "${_S260_K[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$c/result" --
+    cp "$c/out" "$c/out.2"; echo "$_A6_RC" > "$c/rc.2"
+    cp "$(_a6_sandbox s260-sep)/.sandy-approved-gitdir" "$c/approval.2" 2>/dev/null || true
+    _a6_launch s260-sep "${_S260_K[@]}"; cp "$c/out" "$c/out.3"; echo "$_A6_RC" > "$c/rc.3"; cp "$(_a6_agent_args s260-sep)" "$c/args.3" 2>/dev/null || true
+    _a6_launch s260-sep "${_S260_K[@]}" -- --approvals --workspace "$c/ws"; cp "$c/out" "$c/out.4"; echo "$_A6_RC" > "$c/rc.4"
+    printf 'gitdir: ../store/b.git\n' > "$c/ws/.git"
+    _a6_launch s260-sep "${_S260_K[@]}"; cp "$c/out" "$c/out.5"; echo "$_A6_RC" > "$c/rc.5"; rm -rf "$c/runs.5"; cp -R "$c/runs" "$c/runs.5"
+    _a6_launch s260-sep "${_S260_K[@]}" -- --approvals --workspace "$c/ws"; echo "$_A6_RC" > "$c/rc.6"
+}
+_S260_C="$_A6_DIR/s260-sep"; mkdir -p "$_S260_C/store-real"; ln -s store-real "$_S260_C/store"
+_s260_git init -q --separate-git-dir "$_S260_C/store-real/a.git" "$_S260_C/ws"; _s260_git init -q --bare "$_S260_C/store-real/b.git"
+printf 'gitdir: ../store/a.git\n' > "$_S260_C/ws/.git"
+if command -v python3 >/dev/null 2>&1; then _a6_bg s260-sep _s260_sep; fi
+# (3) a sibling repository; (5) the same with SANDY_AUTO_APPROVE_PRIVILEGED=1.
+for _S260_N in sib auto; do
+    _S260_C="$_A6_DIR/s260-$_S260_N"; _s260_repo "$_S260_C/other"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../other/.git\n' > "$_S260_C/ws/.git"
+done
+_a6_bg s260-sib _a6_launch s260-sib "${_S260_K[@]}"
+_a6_bg s260-auto _a6_launch s260-auto "${_S260_K[@]}" SANDY_AUTO_APPROVE_PRIVILEGED=1
+# (4) fakes. unl: $HOME is a repository with a bare repository at
+# .git/modules/x, and its .gitmodules declares x at another path. name: it
+# declares path ws under the name y (modules/y exists too). anc: the
+# superproject that declares ws as x is a sibling, not an ancestor. link:
+# declared as x at ws, but .git/modules/x is a link to a repository elsewhere.
+# nest: $HOME (mid) declares ws as x and holds its gitdir under ITS gitdir's
+# modules/x, but mid is a --separate-git-dir repository, no one's submodule.
+_s260_fkc() { case "$1" in nest) echo s260-fk-nest/mid ;; *) echo "s260-fk-$1" ;; esac; }
+_s260_fake() {   # $1 = kind
+    local c="$_A6_DIR/$(_s260_fkc "$1")"
+    mkdir -p "$c/ws"
+    case "$1" in
+        nest) mkdir -p "$c/../store"; _s260_git init -q --separate-git-dir "$c/../store/mid.git" "$c"; _s260_git init -q --bare "$c/../store/mid.git/modules/x"
+              printf '[submodule "x"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../../store/mid.git/modules/x\n' > "$c/ws/.git"
+              echo "$_A6_DIR/s260-fk-nest/store/mid.git/modules/x" ;;
+        unl)  _s260_repo "$c"; _s260_git init -q --bare "$c/.git/modules/x"; printf '[submodule "x"]\n\tpath = other\n' > "$c/.gitmodules"
+              printf 'gitdir: ../.git/modules/x\n' > "$c/ws/.git"; echo "$c/.git/modules/x" ;;
+        name) _s260_repo "$c"; _s260_git init -q --bare "$c/.git/modules/x"; _s260_git init -q --bare "$c/.git/modules/y"
+              printf '[submodule "y"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../.git/modules/x\n' > "$c/ws/.git"; echo "$c/.git/modules/x" ;;
+        anc)  _s260_repo "$c/osup"; _s260_git init -q --bare "$c/osup/.git/modules/x"; printf '[submodule "x"]\n\tpath = ws\n' > "$c/osup/.gitmodules"
+              printf 'gitdir: ../osup/.git/modules/x\n' > "$c/ws/.git"; echo "$c/osup/.git/modules/x" ;;
+        link) _s260_repo "$c"; _s260_git init -q --bare "$c/elsewhere/x.git"; mkdir -p "$c/.git/modules"; ln -s ../../elsewhere/x.git "$c/.git/modules/x"
+              printf '[submodule "x"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../.git/modules/x\n' > "$c/ws/.git"; echo "$c/elsewhere/x.git" ;;
+    esac
+}
+for _S260_N in unl name anc link nest; do
+    _s260_fake "$_S260_N" > "$_A6_DIR/s260-fk-$_S260_N.target"
+    _a6_bg "$(_s260_fkc "$_S260_N")" _a6_launch "$(_s260_fkc "$_S260_N")" "${_S260_K[@]}"
+done
+# (8) a git directory inside $SANDY_HOME is refused outright, as a link there is.
+_S260_C="$_A6_DIR/s260-sh"; _s260_git init -q --bare "$_S260_C/sh/x.git"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../sh/x.git\n' > "$_S260_C/ws/.git"
+_a6_bg s260-sh _a6_launch s260-sh "${_S260_K[@]}"
+# (6) --start. pp: the approval pass with no terminal refuses and starts
+# nothing; then the supervisor itself refuses, dropping the .fatal marker.
+# cli: the REAL --start client on a pty, answered n: it asks there, and exits
+# 6 without forking a supervisor. ok: the pass answered y on a pty, then the
+# supervisor launches and mounts the approved directory.
+_s260_pp() {
+    local c="$_A6_DIR/s260-pp"
+    _a6_launch s260-pp "${_S260_K[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$c/result" --
+    cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"; cp "$c/events.log" "$c/events.1"
+    _a6_launch s260-pp "${_S260_K[@]}" SANDY_DAEMON_SUPERVISOR=1 SANDY_DAEMON_LOG="$c/dlog" A6_TERM_ON_DETACH=1 -- --start --workspace "$c/ws"
+}
+_s260_ok() {
+    local c="$_A6_DIR/s260-ok"
+    _s260_pty s260-ok y "${_S260_K[@]}" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$c/result" --
+    cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"
+    _a6_launch s260-ok "${_S260_K[@]}" SANDY_DAEMON_SUPERVISOR=1 A6_TERM_ON_DETACH=1 -- --start --workspace "$c/ws"
+}
+for _S260_N in pp cli ok; do
+    _S260_C="$_A6_DIR/s260-$_S260_N"; _s260_repo "$_S260_C/other"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../other/.git\n' > "$_S260_C/ws/.git"
+done
+_a6_bg s260-pp _s260_pp
+if command -v python3 >/dev/null 2>&1; then
+    _a6_bg s260-cli _s260_pty s260-cli n "${_S260_K[@]}" -- --start --workspace "$_A6_DIR/s260-cli/ws"
+    _a6_bg s260-ok _s260_ok
+fi
+# (7) a linked worktree made by `git worktree add`: its admin directory has no
+# objects/, so the structural check refuses it, as before #598.
+_S260_C="$_A6_DIR/s260-wt"; _s260_repo "$_S260_C/main"; _s260_git -C "$_S260_C/main" worktree add -q "$_S260_C/ws"
+_a6_bg s260-wt _a6_launch s260-wt "${_S260_K[@]}"
+
+_a6_join s260-sub; _S260_D="$_A6_DIR/s260-sub"
+_S260_OK=0; { _s260_mounted s260-sub "$_S260_D/.git/modules/lib one" "/home/sandy/.git/modules/lib one" \
+    && [ ! -e "$(_a6_sandbox s260-sub)/.sandy-approved-gitdir" ]; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(1a)" s260-sub
+check "§260(1a) a real submodule checkout (git submodule add, named \"lib one\" at path ws) launches headless with no prompt and its gitdir .git/modules/lib one mounted, nothing recorded (mutation: the submodule test dropped, or modules/<path> taken for modules/<name>; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_join s260-nest/mid; _S260_D="$_A6_DIR/s260-nest"
+_S260_OK=0; _s260_mounted s260-nest/mid "$_S260_D/.git/modules/mid/modules/inner lib" "$_S260_D/.git/modules/mid/modules/inner lib" || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(1b)" s260-nest/mid
+check "§260(1b) ...and a nested one (\"inner lib\" at ws in submodule mid): its gitdir .git/modules/mid/modules/inner lib is recognized through mid's own .gitmodules and gitdir (mutation: the nested superproject not followed; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+
+if command -v python3 >/dev/null 2>&1; then
+    _a6_join s260-sep; _S260_C="$_A6_DIR/s260-sep"; _S260_T="$_S260_C/store-real/a.git"
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.1")" = 1 ] && grep -qF -- "$_S260_MSG" "$_S260_C/out.1" && grep -qF -- "$_S260_T" "$_S260_C/out.1" \
+      && grep -qF "SANDY_AUTO_APPROVE_PRIVILEGED does not approve it" "$_S260_C/out.1"; } || _S260_OK=$?
+    check "§260(2a) a --separate-git-dir workspace launched headless is refused (rc 1) by name, the physical target given, and says how to approve it (mutation: the [ -t 0 ] test dropped, the read takes EOF as no; rc $(cat "$_S260_C/rc.1" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.2")" = 0 ] && grep -qF "Mount it read-write for this workspace? [y/N]" "$_S260_C/out.2" && grep -qF -- "$_S260_T" "$_S260_C/out.2" \
+      && grep -qF "read-write access to that repository's" "$_S260_C/out.2" && [ -s "$_S260_C/approval.2" ]; } || _S260_OK=$?
+    check "§260(2b) the approval pass on a terminal asks, naming the target and the read-write access to its history, and a y records it (rc $(cat "$_S260_C/rc.2" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.3")" = 0 ] && _a6_pair "$_S260_C/args.3" -v "$_S260_T:/home/sandy/store/a.git" \
+      && ! grep -qF "one-time approval" "$_S260_C/out.3" && cmp -s "$_S260_C/approval.2" "$(_a6_sandbox s260-sep)/.sandy-approved-gitdir"; } || _S260_OK=$?
+    check "§260(2c) ...then a headless launch mounts it, from the PHYSICAL directory approved (store-real/a.git, spelled store/a.git) at the spelled container path, asking nothing (mutation: the source left as spelled; rc $(cat "$_S260_C/rc.3" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.5")" = 1 ] && grep -qF -- "$_S260_MSG" "$_S260_C/out.5" && grep -qF -- "$_S260_C/store-real/b.git" "$_S260_C/out.5" \
+      && grep -qF "The approval on record is for a different directory: $_S260_T" "$_S260_C/out.5" \
+      && ! grep -rqsF -- "$_S260_C/store-real/b.git" "$_S260_C/runs.5" \
+      && cmp -s "$_S260_C/approval.2" "$(_a6_sandbox s260-sep)/.sandy-approved-gitdir"; } || _S260_OK=$?
+    check "§260(2d) the .git file pointed at another directory after the approval asks again (headless: refused, naming the new target and the approved one), the record unchanged (mutation: the record matched on the workspace alone; rc $(cat "$_S260_C/rc.5" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+    _S260_OK=0
+    _S260_R="$(python3 - "$_S260_C/out.4" "$_S260_T" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); s = [x for x in d["gates"] if x["gate"] == "symlinks"][0]; g = s["gitdir"]
+want = ("approved", "approved", "unrecognized", sys.argv[2])
+print("ok" if (s["status"], g["status"], g["relationship"], g["target"]) == want and g["approved_at"] else "got %s %s" % (s["status"], g))
+PY
+)" || _S260_R="unparsed"
+    { [ "$_S260_R" = ok ] && [ "$(cat "$_S260_C/rc.4")" = 0 ] && [ "$(cat "$_S260_C/rc.6")" = 2 ]; } || _S260_OK=1
+    check "§260(2e) --approvals reports it under the symlinks gate (gitdir: approved, unrecognized, the target; exit 0), and as unresolved once the target changes (exit 2) (${_S260_R:-none}; rc $(cat "$_S260_C/rc.4" 2>/dev/null) then $(cat "$_S260_C/rc.6" 2>/dev/null))" \
+        test "$_S260_OK" = 0
+else
+    skip "§260(2) python3 not available to drive the prompt on a pty"
+fi
+
+_a6_join s260-sib; _S260_OK=0; _s260_refused s260-sib "$_A6_DIR/s260-sib/other/.git" || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(3)" s260-sib
+check "§260(3) a sibling repository (gitdir: ../other/.git) launched headless is refused by the gate, naming it; nothing of it reaches a docker run (mutation: the outside gate dropped: mounted rw as before; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_join s260-auto; _S260_OK=0; _s260_refused s260-auto "$_A6_DIR/s260-auto/other/.git" || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(5)" s260-auto
+check "§260(5) ...and with SANDY_AUTO_APPROVE_PRIVILEGED=1 the same: the bypass does not approve it (mutation: the bypass honoured; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+for _S260_N in unl name anc link nest; do
+    _S260_C="$(_s260_fkc "$_S260_N")"
+    _a6_join "$_S260_C"; _S260_OK=0; _s260_refused "$_S260_C" "$(cat "$_A6_DIR/s260-fk-$_S260_N.target")" || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(4) $_S260_N" "$_S260_C"
+    case "$_S260_N" in
+        unl) _S260_R="a gitdir under the enclosing repository's .git/modules/x that its .gitmodules declares at another path (mutation: the path not compared)" ;;
+        name) _S260_R="...declared at ws under another name, y (mutation: modules/<name> not compared)" ;;
+        anc) _S260_R="...under a sibling's .git/modules/x that declares ws as x: not an ancestor (mutation: any repository's declaration taken)" ;;
+        link) _S260_R="...declared as x at ws, with .git/modules/x a link to a repository elsewhere (mutation: the spelled path compared, not the physical one)" ;;
+        nest) _S260_R="...declared as x at ws by a repository whose own gitdir is a --separate-git-dir, not a submodule gitdir (mutation: the enclosing repository's gitdir not judged in turn)" ;;
+    esac
+    check "§260(4) $_S260_N: $_S260_R is not recognized, so a headless launch refuses it (rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+done
+
+_a6_join s260-pp; _S260_C="$_A6_DIR/s260-pp"
+_S260_OK=0
+{ [ "$(cat "$_S260_C/rc.1")" = 1 ] && grep -qF -- "$_S260_MSG" "$_S260_C/out.1" && ! grep -q "^docker run" "$_S260_C/events.1" \
+  && [ ! -e "$(_a6_sandbox s260-pp)/.sandy-approved-gitdir" ]; } || _S260_OK=$?
+check "§260(6a) under --start the approval pass with no terminal refuses (rc 1, so --start exits 6 before forking), runs no container and records nothing (mutation: the pass does not call the gate; rc $(cat "$_S260_C/rc.1" 2>/dev/null))" \
+    test "$_S260_OK" = 0
+_S260_OK=0
+{ [ "$_A6_RC" != 0 ] && [ -e "$_S260_C/dlog.fatal" ] && grep -qF -- "$_S260_MSG" "$_S260_C/out" && [ -z "$(_a6_agent_args s260-pp)" ]; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(6b)" s260-pp
+check "§260(6b) ...and the supervisor (no approval granted) refuses with the .fatal marker, so the client stops at once (rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+if command -v python3 >/dev/null 2>&1; then
+    _a6_join s260-cli; _S260_C="$_A6_DIR/s260-cli"
+    _S260_OK=0
+    { [ "$_A6_RC" = 6 ] && grep -qF "Mount it read-write for this workspace? [y/N]" "$_S260_C/out" && grep -qF -- "$_S260_C/other/.git" "$_S260_C/out" \
+      && ! grep -q "^docker run" "$_S260_C/events.log" && [ ! -e "$(_a6_sandbox s260-cli)/.sandy-approved-gitdir" ]; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(6c)" s260-cli
+    check "§260(6c) the real --start client on a terminal asks there (the pass's prompt, naming the target), and answered n exits 6 with no supervisor and no container (rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+    _a6_join s260-ok; _S260_C="$_A6_DIR/s260-ok"
+    _S260_OK=0
+    { [ "$(cat "$_S260_C/rc.1")" = 0 ] && _a6_pair "$(_a6_agent_args s260-ok)" -v "$_S260_C/other/.git:/home/sandy/other/.git" \
+      && ! grep -qF "one-time approval" "$_S260_C/out"; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(6d)" s260-ok
+    check "§260(6d) answered y in the approval pass, the headless supervisor mounts the approved directory (rc ${_A6_RC:-none})" \
+        test "$_S260_OK" = 0
+else
+    skip "§260(6c,6d) python3 not available to drive the prompt on a pty"
+fi
+_a6_join s260-wt; _S260_C="$_A6_DIR/s260-wt"
+_S260_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s260-wt)" ] && grep -qF ".git names a gitdir that is not a git directory" "$_S260_C/out" \
+  && ! grep -qF "one-time approval" "$_S260_C/out"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(7)" s260-wt
+check "§260(7) a linked worktree (git worktree add) is still refused by the structural check, before any approval is offered (rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+_a6_join s260-sh; _S260_C="$_A6_DIR/s260-sh"
+_S260_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s260-sh)" ] && grep -qF "names a git directory inside sandy's own state: $_S260_C/sh/x.git" "$_S260_C/out" \
+  && ! grep -qF "[y/N]" "$_S260_C/out"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(8)" s260-sh
+check "§260(8) a git directory inside \$SANDY_HOME is refused outright, with no approval offered (mutation: the sandy-state test dropped; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+# (9) The .gitmodules reader without git (_sandy_gitmodules_parse) reads what
+# git reads: names and paths with spaces, a quoted name with an escaped quote,
+# keys in any case, quoted values, escapes, comments, a key on the header
+# line, and keys of other sections ignored. Compared with git config -z itself.
+_S260_D="$(cd "$(mktemp -d)" && pwd -P)"
+for _f in _sandy_gitmodules_read _sandy_gitmodules_parse; do sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S260_D/fns.sh"; done
+unset _f
+printf '%s\n' '[submodule "lib one"]' '	path = lib one' '	url = ../x' '[Submodule "q\"uote"] ; a comment' '	PATH = "with  spaces " # trailing' \
+    '[submodule "semi"]' '	path = a;b' '[submodule "esc"]' '	path = a\\b' '[submodule "tab"]' '	path = "x\ty"' \
+    '[submodule "h"] path = inline' '[core]' '	path = notsub' '[submodule "dot.path"]' '	path = d' > "$_S260_D/gm"
+_s260_gm() {   # $1 = dir  [$2 = PATH] -> the pairs read
+    bash -c '. "$1/fns.sh"; [ -z "$2" ] || PATH="$2"; _sandy_gitmodules_read "$1/gm"
+             for i in "${!_SANDY_GM_NAMES[@]}"; do printf "[%s=%s]" "${_SANDY_GM_NAMES[$i]}" "${_SANDY_GM_PATHS[$i]}"; done' _ "$1" "${2:-}" 2>&1 | tr '\t' '~'
+}
+# PATH with awk and nothing else: no git.
+mkdir "$_S260_D/bin"; ln -s "$(command -v awk)" "$_S260_D/bin/awk"
+_S260_G="$(_s260_gm "$_S260_D")"; _S260_P="$(_s260_gm "$_S260_D" "$_S260_D/bin")"
+check "§260(9) without git, .gitmodules is read as git reads it: every submodule.<name>.path pair the same, in order (mutation: quotes or comments not handled; git: $_S260_G; parser: $_S260_P)" \
+    bash -c '[ "$1" = "$2" ] && [ "$(printf "%s" "$1" | tr -cd "[" | wc -c | tr -d " ")" = 7 ]' _ "$_S260_G" "$_S260_P"
+rm -rf "$_S260_D"
+_a6_done
+unset -f _s260_git _s260_repo _s260_pty _s260_refused _s260_mounted _s260_sep _s260_fake _s260_fkc _s260_pp _s260_ok _s260_gm
+unset _S260_K _S260_MSG _S260_SRC _S260_PTY _S260_D _S260_C _S260_N _S260_T _S260_OK _S260_R _S260_G _S260_P
 echo ""
 
 # BEGIN SUMMARY
