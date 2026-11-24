@@ -13416,7 +13416,7 @@ _S130_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 # The block, after the two helpers it resolves the gitdir with (shared with
 # the by-name symlink sweep).
 : > "$_S130_DIR/gitblk.sh"
-for _f in _sandy_gitdir_rel _sandy_gitfile_read _sandy_gitdir_host _sandy_ws_physical _sandy_is_gitdir _sandy_phys_dir _sandy_gitmodules_read \
+for _f in _sandy_gitdir_rel _sandy_gitfile_read _sandy_gitdir_host _sandy_ws_physical _sandy_is_gitdir _sandy_phys_dir _sandy_gitmodules_read _sandy_gitmodules_pairs \
           _sandy_gitmodules_parse _sandy_submodule_name_ok _sandy_gitdir_submodule_of _sandy_gitdir_judge _sandy_gitdir_gate; do
     sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/gitblk.sh"
 done
@@ -34909,7 +34909,7 @@ check "§260(7) a linked worktree (git worktree add) is still refused by the str
     test "$_S260_OK" = 0
 _a6_join s260-sh; _S260_C="$_A6_DIR/s260-sh"
 _S260_OK=0
-{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s260-sh)" ] && grep -qF "names a git directory inside sandy's own state: $_S260_C/sh/x.git" "$_S260_C/out" \
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s260-sh)" ] && grep -qF "is or holds sandy's own state (\$SANDY_HOME): $_S260_C/sh/x.git" "$_S260_C/out" \
   && ! grep -qF "[y/N]" "$_S260_C/out"; } || _S260_OK=$?
 [ "$_S260_OK" = 0 ] || _a6_diag "§260(8)" s260-sh
 check "§260(8) a git directory inside \$SANDY_HOME is refused outright, with no approval offered (mutation: the sandy-state test dropped; rc ${_A6_RC:-none})" \
@@ -34919,23 +34919,141 @@ check "§260(8) a git directory inside \$SANDY_HOME is refused outright, with no
 # keys in any case, quoted values, escapes, comments, a key on the header
 # line, and keys of other sections ignored. Compared with git config -z itself.
 _S260_D="$(cd "$(mktemp -d)" && pwd -P)"
-for _f in _sandy_gitmodules_read _sandy_gitmodules_parse; do sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S260_D/fns.sh"; done
+for _f in _sandy_gitmodules_read _sandy_gitmodules_pairs _sandy_gitmodules_parse; do sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S260_D/fns.sh"; done
 unset _f
 printf '%s\n' '[submodule "lib one"]' '	path = lib one' '	url = ../x' '[Submodule "q\"uote"] ; a comment' '	PATH = "with  spaces " # trailing' \
     '[submodule "semi"]' '	path = a;b' '[submodule "esc"]' '	path = a\\b' '[submodule "tab"]' '	path = "x\ty"' \
     '[submodule "h"] path = inline' '[core]' '	path = notsub' '[submodule "dot.path"]' '	path = d' > "$_S260_D/gm"
 _s260_gm() {   # $1 = dir  [$2 = PATH] -> the pairs read
     bash -c '. "$1/fns.sh"; [ -z "$2" ] || PATH="$2"; _sandy_gitmodules_read "$1/gm"
-             for i in "${!_SANDY_GM_NAMES[@]}"; do printf "[%s=%s]" "${_SANDY_GM_NAMES[$i]}" "${_SANDY_GM_PATHS[$i]}"; done' _ "$1" "${2:-}" 2>&1 | tr '\t' '~'
+             for i in "${!_SANDY_GM_NAMES[@]}"; do printf "[%s=%s]" "${_SANDY_GM_NAMES[$i]}" "${_SANDY_GM_PATHS[$i]}"; done' _ "$1" "${2:-}" 2>&1 | tr '\t\n' '~^'
 }
 # PATH with awk and nothing else: no git.
 mkdir "$_S260_D/bin"; ln -s "$(command -v awk)" "$_S260_D/bin/awk"
 _S260_G="$(_s260_gm "$_S260_D")"; _S260_P="$(_s260_gm "$_S260_D" "$_S260_D/bin")"
 check "§260(9) without git, .gitmodules is read as git reads it: every submodule.<name>.path pair the same, in order (mutation: quotes or comments not handled; git: $_S260_G; parser: $_S260_P)" \
     bash -c '[ "$1" = "$2" ] && [ "$(printf "%s" "$1" | tr -cd "[" | wc -c | tr -d " ")" = 7 ]' _ "$_S260_G" "$_S260_P"
+# (9b) A name declared with two paths keeps the LAST one (git checks out and
+# maps that one), in one section or in two of that name; a path two names
+# declare is dropped. Both readers, on the same files.
+_s260_gmf() {   # $1 = file content (printf format) -> both readers, "git | parser"
+    printf "$1" > "$_S260_D/gm"
+    printf '%s | %s' "$(_s260_gm "$_S260_D")" "$(_s260_gm "$_S260_D" "$_S260_D/bin")"
+}
+_S260_R=""
+for _S260_N in 'sf|[submodule "lib"]\n\tpath = ws\n\tpath = decoy\n|[lib=decoy]' \
+               'sl|[submodule "lib"]\n\tpath = decoy\n\tpath = ws\n|[lib=ws]' \
+               'tf|[submodule "lib"]\n\tpath = ws\n[submodule "lib"]\n\tpath = decoy\n|[lib=decoy]' \
+               'tn|[submodule "lib"]\n\tpath = ws\n[submodule "other"]\n\tpath = ws/\n[submodule "z"]\n\tpath = z\n|[z=z]' \
+               'nl|[submodule "lib"]\n\tpath = ws\n\tpath = "x\\ny"\n|[lib=^]' \
+               'bad|[submodule "lib"]\n\tpath = ws\n[submodule "x"]\n\tpath = "open\n|'; do
+    _S260_G="$(_s260_gmf "$(printf '%s' "$_S260_N" | cut -d'|' -f2)")"
+    _S260_P="$(printf '%s' "$_S260_N" | cut -d'|' -f3)"
+    [ "$_S260_G" = "$_S260_P | $_S260_P" ] || _S260_R="$_S260_R ${_S260_N%%|*}: got [$_S260_G], want [$_S260_P]"
+done
+check "§260(9b) a name declared twice keeps its last path (one section or two; a last path holding a newline, shown ^, is kept as one that never matches), a path two names declare is dropped, and an unreadable file declares nothing, with git and without (mutation: every declaration kept; or a shared path kept; or a newline path skipped${_S260_R:+;$_S260_R})" \
+    test -z "$_S260_R"
 rm -rf "$_S260_D"
+# (10) Never sandy's state, the home directory, or a directory above either,
+# whatever an approval says, and no approval is offered. shanc: SANDY_HOME is
+# CASE/st/sh and the gitdir is CASE/st. home: the gitdir is CASE, which is
+# $HOME. hanc: $HOME is CASE/h and the gitdir is CASE. In home and hanc
+# SANDY_HOME is outside CASE, so only the home test applies. shanc and home
+# carry an approval of that target, written where their launch looks for it.
+_s260_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; }
+_s260_approve_in() {   # $1 = CASE  $2 = target  $3 = the SANDY_HOME the launch uses
+    _a6_gitdir_approve "$1" "$2"; mkdir -p "$3/sandboxes"; cp -R "$(_a6_sandbox "$1")" "$3/sandboxes/"
+}
+_S260_C="$_A6_DIR/s260-shanc"; _s260_gd "$_S260_C/st"; mkdir -p "$_S260_C/st/sh" "$_S260_C/ws"; printf 'gitdir: ../st\n' > "$_S260_C/ws/.git"
+_s260_approve_in s260-shanc "$_S260_C/st" "$_S260_C/st/sh"
+_a6_bg s260-shanc _a6_launch s260-shanc "${_S260_K[@]}" SANDY_HOME="$_S260_C/st/sh"
+_S260_C="$_A6_DIR/s260-home"; _s260_gd "$_S260_C"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ..\n' > "$_S260_C/ws/.git"
+_s260_approve_in s260-home "$_S260_C" "$_A6_DIR/s260-home-sh"
+_a6_bg s260-home _a6_launch s260-home "${_S260_K[@]}" SANDY_HOME="$_A6_DIR/s260-home-sh"
+_S260_C="$_A6_DIR/s260-hanc"; _s260_gd "$_S260_C"; mkdir -p "$_S260_C/ws" "$_S260_C/h" "$_A6_DIR/s260-hanc-sh"; printf 'gitdir: ..\n' > "$_S260_C/ws/.git"
+_a6_bg s260-hanc _a6_launch s260-hanc "${_S260_K[@]}" HOME="$_S260_C/h" SANDY_HOME="$_A6_DIR/s260-hanc-sh"
+# (11) a .git file holding a NUL byte names nothing (git would read `gitdir:
+# ../other/.git\r`, a path sandy cannot hold): warned, nothing mounted.
+_S260_C="$_A6_DIR/s260-nul"; _s260_repo "$_S260_C/other"; mkdir -p "$_S260_C/ws"; printf 'gitdir: ../other/.git\r\0' > "$_S260_C/ws/.git"
+_a6_bg s260-nul _a6_launch s260-nul "${_S260_K[@]}"
+# (12) duplicate declarations, on a real submodule "lib" at ws (git
+# submodule add), with .gitmodules then rewritten: sf/tf declare ws first and
+# decoy last (one section, two sections), sl/tl the other way round, tn
+# declares ws under two names. Git itself is asked which path it maps
+# (`git submodule status` on the gitlink at ws).
+_s260_dup() {   # $1 = kind
+    local c="$_A6_DIR/s260-dup-$1" u="$_S260_SRC"
+    _s260_repo "$c"; _s260_git -C "$c" submodule add -q --name lib "$_S260_SRC" ws
+    case "$1" in
+        sf) printf '[submodule "lib"]\n\tpath = ws\n\tpath = decoy\n\turl = %s\n' "$u" ;;
+        sl) printf '[submodule "lib"]\n\tpath = decoy\n\tpath = ws\n\turl = %s\n' "$u" ;;
+        tf) printf '[submodule "lib"]\n\tpath = ws\n\turl = %s\n[submodule "lib"]\n\tpath = decoy\n' "$u" ;;
+        tl) printf '[submodule "lib"]\n\tpath = decoy\n\turl = %s\n[submodule "lib"]\n\tpath = ws\n' "$u" ;;
+        tn) printf '[submodule "lib"]\n\tpath = ws\n\turl = %s\n[submodule "other"]\n\tpath = ws\n\turl = %s\n' "$u" "$u" ;;
+    esac > "$c/.gitmodules"
+    ( cd "$c" && env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git submodule status 2>&1 ) > "$c/git-status" || true
+}
+for _S260_N in sf sl tf tl tn; do
+    _s260_dup "$_S260_N"; _a6_bg "s260-dup-$_S260_N" _a6_launch "s260-dup-$_S260_N" "${_S260_K[@]}"
+done
+# (13) --approvals on `gitdir: vendor/.git` with vendor a link out of the
+# workspace: spelled inside, lying outside, so via_link (the link is the
+# symlink gate's, which reports it pending).
+_S260_C="$_A6_DIR/s260-vl"; _s260_repo "$_S260_C/outrepo"; mkdir -p "$_S260_C/ws"; ln -s "$_S260_C/outrepo" "$_S260_C/ws/vendor"
+printf 'gitdir: vendor/.git\n' > "$_S260_C/ws/.git"
+_a6_bg s260-vl _a6_launch s260-vl "${_S260_K[@]}" -- --approvals --workspace "$_S260_C/ws"
+
+for _S260_N in shanc home hanc; do
+    _S260_C="$_A6_DIR/s260-$_S260_N"; _a6_join "s260-$_S260_N"
+    case "$_S260_N" in
+        shanc) _S260_T="is or holds sandy's own state (\$SANDY_HOME): $_S260_C/st" ;;
+        *) _S260_T="is or holds your home directory: $_S260_C" ;;
+    esac
+    _S260_OK=0
+    { [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args "s260-$_S260_N")" ] && grep -qF -- "$_S260_T" "$_S260_C/out" \
+      && ! grep -qF "[y/N]" "$_S260_C/out" && ! grep -rqsF -- "$_S260_C:" "$_S260_C/runs"; } || _S260_OK=$?
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(10) $_S260_N" "s260-$_S260_N"
+    case "$_S260_N" in
+        shanc) _S260_R="a git directory holding \$SANDY_HOME (gitdir: ../st, SANDY_HOME=st/sh), approved or not, is refused with no approval offered (mutation: only a target under \$SANDY_HOME refused)" ;;
+        home) _S260_R="...and one that is \$HOME (gitdir: ..), approved or not (mutation: the home test dropped)" ;;
+        hanc) _S260_R="...and one holding \$HOME (HOME=h, gitdir: ..) (mutation: only \$HOME itself refused)" ;;
+    esac
+    check "§260(10) $_S260_N: $_S260_R (rc ${_A6_RC:-none})" test "$_S260_OK" = 0
+done
+_a6_join s260-nul; _S260_C="$_A6_DIR/s260-nul"
+_S260_OK=0
+{ [ "$_A6_RC" = 0 ] && grep -qF "or holds a NUL byte, so sandy takes it to name no git directory" "$_S260_C/out" \
+  && ! grep -rqsF -- "$_S260_C/other" "$_S260_C/runs" && ! grep -qF "[y/N]" "$_S260_C/out"; } || _S260_OK=$?
+[ "$_S260_OK" = 0 ] || _a6_diag "§260(11)" s260-nul
+check "§260(11) a .git file holding a NUL byte (gitdir: ../other/.git, CR, NUL) names nothing: warned, launched, nothing of ../other mounted (mutation: read up to the NUL; rc ${_A6_RC:-none})" \
+    test "$_S260_OK" = 0
+for _S260_N in sf sl tf tl tn; do
+    _S260_C="$_A6_DIR/s260-dup-$_S260_N"; _a6_join "s260-dup-$_S260_N"; _S260_OK=0
+    case "$_S260_N" in
+        sl|tl) { _s260_mounted "s260-dup-$_S260_N" "$_S260_C/.git/modules/lib" /home/sandy/.git/modules/lib \
+                 && ! grep -qF "no submodule mapping found in .gitmodules for path 'ws'" "$_S260_C/git-status"; } || _S260_OK=$?
+               _S260_R="ws declared last: git maps ws, and the launch mounts its gitdir with no prompt" ;;
+        sf|tf) { _s260_refused "s260-dup-$_S260_N" "$_S260_C/.git/modules/lib" \
+                 && grep -qF "no submodule mapping found in .gitmodules for path 'ws'" "$_S260_C/git-status"; } || _S260_OK=$?
+               _S260_R="ws declared first, decoy last: git does not map ws, and a headless launch refuses (mutation: every declaration kept)" ;;
+        tn) _s260_refused "s260-dup-$_S260_N" "$_S260_C/.git/modules/lib" || _S260_OK=$?
+            _S260_R="ws declared by two names: neither recognized, a headless launch refuses (mutation: a shared path kept)" ;;
+    esac
+    [ "$_S260_OK" = 0 ] || _a6_diag "§260(12) $_S260_N" "s260-dup-$_S260_N"
+    check "§260(12) $_S260_N: $_S260_R (git: $(head -c 120 "$_S260_C/git-status" | tr '\n' ' '); rc ${_A6_RC:-none})" test "$_S260_OK" = 0
+done
+_a6_join s260-vl; _S260_C="$_A6_DIR/s260-vl"
+_S260_R="$(python3 - "$_S260_C/out" "$_S260_C/outrepo/.git" <<'PY' 2>&1
+import json, sys
+d = json.load(open(sys.argv[1])); s = [x for x in d["gates"] if x["gate"] == "symlinks"][0]; g = s["gitdir"]
+got = (s["status"], g["status"], g["relationship"], g["target"])
+print("ok" if got == ("pending", "not_applicable", "via_link", sys.argv[2]) else "got %s" % (got,))
+PY
+)" || _S260_R="unparsed"
+check "§260(13) --approvals names a gitdir spelled inside the workspace but lying outside it through a link as via_link, with its physical place, the gate pending on the link (mutation: reported as inside_workspace; ${_S260_R:-none}; rc ${_A6_RC:-none})" \
+    test "$_S260_R" = ok
 _a6_done
-unset -f _s260_git _s260_repo _s260_pty _s260_refused _s260_mounted _s260_sep _s260_fake _s260_fkc _s260_pp _s260_ok _s260_gm
+unset -f _s260_git _s260_repo _s260_pty _s260_refused _s260_mounted _s260_sep _s260_fake _s260_fkc _s260_pp _s260_ok _s260_gm _s260_gmf _s260_gd _s260_approve_in _s260_dup
 unset _S260_K _S260_MSG _S260_SRC _S260_PTY _S260_D _S260_C _S260_N _S260_T _S260_OK _S260_R _S260_G _S260_P
 echo ""
 
