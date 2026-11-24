@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install host contract dependencies
         run: |
-          brew install coreutils jq
+          brew install coreutils jq bash
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Run contracts on macOS
         run: bash test/run-tests.sh --only harness,contracts --require-tools --log-dir /tmp/sandy-test-logs
