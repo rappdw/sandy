@@ -35490,8 +35490,9 @@ _S262_R="$( { [ "$_A6_RC" = 0 ] && [ -n "$_S262_A" ] || echo "launch rc $_A6_RC"
 [ -z "$_S262_R" ] || _a6_diag "§262(a)" "$_S262_C"
 check "§262(a) a launch of a main checkout with two linked worktrees mounts each worktree's admin dir .git/worktrees/<name> :ro (its commondir mount kept inside it), leaves worktrees/ writable, and repeats no mount destination (mutation: no admin-dir mount; ${_S262_R:-ok})" \
     test -z "$_S262_R"
-check "§262(c) the container's generated git setup sets gc.worktreePruneExpire=never, beside safe.directory (mutation: the line dropped)" \
-    bash -c 'grep -qxF "git config --global gc.worktreePruneExpire never" "$1" && grep -qF "safe.directory" "$1"' _ "$_A6_DIR/$_S262_C/sh/user-setup.sh"
+check "§262(c) the container's generated git setup sets gc.worktreePruneExpire=never, and gc.reflogExpire and gc.reflogExpireUnreachable never (gc's reflog expire --all would write the other worktrees' read-only logs/HEAD), beside safe.directory (mutation: a line dropped)" \
+    bash -c 'grep -qxF "git config --global gc.worktreePruneExpire never" "$1" && grep -qxF "git config --global gc.reflogExpire never" "$1" \
+             && grep -qxF "git config --global gc.reflogExpireUnreachable never" "$1" && grep -qF "safe.directory" "$1"' _ "$_A6_DIR/$_S262_C/sh/user-setup.sh"
 # (b) the "container" removes an admin dir during the session (a git worktree
 # prune that the :ro mount would refuse; here the stub plays it on the host):
 # the session-end report names it.
@@ -35499,8 +35500,8 @@ _S262_C=s262-rm; _s262_fix "$_S262_C"; _S262_W="$_A6_DIR/$_S262_C/ws"
 _a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN='rm -rf .git/worktrees/wt2' PATH="$_S248_PATH"
 _S262_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
     [ ! -e "$_S262_W/.git/worktrees/wt2" ] || echo "fixture: wt2 was not removed"
-    awk '/Linked worktree admin dir removed during this session/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt2" || echo "the removal is not reported"
-    if awk '/Linked worktree admin dir removed during this session/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt1"; then echo "wt1, still there, is reported"; fi; } 2>&1)" || true
+    awk '/Linked worktree admin dir removed while this session ran \(in the session or on the host\)/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt2" || echo "the removal is not reported"
+    if awk '/Linked worktree admin dir removed while this session ran \(in the session or on the host\)/ { on = 1 } on' "$_A6_DIR/$_S262_C/out" | grep -qF ".git/worktrees/wt1"; then echo "wt1, still there, is reported"; fi; } 2>&1)" || true
 [ -z "$_S262_R" ] || _a6_diag "§262(b)" "$_S262_C"
 check "§262(b) a linked worktree admin dir removed during the session is reported at its end, by name, and one still there is not (mutation: no check of the recorded admin dirs; ${_S262_R:-ok})" \
     test -z "$_S262_R"
@@ -35513,7 +35514,7 @@ rm -rf "$_S262_W/.git/worktrees/wt1"
 _a6_launch "$_S262_C" SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 PATH="$_S248_PATH"
 _S262_R="$( { [ "$_A6_RC" = 0 ] || echo "launch rc $_A6_RC"
     awk '/An EARLIER session/ { on = 1 } /End of the earlier session/ { on = 0 } on' "$_A6_DIR/$_S262_C/out" \
-        | awk '/Linked worktree admin dir removed during this session/ { on = 1 } on' | grep -qF ".git/worktrees/wt1" || echo "the re-judgement does not name the removed admin dir"; } 2>&1)" || true
+        | awk '/Linked worktree admin dir removed while this session ran \(in the session or on the host\)/ { on = 1 } on' | grep -qF ".git/worktrees/wt1" || echo "the re-judgement does not name the removed admin dir"; } 2>&1)" || true
 [ -z "$_S262_R" ] || _a6_diag "§262(d)" "$_S262_C"
 check "§262(d) ...and an admin dir removed after a provisional session-end report is named by the re-judgement of its kept snapshot (${_S262_R:-ok})" \
     test -z "$_S262_R"
@@ -35540,7 +35541,7 @@ rm -rf "$_S262_S/.protected-provisional"; rm -rf "$_S262_W/.git/worktrees/wt2"; 
 _a6_launch "$_S262_C" S248_DPID=2147480000 S248_SESS="$(basename "$_S262_S")" S248_MOUNTS="$_A6_DIR/$_S262_C/mounts" \
     S248_GONE="$_A6_DIR/$_S262_C/gone" PATH="$_S262_DB:$_S248_B:$_A6_DIR/bin:$PATH" -- --stop --workspace "$_S262_W"
 _S262_R="$( { [ -n "$_S262_P" ] || echo "fixture: no snapshot"
-    grep -qF "Linked worktree admin dir removed during this session" "$_S262_S/.session-end-report" 2>/dev/null || echo "the --stop report does not name a removal"
+    grep -qF "Linked worktree admin dir removed while this session ran (in the session or on the host)" "$_S262_S/.session-end-report" 2>/dev/null || echo "the --stop report does not name a removal"
     grep -qF ".git/worktrees/wt2" "$_S262_S/.session-end-report" 2>/dev/null || echo "the removed admin dir is not named"; } 2>&1)" || true
 [ -z "$_S262_R" ] || _a6_diag "§262(e)" "$_S262_C"
 check "§262(e) ...and --stop's direct teardown of a supervisor-less daemon records the removal in its report (rc ${_A6_RC:-none}; ${_S262_R:-ok})" \
@@ -35548,6 +35549,131 @@ check "§262(e) ...and --stop's direct teardown of a supervisor-less daemon reco
 _a6_done
 unset -f _s262_git _s262_fix
 unset _S262_C _S262_W _S262_A _S262_R _S262_N _S262_D _S262_DB _S262_S _S262_P
+echo ""
+
+# ============================================================
+section "§263: nothing sandy mounts from a gitdir outside the workspace (a submodule gitdir, or an approved one) is a link or reached through one: the launch refuses, with no approval, and a superproject session's end report names such a link it created (#598 review)"
+# ============================================================
+_fx_a6; _fx_s248
+# WHY. The gitdir a .git file names outside the workspace is mounted with its
+# config, hooks, info, commondir and config.worktree :ro, and those of every
+# submodule gitdir and worktree admin dir below it. The mount code tests them
+# with -f/-d, which follow links, and none of them is a workspace path, so
+# neither the dangerous-symlink gate nor the -v check judged them; Docker
+# follows a link at a -v source. A superproject shipped with its .git (a
+# tarball) whose modules/lib/config is a link to ~/.ssh/id_rsa launched its
+# submodule `lib` headless with rc 0, no prompt, and the key in the container
+# (verifier repro e13, reproduced on main). Second vector, no tarball: an
+# agent in a superproject session plants a link at such a path absent at its
+# launch; the next session of the submodule mounted it. Now every -v source
+# under that gitdir is walked from the gitdir and a link on it refuses the
+# launch (_sandy_gitdir_check_mounts), and the superproject's session-end
+# report names a link created there.
+_S263_K=(SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6)
+_S263_MSG="is a link, or is reached through one:"
+_s263_gd() { mkdir -p "$1/objects" "$1/refs"; printf 'ref: refs/heads/main\n' > "$1/HEAD"; printf '[core]\n' > "$1/config"; }
+_s263_git() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+        GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
+        git -c protocol.file.allow=always -c init.defaultBranch=main "$@" >/dev/null 2>&1
+}
+# (a) e13: $HOME (CASE) is a superproject delivered with its .git, lib at
+# path ws; CASE-out holds the targets. One link per case, in .git/modules/lib:
+# config -> a key, hooks -> a directory, worktrees/x/commondir -> a file,
+# and modules/sub/info (a nested submodule gitdir) -> a directory.
+_s263_e13() {   # $1 = kind -> the link, as named
+    local c="$_A6_DIR/s263-$1" o="$_A6_DIR/s263-$1-out" g
+    g="$c/.git/modules/lib"
+    mkdir -p "$o/dir" "$c/ws"; printf 'PRIVATE KEY\n' > "$o/id_rsa"; printf 'SECRET\n' > "$o/secret"
+    _s263_gd "$c/.git"; _s263_gd "$g"; printf '[submodule "lib"]\n\tpath = ws\n' > "$c/.gitmodules"; printf 'gitdir: ../.git/modules/lib\n' > "$c/ws/.git"
+    case "$1" in
+        config) rm -f "$g/config"; ln -s "$o/id_rsa" "$g/config"; echo "$g/config -> $o/id_rsa" ;;
+        hooks) ln -s "$o/dir" "$g/hooks"; echo "$g/hooks -> $o/dir" ;;
+        wtcd) mkdir -p "$g/worktrees/x"; printf 'ref: refs/heads/x\n' > "$g/worktrees/x/HEAD"; ln -s "$o/secret" "$g/worktrees/x/commondir"; echo "$g/worktrees/x/commondir -> $o/secret" ;;
+        nested) _s263_gd "$g/modules/sub"; ln -s "$o/dir" "$g/modules/sub/info"; echo "$g/modules/sub/info -> $o/dir" ;;
+        clean) mkdir -p "$g/hooks" "$g/info"; echo "" ;;
+    esac
+}
+for _S263_N in config hooks wtcd nested clean; do
+    _s263_e13 "$_S263_N" > "$_A6_DIR/s263-$_S263_N.link"
+    _a6_bg "s263-$_S263_N" _a6_launch "s263-$_S263_N" "${_S263_K[@]}"
+done
+# (b) the plant-then-launch vector. s263-plant/ws is a real superproject with
+# a real submodule lib at ws (so the submodule checkout is s263-plant/ws/ws,
+# launched as CASE s263-plant/ws). The superproject session's "container"
+# plants info and config.worktree links in .git/modules/lib, where none
+# existed at launch, and a new worktree admin dir n with a commondir link.
+_S263_O="$_A6_DIR/s263-plant-out"; mkdir -p "$_S263_O/dir"; printf 'SECRET\n' > "$_S263_O/secret"
+_S263_W="$_A6_DIR/s263-plant/ws"; _s263_git init -q "$_A6_DIR/s263-src" && _s263_git -C "$_A6_DIR/s263-src" commit -q --allow-empty -m s
+_s263_git init -q "$_S263_W" && _s263_git -C "$_S263_W" commit -q --allow-empty -m s && _s263_git -C "$_S263_W" submodule add -q --name lib "$_A6_DIR/s263-src" ws
+rm -rf "$_S263_W/.git/modules/lib/info"; rm -f "$_S263_W/.git/modules/lib/config.worktree"
+_S263_RUN="ln -s '$_S263_O/dir' .git/modules/lib/info; ln -s '$_S263_O/secret' .git/modules/lib/config.worktree; mkdir -p .git/modules/lib/worktrees/n; printf 'ref: refs/heads/n\\n' > .git/modules/lib/worktrees/n/HEAD; ln -s '$_S263_O/secret' .git/modules/lib/worktrees/n/commondir"
+_s263_plant() {
+    local c="$_A6_DIR/s263-plant"
+    _a6_launch s263-plant SANDY_AGENT=codex OPENAI_API_KEY=sk-fixture-a6 S248_RUN="$_S263_RUN" PATH="$_S248_PATH"
+    cp "$c/out" "$c/out.1"; echo "$_A6_RC" > "$c/rc.1"
+    _a6_launch s263-plant/ws "${_S263_K[@]}"
+}
+_a6_bg s263-plant _s263_plant
+
+for _S263_N in config hooks wtcd nested; do
+    _a6_join "s263-$_S263_N"; _S263_C="$_A6_DIR/s263-$_S263_N"; _S263_L="$(cat "$_A6_DIR/s263-$_S263_N.link")"
+    _S263_OK=0
+    { [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args "s263-$_S263_N")" ] && grep -qF -- "$_S263_MSG" "$_S263_C/out" \
+      && grep -qF -- "$_S263_L" "$_S263_C/out" && ! grep -qF "[y/N]" "$_S263_C/out" \
+      && ! grep -rqsF -- "$_A6_DIR/s263-$_S263_N-out" "$_S263_C/runs"; } || _S263_OK=$?
+    [ "$_S263_OK" = 0 ] || _a6_diag "§263(a) $_S263_N" "s263-$_S263_N"
+    _S263_R="${_S263_L%% -> *}"; _S263_R="${_S263_R#"$_S263_C/"}"
+    check "§263(a) $_S263_N: a recognized submodule with $_S263_R a link out of its gitdir is refused headless with no approval offered, the link named, nothing of its target in any docker argv (mutation: _sandy_gitdir_check_mounts not called; rc ${_A6_RC:-none})" \
+        test "$_S263_OK" = 0
+done
+_a6_join s263-clean; _S263_C="$_A6_DIR/s263-clean"; _S263_A="$(_a6_agent_args s263-clean)"
+_S263_OK=0
+{ [ "$_A6_RC" = 0 ] && _a6_pair "$_S263_A" -v "$_S263_C/.git/modules/lib/config:/home/sandy/.git/modules/lib/config:ro" \
+  && _a6_pair "$_S263_A" -v "$_S263_C/.git/modules/lib/hooks:/home/sandy/.git/modules/lib/hooks:ro" && ! grep -qF "[y/N]" "$_S263_C/out"; } || _S263_OK=$?
+[ "$_S263_OK" = 0 ] || _a6_diag "§263(a) clean" s263-clean
+check "§263(a) clean: the same layout with no link launches headless with no prompt, its config and hooks mounted :ro (mutation: every source under the gitdir refused; rc ${_A6_RC:-none})" \
+    test "$_S263_OK" = 0
+_a6_join s263-plant; _S263_C="$_A6_DIR/s263-plant"; _S263_G="$_S263_W/.git/modules/lib"
+_S263_R="$( { [ "$(cat "$_S263_C/rc.1")" = 0 ] || echo "superproject launch rc $(cat "$_S263_C/rc.1")"
+    for _S263_N in info config.worktree worktrees/n/commondir; do
+        grep -F -- ".git/modules/lib/$_S263_N -> " "$_S263_C/out.1" | grep -qF "(a symbolic link created during this session)" \
+            || echo "the session-end report does not name .git/modules/lib/$_S263_N"
+    done; } 2>&1)" || true
+[ -z "$_S263_R" ] || _a6_diag "§263(b1)" s263-plant
+check "§263(b1) a superproject session that creates links at its submodule gitdir's info and config.worktree, and a worktree admin dir there with a commondir link, has each named at session end as a link created during the session (mutation: only worktrees/ and modules/ entries listed; ${_S263_R:-ok})" \
+    test -z "$_S263_R"
+_S263_OK=0
+{ [ "$_A6_RC" = 1 ] && [ -z "$(_a6_agent_args s263-plant/ws)" ] && grep -qF -- "$_S263_MSG" "$_A6_DIR/s263-plant/ws/out" \
+  && grep -qF -- "$_S263_G/info -> $_S263_O/dir" "$_A6_DIR/s263-plant/ws/out" \
+  && ! grep -rqsF -- "$_S263_O" "$_A6_DIR/s263-plant/ws/runs"; } || _S263_OK=$?
+[ "$_S263_OK" = 0 ] || _a6_diag "§263(b2)" s263-plant/ws
+check "§263(b2) ...and the next session of that submodule (headless) refuses, naming them, with nothing of their targets mounted (mutation: _sandy_gitdir_check_mounts not called; rc ${_A6_RC:-none})" \
+    test "$_S263_OK" = 0
+# (c) Today's mount sites never reach a source through a linked directory
+# (the walkers skip links), but the check is derived from the argv, so a new
+# site would be judged too: a source below a linked directory under the
+# gitdir, and one with a `..` component, are refused; a plain one passes.
+_S263_D="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^_sandy_gitdir_check_mounts() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S263_D/fns.sh"
+mkdir -p "$_S263_D/g/modules/real/hooks" "$_S263_D/out/hooks"; ln -s "$_S263_D/out" "$_S263_D/g/modules/lnk"
+_s263_probe() {   # $1 = source under g -> "refused <output>" or "passed"
+    bash -c 'trap - ERR; set +e
+             error() { printf "%s\n" "$*"; }; error_lit() { error "$@"; }; _sandy_daemon_fatal() { :; }
+             . "$1/fns.sh"; GITDIR_HOST="$1/g"; _SANDY_GD_PHYS="$1/g"
+             RUN_FLAGS=(-v "$GITDIR_HOST:/c" -v "$GITDIR_HOST/$2:/c/$2:ro")
+             o="$(_sandy_gitdir_check_mounts 2>&1)" && echo passed || printf "refused %s\n" "$o"' _ "$_S263_D" "$1"
+}
+_S263_R=""
+case "$(_s263_probe modules/lnk/hooks)" in "refused "*"$_S263_D/g/modules/lnk -> $_S263_D/out"*) ;; *) _S263_R="$_S263_R through a link: $(_s263_probe modules/lnk/hooks | head -c 200);" ;; esac
+case "$(_s263_probe modules/real/../lnk/hooks)" in "refused "*"a '..' component"*) ;; *) _S263_R="$_S263_R a .. component: $(_s263_probe modules/real/../lnk/hooks | head -c 200);" ;; esac
+[ "$(_s263_probe modules/real/hooks)" = passed ] || _S263_R="$_S263_R plain: $(_s263_probe modules/real/hooks | head -c 200);"
+check "§263(c) a -v source under the gitdir reached through a linked directory, or holding a .. component, is refused, and a plain one passes (mutation: only the last component judged; ${_S263_R:-ok})" \
+    test -z "$_S263_R"
+rm -rf "$_S263_D"
+_a6_done
+unset -f _s263_gd _s263_git _s263_e13 _s263_plant _s263_probe
+unset _S263_K _S263_MSG _S263_N _S263_C _S263_L _S263_OK _S263_A _S263_O _S263_W _S263_RUN _S263_G _S263_R _S263_D
 echo ""
 
 # BEGIN SUMMARY

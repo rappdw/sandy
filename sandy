@@ -2950,23 +2950,40 @@ _sandy_env_file_report() {
 # it, modules/ itself, and any link at a component of a submodule path below
 # it, in the top-level .git, in the gitdir a .git file names, and in every
 # submodule gitdir (the walkers above never follow a link, so a link planted
-# there in-session has no mount and is reported instead, 2.9.0).
+# there in-session has no mount and is reported instead, 2.9.0). 2.12.0 (#598
+# review): also a link at the paths sandy mounts :ro from a submodule gitdir
+# and from the gitdir a .git file names (config, hooks, info, commondir,
+# config.worktree) and from each worktree admin dir (commondir,
+# config.worktree). Planted in-session where none existed at launch, it got
+# no mount, and a later session of that submodule or worktree would refuse
+# it (_sandy_gitdir_check_mounts); this names it now.
 _sandy_git_admin_links() {   # $1 = workspace
     local _g
     for _g in "$1/.git" ${GITDIR_HOST:+"$GITDIR_HOST"}; do
         [ -d "$_g" ] && [ ! -L "$_g" ] || continue
-        _sandy_git_links_under "$_g"
+        if [ "$_g" = "$1/.git" ]; then _sandy_git_links_under "$_g"; else _sandy_git_links_under "$_g" own; fi
     done
     return 0
 }
 _sandy_git_link_line() { printf '%s\t%s\n' "$1" "$(_sandy_link_hex "$1")"; }
-_sandy_git_links_under() {   # $1 = gitdir
-    local _c
+_sandy_git_links_under() {   # $1 = gitdir  [$2 = own: its own :ro paths too]
+    local _c _f
+    if [ "${2:-}" = own ]; then
+        for _f in config hooks info commondir config.worktree; do
+            [ ! -L "$1/$_f" ] || _sandy_git_link_line "$1/$_f"
+        done
+    fi
     if [ -L "$1/worktrees" ]; then
         _sandy_git_link_line "$1/worktrees"
     elif [ -d "$1/worktrees" ]; then
         while IFS= read -r -d '' _c; do
-            [ -L "$_c" ] && _sandy_git_link_line "$_c"
+            if [ -L "$_c" ]; then
+                _sandy_git_link_line "$_c"
+            elif [ -d "$_c" ]; then
+                for _f in commondir config.worktree; do
+                    [ ! -L "$_c/$_f" ] || _sandy_git_link_line "$_c/$_f"
+                done
+            fi
         done < <(find "$1/worktrees" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
     fi
     if [ -L "$1/modules" ]; then
@@ -2982,7 +2999,7 @@ _sandy_git_links_mod() {   # $1 = a directory under some modules/
         if [ -L "$_c" ]; then
             _sandy_git_link_line "$_c"
         elif [ -e "$_c/HEAD" ] || [ -d "$_c/objects" ] || [ -d "$_c/refs" ]; then
-            _sandy_git_links_under "$_c"
+            _sandy_git_links_under "$_c" own
         else
             _sandy_git_links_mod "$_c"
         fi
@@ -3040,13 +3057,13 @@ _sandy_git_admin_report() {
         esac
     done 2>/dev/null < "$1"
     if [ -n "$_rw" ]; then
-        printf "\n${YELLOW:-}[sandy]${NC:-} Linked worktree admin dir removed during this session:\n" >&2
+        printf "\n${YELLOW:-}[sandy]${NC:-} Linked worktree admin dir removed while this session ran (in the session or on the host):\n" >&2
         while IFS= read -r _t; do [ -z "$_t" ] || printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$_t" >&2; done <<< "$_rw"
         printf "${YELLOW:-}[sandy]${NC:-} The linked worktree that used it now fails on the host (fatal: not a git repository):\n" >&2
         printf "${YELLOW:-}[sandy]${NC:-} restore the directory from a backup, or move that worktree aside and add it again (git worktree add).\n\n" >&2
     fi
     if [ -n "$_rs" ]; then
-        printf "\n${YELLOW:-}[sandy]${NC:-} Submodule git dir removed during this session:\n" >&2
+        printf "\n${YELLOW:-}[sandy]${NC:-} Submodule git dir removed while this session ran (in the session or on the host):\n" >&2
         while IFS= read -r _t; do [ -z "$_t" ] || printf "${YELLOW:-}[sandy]${NC:-}   %q\n" "$_t" >&2; done <<< "$_rs"
         printf "${YELLOW:-}[sandy]${NC:-} Its submodule checkout now fails on the host until it is restored (git submodule update --init).\n\n" >&2
     fi
@@ -14554,6 +14571,12 @@ git config --global --add safe.directory "*"
 # #597: every linked worktree of the host looks gone from in here (its
 # gitdir file names a host path), so a git gc must never prune worktrees.
 git config --global gc.worktreePruneExpire never
+# ...and gc's `reflog expire --all` would write the other worktrees' logs/HEAD,
+# which are read-only here (their admin dirs are :ro mounts), so gc failed
+# (`cannot lock ref 'worktrees/<name>/HEAD'`). With both expiries `never`, gc
+# skips the reflog step. An explicit `git reflog expire --all` still fails.
+git config --global gc.reflogExpire never
+git config --global gc.reflogExpireUnreachable never
 
 # Set git identity from host
 if [ -n "${GIT_USER_NAME:-}" ]; then
@@ -20406,6 +20429,54 @@ _sandy_symlink_path_unjudged() {
 # Refuse the launch for the "PREFIX -> TARGET" lines in $1. A target in
 # $SANDY_HOME is never mounted, judged or not, so for one of those the fix is
 # removing the link: launching again cannot help.
+# 2.12.0 (#598 review): the gitdir a .git file names OUTSIDE the workspace
+# (a recognized submodule gitdir, or an approved one; GITDIR_HOST is then its
+# physical path) is mounted with its config, hooks, info, commondir and
+# config.worktree :ro, and the same of each submodule gitdir and worktree
+# admin dir below it. None of those is a workspace path, so neither the
+# dangerous-symlink gate nor _sandy_symlink_check_mounts judges them, and
+# Docker follows a link at a -v source: `modules/lib/config -> ~/.ssh/id_rsa`
+# in a superproject shipped with its .git (a tarball), or `info` planted
+# there by an agent in an earlier superproject session, handed the target to
+# the container with no prompt. So every -v source under GITDIR_HOST is
+# walked from GITDIR_HOST, component by component, and a link at the source
+# or above it (or a `.`/`..` component) refuses the launch: no approval,
+# because the repository chose the target. Derived from the assembled argv,
+# like _sandy_symlink_check_mounts, so a new mount site there is covered.
+_sandy_gitdir_check_mounts() {
+    [ -n "${_SANDY_GD_PHYS:-}" ] && [ -n "${GITDIR_HOST:-}" ] || return 0
+    local _i=0 _n=${#RUN_FLAGS[@]} _src _rest _seg _cur _bad="" _seen=$'\n' _l
+    while [ "$_i" -lt "$_n" ]; do
+        if [ "${RUN_FLAGS[$_i]}" = -v ] && [ $((_i + 1)) -lt "$_n" ]; then
+            _src="${RUN_FLAGS[$((_i + 1))]%%:*}"
+            case "$_src" in
+                "$GITDIR_HOST"/*)
+                    _rest="${_src#"$GITDIR_HOST"/}"; _cur="$GITDIR_HOST"
+                    while [ -n "$_rest" ]; do
+                        _seg="${_rest%%/*}"
+                        case "$_rest" in */*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+                        case "$_seg" in
+                            ''|.|..) _l="$_src (a '$_seg' component)" ;;
+                            *) _cur="$_cur/$_seg"; [ -L "$_cur" ] || continue
+                               _l="$_cur -> $(readlink "$_cur" 2>/dev/null || echo '?')" ;;
+                        esac
+                        case "$_seen" in *$'\n'"$_l"$'\n'*) ;; *) _seen="$_seen$_l"$'\n'; _bad="$_bad$_l"$'\n' ;; esac
+                        break
+                    done ;;
+            esac
+        fi
+        _i=$((_i + 1))
+    done
+    [ -n "$_bad" ] || return 0
+    error_lit "A path sandy mounts from the git directory outside the workspace ($GITDIR_HOST)"
+    error "is a link, or is reached through one:"
+    while IFS= read -r _l; do [ -z "$_l" ] || error_lit "  $_l"; done <<< "$_bad"
+    error "Docker follows a link there, so the container would get whatever it names. Sandy mounts"
+    error "nothing through a link in that git directory, approved or not: replace the link with the"
+    error "file or directory itself (or remove it). Nothing was started."
+    _sandy_daemon_fatal
+    exit 1
+}
 _sandy_symlink_unjudged_refuse() {
     local _l _t _shp _sh="" _other=""
     _shp="$(cd "$SANDY_HOME" 2>/dev/null && pwd -P)" || _shp=""
@@ -27920,6 +27991,9 @@ _sandy_pin_mount_ancestors
 # judged (B2): a backstop for the by-name sweep, derived from the argv itself.
 # It runs after the pins, so their sources are checked too.
 _sandy_symlink_check_mounts
+# And every -v source under the gitdir a .git file names outside the
+# workspace has no link on it (2.12.0, #598 review).
+_sandy_gitdir_check_mounts
 
 # The contents of every protected FILE as it ships, and a copy of each, for the
 # session-end report (_sandy_protected_hash_snapshot); then, on macOS, the lock
