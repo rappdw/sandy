@@ -2471,16 +2471,18 @@ _sandy_same_object() {
 }
 # Look snapshot file $1 up the way the session end always has, with no
 # process. With $2 "=": true when a line of it is exactly $3, as
-# `grep -qFx "$3" "$1"`. Otherwise variable $4 gets what
-# `awk -F '\t' -v p="$3" '$1 == "<$2>" && $2 == p { print "x" $3; exit }' "$1"`
-# printed: "x" and the third field of the first line whose fields 1 and 2 are
-# $2 and $3, or nothing. A $3 that command could read differently is looked
-# up by that very command instead, so the answer is always that command's: one
-# holding anything but plain path characters (an awk -v escape, a byte of
-# another encoding), one starting with `-` (an option to grep), and, for awk,
-# one that could look numeric (awk compares two numeric-looking strings as
-# numbers: `1e3 == 1000`). A key that holds a character no number has (`/`,
-# most letters, `_`) cannot, nor can a hex key with a letter in it.
+# `grep -qFx -e "$3" -- "$1"`. Otherwise variable $4 gets "x" and the third
+# field of the first line whose fields 1 and 2 are exactly $2 and $3 (tab
+# separated), or nothing. Bash answers the keys it can compare byte for byte
+# with no doubt; the rest go to the commands: a key holding anything but
+# plain path characters (a byte of another encoding, a backslash), one
+# starting with `-`, and, for the field lookup, one that could look numeric.
+# Both commands compare exact strings: grep -F -x with -e and `--` (so a `-`
+# key is a pattern, never an option, #592), and awk with the key taken from
+# the environment, not `-v` (which turns `\n` in a key into a newline, so a
+# key holding a backslash was looked up as another string), compared as
+# strings (`($2 "") == (p "")`: two numeric-looking strings compare as
+# numbers otherwise, `1e3 == 1000`).
 # Bash reads at most the first 200 lines (about 0.7 ms on Linux, one grep's
 # cost there); a lookup not answered by then is made by the command, so a
 # snapshot the session grew (one #envfile line per .env file) costs no more
@@ -2530,10 +2532,13 @@ _sandy_snap_scan() {
         fi
     fi
     if [ "$2" = "=" ]; then
-        if grep -qFx "$3" "$1" 2>/dev/null; then return 0; fi
+        # -e and --: a key starting with `-` is a pattern, never an option
+        # (#592: `-n` made grep take the snapshot path as the pattern and read
+        # stdin).
+        if grep -qFx -e "$3" -- "$1" 2>/dev/null; then return 0; fi
         return 1
     fi
-    printf -v "$4" '%s' "$(awk -F '\t' -v p="$3" -v k="$2" '$1 == k && $2 == p { print "x" $3; exit }' "$1" 2>/dev/null || true)"
+    printf -v "$4" '%s' "$(_SANDY_SS_P="$3" _SANDY_SS_K="$2" awk -F '\t' 'BEGIN { p = ENVIRON["_SANDY_SS_P"]; k = ENVIRON["_SANDY_SS_K"] } ($1 "") == (k "") && ($2 "") == (p "") { print "x" $3; exit }' "$1" 2>/dev/null || true)"
     return 0
 }
 _sandy_tree_fingerprint() {

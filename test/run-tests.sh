@@ -33941,9 +33941,35 @@ check "§256(f) the snapshot lookup answers as grep -qFx and the awk lookup do, 
                  a=0; grep -qFx "$k" "$f" || a=1; b=0; _sandy_snap_scan "$f" = "$k" || b=1
                  [ "$a" = "$b" ] || { echo "= $k: $a $b"; exit 1; }
              done' _ "$_S256_SNAP" "$_S256_SCAN"
+# (g) #592: a key starting with `-` is a pattern, never an option. `-n` and
+# `-e` are lines of the snapshot (and `-n` a #id key); before, grep read
+# `-n` as its -n flag and took the snapshot path for the pattern, so it read
+# stdin (here /dev/null: an answer of "absent" instead of a block) and the
+# lookup said 1. `-x` is absent. Both halves of the function are asked: a
+# `-` key always goes to the command, and so does every key of the long
+# snapshot past line 200.
+_S256_DSNAP="$_S256_D/dash.snap"
+printf '%s\n' '#gitdirs-recorded' '-n' '-e' "$(printf '#id\t-n\tvn')" > "$_S256_DSNAP"
+# A key holding a backslash: awk -v would read h\nb as h<newline>b and
+# h\\b as h\b, so the field lookup missed them (a false REPLACED).
+printf '#id\t%s\t%s\n' 'h\nb' vbn 'h\\b' vbb 'h\b' vb1 >> "$_S256_DSNAP"
+cat "$_S256_SNAP" "$_S256_DSNAP" > "$_S256_D/dash-long.snap"
+check "§256(g) a snapshot key starting with - (-n, -e) is looked up as a pattern: found when it is a line, not found when absent, its #id value read, and a key holding a backslash (h\\nb, h\\\\b, h\\b) is looked up as written, in a short snapshot and past line 200 of a long one, with stdin at end of file (mutations: grep -qFx without -e and -- answers absent for -n and -e, #592; awk -v p= misses the backslash keys)" \
+    bash -c 'eval "$2"; [ -n "$(declare -F _sandy_snap_scan)" ] || exit 1
+             for f in "$1" "$3"; do
+                 n=0
+                 for k in -n -e; do _sandy_snap_scan "$f" = "$k" || { echo "= $k not found in $f"; exit 1; }; n=$((n + 1)); done
+                 if _sandy_snap_scan "$f" = -x; then echo "= -x found in $f"; exit 1; fi
+                 _sandy_snap_scan "$f" "#id" -n v; [ "$v" = xvn ] || { echo "#id -n: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$4" v; [ "$v" = xvbn ] || { echo "#id $4: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$5" v; [ "$v" = xvbb ] || { echo "#id $5: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$6" v; [ "$v" = xvb1 ] || { echo "#id $6: [$v] in $f"; exit 1; }
+                 _sandy_snap_scan "$f" "#id" "$7" v; [ -z "$v" ] || { echo "#id $7 found: [$v] in $f"; exit 1; }
+                 [ "$n" = 2 ] || exit 1
+             done' _ "$_S256_DSNAP" "$_S256_SCAN" "$_S256_D/dash-long.snap" 'h\nb' 'h\\b' 'h\b' 'h\x' </dev/null
 _a6_done
 unset -f _s256_shims _s256_count
-unset _S256_SNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
+unset _S256_SNAP _S256_DSNAP _S256_SCAN _s256_i _S256_BUDGET _S256_BUDGET_MAC _S256_D _S256_K _S256_N _S256_REP _S256_RC2 _S256_RC3 _S256_ANCHOR _S256_M _S256_MOK _S256_SAVED _S256_TAMPER _S256_PRE _S256_CT _S256_LOCKED
 echo ""
 
 # ============================================================
