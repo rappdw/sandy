@@ -102,7 +102,7 @@ _SANDY_PROC_T0="${EPOCHSECONDS:-}"
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="2.12.1-dev"
+SANDY_VERSION="2.13.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 # What a SANDY_VERSION may look like: X.Y.Z, X.Y.Z-rcN, X.Y.Z-dev and
 # X.Y.Z-rcN-dev (main during an rc soak). --upgrade refuses a downloaded file
@@ -150,6 +150,7 @@ SANDY_PRIVILEGED_KEYS=(
     SANDY_HANDOFF_RELAY
     ANTHROPIC_PROFILE
     SANDY_SYMLINK_SCAN_SKIP
+    SANDY_WORKSPACE_AGENTS
 )
 
 # SANDY_PASSIVE_KEYS: allowed from a workspace .sandy/config (checked into
@@ -258,7 +259,12 @@ SANDY_ENV_ONLY_KEYS=(
 #           it EQUALS the baseline (default auto). No ranking among
 #           auto/oauth/adc/profile is attempted: different is gated.
 #   SANDY_AGENT: free only when every workspace agent is in the baseline set
-#           (default claude), after expanding the all alias on both sides.
+#           (default claude), after expanding the all alias on both sides,
+#           or in $4, the SANDY_WORKSPACE_AGENTS allowance (2.13.0): the
+#           validated names the privileged sources resolved, taken from the
+#           same pre-workspace snapshot as the baseline, so a workspace that
+#           sets the allowance itself cannot widen its own check. $4 is
+#           never alias-expanded (the allowance takes explicit names only).
 #           Narrowing and reordering are free; adding or replacing an agent
 #           is gated, because each agent brings its own host credentials.
 #           Skipped when --agent is given: the flag replaces the workspace
@@ -300,10 +306,11 @@ _sandy_passive_value_privileged() {
             [ "$2" = "${3:-auto}" ] && return 1
             return 0 ;;
         SANDY_AGENT)
-            # Ordered, as a set: every workspace agent must be in the baseline.
+            # Ordered, as a set: every workspace agent must be in the baseline
+            # or in the host's SANDY_WORKSPACE_AGENTS allowance ($4).
             [ -n "${SANDY_AGENT_OVERRIDE:-}" ] && return 1
             local _pvp_base _pvp_t _pvp_ws=()
-            _pvp_base=",$(_sandy_expand_agent_alias "${3:-claude}"),"
+            _pvp_base=",$(_sandy_expand_agent_alias "${3:-claude}"),${4:+$4,}"
             IFS=',' read -ra _pvp_ws <<< "$(_sandy_expand_agent_alias "$2")"
             for _pvp_t in ${_pvp_ws[@]+"${_pvp_ws[@]}"}; do
                 case "$_pvp_base" in
@@ -339,6 +346,40 @@ _sandy_expand_agent_alias() {
     else
         printf '%s' "$1"
     fi
+}
+
+# An agent name SANDY_AGENT accepts. One definition, shared by the agent
+# resolver and the SANDY_WORKSPACE_AGENTS parser, so the allowance accepts
+# exactly the names a launch can run.
+_sandy_is_agent_name() {
+    case "$1" in
+        claude|gemini|codex|opencode|grok|mirror) return 0 ;;
+    esac
+    return 1
+}
+
+# SANDY_WORKSPACE_AGENTS (2.13.0): the agents a workspace .sandy/config may
+# select through SANDY_AGENT with no approval, on top of the baseline the
+# ordered gate already allows. Explicit names only: `all` is not accepted (the
+# alias is being deprecated, #635), and an entry that is not an agent name is
+# dropped with a warning naming it; the rest still apply. One trailing comma is
+# dropped, as SANDY_AGENT drops it (2.9.1: `read -ra` drops one trailing empty
+# field). Sets _SANDY_WA_LIST (the accepted names, comma-joined) and
+# _SANDY_WA_WARN (one message per rejected entry) and prints nothing, so the
+# launch (which warns) and --validate-config (which reports) share it.
+_sandy_workspace_agents_parse() {
+    local _wa_t _wa_f=()
+    _SANDY_WA_LIST=""; _SANDY_WA_WARN=()
+    IFS=',' read -ra _wa_f <<< "$1"
+    for _wa_t in ${_wa_f[@]+"${_wa_f[@]}"}; do
+        if _sandy_is_agent_name "$_wa_t"; then
+            _SANDY_WA_LIST="${_SANDY_WA_LIST:+$_SANDY_WA_LIST,}$_wa_t"
+        elif [ "$_wa_t" = "all" ]; then
+            _SANDY_WA_WARN+=("SANDY_WORKSPACE_AGENTS: 'all' is not accepted here; name each agent (claude, gemini, codex, opencode, grok, mirror). Entry ignored.")
+        else
+            _SANDY_WA_WARN+=("SANDY_WORKSPACE_AGENTS: '$_wa_t' is not an agent name (valid: claude, gemini, codex, opencode, grok, mirror). Entry ignored.")
+        fi
+    done
 }
 
 # Return 0 if $1 equals any of the remaining positional args.
@@ -5660,7 +5701,8 @@ REFLECTION_API_KEY|secret|||2.9.0|experimental|Reflection AI API key for the Mir
 XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container.
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
-SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'); a single trailing comma is accepted and dropped (2.9.1), so the launch, the container and the session marker see 'claude' for 'claude,'. 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
+SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'); a single trailing comma is accepted and dropped (2.9.1), so the launch, the container and the session marker see 'claude' for 'claude,'. 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Agents named in SANDY_WORKSPACE_AGENTS (2.13.0), as the environment or host config set it, are also free to select this way. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
+SANDY_WORKSPACE_AGENTS|string|||2.13.0|stable|Comma-separated agent names (e.g. 'claude,codex') that a workspace .sandy/config may select through SANDY_AGENT with no approval prompt, on top of the set the environment or host config resolved for SANDY_AGENT itself. Set it in ~/.sandy/config to stop being asked, workspace after workspace, for agents you use everywhere. Names only, as SANDY_AGENT accepts them (claude, gemini, codex, opencode, grok, mirror); a single trailing comma is dropped. 'all' is not accepted, and an entry that is not an agent name is ignored with a warning naming it (the other entries still apply). It widens only what a workspace may pick: it never changes which agents a launch runs, so a workspace with no SANDY_AGENT still runs the resolved one (default claude). Taken from the environment and host config before any workspace file is read, so a workspace setting it cannot widen its own SANDY_AGENT check; from a workspace .sandy/config it is privileged, so it asks for the one-time approval like any other privileged key. --validate-config and --approvals judge SANDY_AGENT with the same allowance. Empty (the default) changes nothing. Ignored when --agent is given, since the flag skips the SANDY_AGENT check.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
 SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding modelConfigs.customOverrides (and, on every gemini launch since 2.10.0, security.auth.selectedType and enforcedType, the auth type sandy selected) -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
@@ -8338,7 +8380,9 @@ EOF_FEATURE_ENTRIES
 # $SANDY_HOME/config then $SANDY_HOME/.secrets (later file wins, as the loader
 # exports them in that order), else empty (the gate then uses the default).
 # --validate-config reads one file and never runs the loader, so it computes
-# the baseline here; the launch path takes it inside _load_sandy_config.
+# the baseline here; the launch path takes it inside _load_sandy_config. The
+# SANDY_WORKSPACE_AGENTS allowance (2.13.0) is read the same way, then
+# validated by _sandy_workspace_agents_parse, as the loader validates it.
 _sandy_privileged_baseline() {
     local _pb_key="$1" _pb_val="" _pb_f _pb_k _pb_v
     if [ -n "${!_pb_key:-}" ]; then printf '%s' "${!_pb_key}"; return 0; fi
@@ -8392,6 +8436,12 @@ _sandy_validate_config() {
 
     local errors=() warnings=() unknown=() privileged_keys=() env_only_keys=()
     local fatal=0
+    # The SANDY_WORKSPACE_AGENTS allowance the ordered SANDY_AGENT gate adds
+    # (2.13.0): from env and the host files only, as a launch snapshots it,
+    # never from the file being judged.
+    local _vc_wa="" _vc_w
+    _sandy_workspace_agents_parse "$(_sandy_privileged_baseline SANDY_WORKSPACE_AGENTS)"
+    _vc_wa="$_SANDY_WA_LIST"
 
     # The file's KEY=VALUE lines, read once (#583): grep's 1 means none,
     # which is a valid config (no keys, no findings); its 2 means the file
@@ -8417,8 +8467,16 @@ _sandy_validate_config() {
         while IFS='=' read -r key value; do
             value="${value#\"}" ; value="${value%\"}"
             value="${value#\'}" ; value="${value%\'}"
+            # A rejected allowance entry is reported from whichever file
+            # names it, as the launch warns about it (fail loudly).
+            if [ "$key" = "SANDY_WORKSPACE_AGENTS" ]; then
+                _sandy_workspace_agents_parse "$value"
+                for _vc_w in ${_SANDY_WA_WARN[@]+"${_SANDY_WA_WARN[@]}"}; do
+                    warnings+=("$key|${_vc_w#SANDY_WORKSPACE_AGENTS: }|warning")
+                done
+            fi
             if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" \
-               || { [ "$tier" = "passive" ] && _sandy_passive_value_privileged "$key" "$value" "$(_sandy_privileged_baseline "$key")"; }; then
+               || { [ "$tier" = "passive" ] && _sandy_passive_value_privileged "$key" "$value" "$(_sandy_privileged_baseline "$key")" "$_vc_wa"; }; then
                 privileged_keys+=("$key")
                 if [ "$tier" = "passive" ]; then
                     if [ "$key" = "SANDY_EXTRA_ENV" ]; then
@@ -8450,7 +8508,7 @@ _sandy_validate_config() {
             value="${value#\"}" ; value="${value%\"}"
             value="${value#\'}" ; value="${value%\'}"
             if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" \
-               || _sandy_passive_value_privileged "$key" "$value" "$(_sandy_privileged_baseline "$key")"; then
+               || _sandy_passive_value_privileged "$key" "$value" "$(_sandy_privileged_baseline "$key")" "$_vc_wa"; then
                 kv_set+="$key=$value"$'\n'
             fi
         done < <(if [ -n "$_vc_lines" ]; then printf '%s\n' "$_vc_lines"; fi)
@@ -18476,6 +18534,20 @@ _load_sandy_config() {
         for _base_k in SANDY_AGENT SANDY_CLAUDE_AUTH SANDY_GEMINI_AUTH SANDY_CODEX_AUTH SANDY_OPENCODE_AUTH SANDY_GROK_AUTH SANDY_PIDS_LIMIT; do
             printf -v "_SANDY_PASSIVE_BASE_${_base_k}" '%s' "${!_base_k:-}"
         done
+        # The SANDY_WORKSPACE_AGENTS allowance (2.13.0), from the same
+        # snapshot: only env or host config can have set it by now, so a
+        # workspace value (gated itself, and exported only on approval, after
+        # every file is read) never widens this launch's SANDY_AGENT check.
+        # Stored validated; each rejected entry is warned about here.
+        _SANDY_PASSIVE_BASE_SANDY_WORKSPACE_AGENTS=""
+        if [ -n "${SANDY_WORKSPACE_AGENTS:-}" ]; then
+            local _base_w
+            _sandy_workspace_agents_parse "$SANDY_WORKSPACE_AGENTS"
+            for _base_w in ${_SANDY_WA_WARN[@]+"${_SANDY_WA_WARN[@]}"}; do
+                warn "$_base_w" >&2
+            done
+            _SANDY_PASSIVE_BASE_SANDY_WORKSPACE_AGENTS="$_SANDY_WA_LIST"
+        fi
         _SANDY_PASSIVE_BASE_TAKEN=1
     fi
     [ -f "$file" ] || return 0
@@ -18525,7 +18597,7 @@ _load_sandy_config() {
                 # source: collect for per-workspace approval rather than honoring
                 # them silently.
                 _base_v="_SANDY_PASSIVE_BASE_${key}"
-                if _sandy_passive_value_privileged "$key" "$value" "${!_base_v:-}" \
+                if _sandy_passive_value_privileged "$key" "$value" "${!_base_v:-}" "${_SANDY_PASSIVE_BASE_SANDY_WORKSPACE_AGENTS:-}" \
                    || _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
                     _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
                     _PASSIVE_PRIVILEGED_SOURCES+=("$file")
@@ -19520,10 +19592,9 @@ esac
 IFS=',' read -ra _SANDY_AGENTS <<< "$SANDY_AGENT"
 _SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
 for _a in "${_SANDY_AGENTS[@]}"; do
-    case "$_a" in
-        claude|gemini|codex|opencode|grok|mirror) ;;
-        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, mirror, or comma-separated combo)" >&2; exit 1 ;;
-    esac
+    if ! _sandy_is_agent_name "$_a"; then
+        echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, mirror, or comma-separated combo)" >&2; exit 1
+    fi
 done
 # `read -ra` drops ONE trailing empty field, so `claude,` validated as
 # [claude] while SANDY_AGENT itself kept the comma: no single-agent image

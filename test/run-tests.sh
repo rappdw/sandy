@@ -25678,7 +25678,8 @@ _s208_c17() {
 check "§208(17) no key anywhere: --start and headless refuse (fatal marker), an interactive launch warns and proceeds" _s208_c17
 
 # --- agent selection, schema, egress, protected path, image -------------------
-_S208_SEL="$(sed -n '/^# Parse comma-separated agent list and validate/,/^_SANDY_IS_MULTI=false/p' "$SANDY_SCRIPT")"
+# The block validates names with _sandy_is_agent_name (2.13.0), defined at the top.
+_S208_SEL="$(sed -n '/^_sandy_is_agent_name() {/,/^}$/p; /^# Parse comma-separated agent list and validate/,/^_SANDY_IS_MULTI=false/p' "$SANDY_SCRIPT")"
 _s208_sel() { env -i PATH="$PATH" SANDY_AGENT="$1" bash -c 'eval "$1" && echo OK' _ "$_S208_SEL" 2>&1 || true; }
 check "§208(18) mirror alone is valid; mirror in any combo is refused, naming the follow-up issue" \
     bash -c '[ "$1" = OK ] && case "$2" in *"mirror runs alone"*464*) : ;; *) exit 1 ;; esac && case "$3" in *"mirror runs alone"*) : ;; *) exit 1 ;; esac' _ \
@@ -36403,6 +36404,209 @@ rm -rf "$_S266_D"
 _a6_done
 unset -f _s266_pids _s266_ws
 unset _S266_V _S266_BAD _S266_C _S266_T _S266_D _S266_BODY
+echo ""
+
+# ============================================================
+section "§267: SANDY_WORKSPACE_AGENTS — a host-set list of agents a workspace may select without approval, which a workspace cannot grant itself (2.13.0)"
+# ============================================================
+# The ordered SANDY_AGENT gate (§240) prompts whenever a workspace adds an
+# agent the host did not resolve. SANDY_WORKSPACE_AGENTS, set in the
+# environment or the host config, names agents a workspace may add with no
+# prompt. The loader takes it in the same pre-workspace snapshot as the
+# baselines, so a workspace setting it (a privileged key, so gated itself)
+# never widens its own check. Runs the real loader, the real
+# --validate-config and --approvals, and real headless launches through the
+# §215 stubs; the mutation runs on a temp copy of sandy, never the real file.
+_fx_a6
+_S267_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S267_D/stub" "$_S267_D/uh" "$_S267_D/sh" "$_S267_D/wsdir/.sandy"
+printf '#!/bin/sh\nexit 0\n' > "$_S267_D/stub/docker"
+printf '#!/bin/sh\nexit 1\n' > "$_S267_D/stub/curl"
+chmod +x "$_S267_D/stub/docker" "$_S267_D/stub/curl"
+cat > "$_S267_D/q.py" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[2]))
+    if sys.argv[1] == "vc":
+        print("PRIV=" + ",".join(d["privileged_keys_requiring_approval"]))
+        print("WARN=" + ";".join(w["key"] + ":" + w["message"] for w in d["warnings"] if w["key"] == "SANDY_WORKSPACE_AGENTS"))
+    else:
+        g = [g for g in d["gates"] if g["gate"] == "passive_privileged"][0]
+        print("STATUS=" + g["status"])
+        print("KEYS=" + ",".join(g["keys"]))
+    print("PROBE=ran")
+except Exception:
+    print("PARSE-FAIL")
+PY
+# The tier arrays, the gate, its helpers and the loader, from script $1. warn
+# is a stand-in that marks its lines (the real one needs the colour globals).
+_s267_defs() {
+    sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$1"
+    sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p; /^_sandy_is_agent_name()/,/^}$/p; /^_sandy_workspace_agents_parse()/,/^}$/p; /^_load_sandy_config()/,/^}$/p' "$1"
+    printf '%s\n' 'warn() { printf "WARN:%s\n" "$*"; }'
+}
+# $1 script  $2 host config body  $3 workspace .sandy/config body  [VAR=VALUE
+# for the launching environment...]. env -i: the live session's SANDY_* must
+# not leak in. -> SANDY_AGENT, the snapshotted allowance, the queued set,
+# any warn lines, and PROBE=ran when the probe reached its end.
+_s267_load() {
+    local s="$1"
+    printf '%s\n' "$2" > "$_S267_D/host"; printf '%s\n' "$3" > "$_S267_D/ws"; shift 3
+    env -i PATH="$PATH" "$@" bash -c '
+        set -euo pipefail
+        eval "$1"
+        _SANDY_ENV_SET_KEYS=(); _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=()
+        _SANDY_EXTRA_ENV_HOST_LISTS=(); _SANDY_EXTRA_ENV_WS_LISTS=()
+        for k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
+            if [ -n "${!k:-}" ]; then _SANDY_ENV_SET_KEYS+=("$k"); fi
+        done
+        _load_sandy_config "$2/host" privileged
+        _load_sandy_config "$2/ws" passive
+        printf "SANDY_AGENT=%s\n" "${SANDY_AGENT--unset-}"
+        printf "ALLOW=%s\n" "${_SANDY_PASSIVE_BASE_SANDY_WORKSPACE_AGENTS--unset-}"
+        printf "PENDING=%s\n" "${_PASSIVE_PRIVILEGED_PENDING[*]-}"
+        printf "PROBE=ran\n"' _ "$(_s267_defs "$s")" "$_S267_D" 2>&1 || printf 'RC=%s\n' "$?"
+}
+# $1 script  $2 host config body  $3 workspace config body  $4 which file to
+# judge (ws|host)  [VAR=VALUE...] -> PRIV=<keys requiring approval>,
+# WARN=<SANDY_WORKSPACE_AGENTS warnings>, PROBE=ran.
+_s267_vc() {
+    local s="$1" f="$_S267_D/wsdir/.sandy/config"
+    printf '%s\n' "$2" > "$_S267_D/sh/config"; printf '%s\n' "$3" > "$_S267_D/wsdir/.sandy/config"
+    if [ "$4" = host ]; then f="$_S267_D/sh/config"; fi
+    shift 4
+    rm -f "$_S267_D/vc.json"
+    env -i PATH="$PATH" HOME="$_S267_D/uh" SANDY_HOME="$_S267_D/sh" "$@" \
+        bash "$s" --validate-config "$f" > "$_S267_D/vc.json" 2>/dev/null || true
+    python3 "$_S267_D/q.py" vc "$_S267_D/vc.json" 2>/dev/null || echo PARSE-FAIL
+}
+# $1 script  $2 host config body  $3 workspace config body -> STATUS and KEYS
+# of the passive_privileged gate, RC, PROBE=ran. Docker and curl are stubs.
+_s267_ap() {
+    local s="$1" rc=0
+    printf '%s\n' "$2" > "$_S267_D/sh/config"; printf '%s\n' "$3" > "$_S267_D/wsdir/.sandy/config"
+    rm -f "$_S267_D/ap.json"
+    env -i PATH="$_S267_D/stub:$PATH" HOME="$_S267_D/uh" SANDY_HOME="$_S267_D/sh" \
+        bash "$s" --approvals --workspace "$_S267_D/wsdir" > "$_S267_D/ap.json" 2>/dev/null || rc=$?
+    python3 "$_S267_D/q.py" ap "$_S267_D/ap.json" 2>/dev/null || echo PARSE-FAIL
+    printf 'RC=%s\n' "$rc"
+}
+_s267_has() { # $1 output  $2... lines that must each be present, exactly
+    local o="$1" l; shift
+    for l in "$@"; do grep -qxF -- "$l" <<<"$o" || return 1; done
+}
+
+# (pre) the control: no allowance, so the same workspace file is gated. Without
+# this the free results below could be a gate that never fires.
+_S267_A="$(_s267_load "$SANDY_SCRIPT" '' 'SANDY_AGENT=claude,codex')"
+_S267_V="$(_s267_vc "$SANDY_SCRIPT" '' 'SANDY_AGENT=claude,codex' ws)"
+check "§267(pre) control: with no allowance a workspace SANDY_AGENT=claude,codex is gated by the loader and by --validate-config, and both probes ran (loader: $(printf '%s' "$_S267_A" | tr '\n' ';'); validate: $(printf '%s' "$_S267_V" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "PENDING=SANDY_AGENT=claude,codex" "ALLOW=" "PROBE=ran" && _s267_has "$2" "PRIV=SANDY_AGENT" "PROBE=ran"' _ "$_S267_A" "$_S267_V"
+
+# (1) host allowance claude,codex: the workspace claude,codex is free.
+_S267_A="$(_s267_load "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,codex')"
+check "§267(1a) host SANDY_WORKSPACE_AGENTS=claude,codex: the loader honours a workspace SANDY_AGENT=claude,codex with nothing queued (got: $(printf '%s' "$_S267_A" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "SANDY_AGENT=claude,codex" "ALLOW=claude,codex" "PENDING=" "PROBE=ran"' _ "$_S267_A"
+_S267_V="$(_s267_vc "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,codex' ws)"
+check "§267(1b) --validate-config agrees: the same workspace file under the same host config requires no approval (got: $(printf '%s' "$_S267_V" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "PRIV=" "WARN=" "PROBE=ran"' _ "$_S267_V"
+
+# (2) an agent outside both the baseline and the allowance is still gated.
+_S267_A="$(_s267_load "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,opencode')"
+_S267_V="$(_s267_vc "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,opencode' ws)"
+check "§267(2) host allowance claude,codex, workspace SANDY_AGENT=claude,opencode: opencode is in neither set, so the loader queues it and --validate-config reports it (loader: $(printf '%s' "$_S267_A" | tr '\n' ';'); validate: $(printf '%s' "$_S267_V" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "SANDY_AGENT=-unset-" "PENDING=SANDY_AGENT=claude,opencode" "PROBE=ran" && _s267_has "$2" "PRIV=SANDY_AGENT" "PROBE=ran"' _ "$_S267_A" "$_S267_V"
+
+# (3) the allowance from the environment, with no host file, works the same.
+_S267_A="$(_s267_load "$SANDY_SCRIPT" '' 'SANDY_AGENT=claude,codex' SANDY_WORKSPACE_AGENTS=claude,codex)"
+_S267_V="$(_s267_vc "$SANDY_SCRIPT" '' 'SANDY_AGENT=claude,codex' ws SANDY_WORKSPACE_AGENTS=claude,codex)"
+_S267_W="$(_s267_vc "$SANDY_SCRIPT" '' 'SANDY_AGENT=claude,opencode' ws SANDY_WORKSPACE_AGENTS=claude,codex)"
+check "§267(3) SANDY_WORKSPACE_AGENTS=claude,codex in the environment: claude,codex is free in the loader and in --validate-config, and claude,opencode is still pending there (loader: $(printf '%s' "$_S267_A" | tr '\n' ';'); validate: $(printf '%s' "$_S267_V" | tr '\n' ';') / $(printf '%s' "$_S267_W" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "SANDY_AGENT=claude,codex" "PENDING=" "PROBE=ran" && _s267_has "$2" "PRIV=" "PROBE=ran" && _s267_has "$3" "PRIV=SANDY_AGENT" "PROBE=ran"' _ "$_S267_A" "$_S267_V" "$_S267_W"
+
+# (4) a workspace cannot grant itself the allowance: it is privileged (queued),
+# and the snapshot the gate reads was taken before the workspace was read.
+_S267_A="$(_s267_load "$SANDY_SCRIPT" '' 'SANDY_WORKSPACE_AGENTS=codex
+SANDY_AGENT=claude,codex')"
+_S267_V="$(_s267_vc "$SANDY_SCRIPT" '' 'SANDY_WORKSPACE_AGENTS=codex
+SANDY_AGENT=claude,codex' ws)"
+_S267_P="$(_s267_ap "$SANDY_SCRIPT" '' 'SANDY_WORKSPACE_AGENTS=codex
+SANDY_AGENT=claude,codex')"
+check "§267(4) a workspace setting both SANDY_WORKSPACE_AGENTS=codex and SANDY_AGENT=claude,codex, nothing on the host: both are queued, the allowance stays empty, and --validate-config and --approvals report both (loader: $(printf '%s' "$_S267_A" | tr '\n' ';'); validate: $(printf '%s' "$_S267_V" | tr '\n' ';'); approvals: $(printf '%s' "$_S267_P" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "SANDY_AGENT=-unset-" "ALLOW=" "PENDING=SANDY_WORKSPACE_AGENTS=codex SANDY_AGENT=claude,codex" "PROBE=ran" && _s267_has "$2" "PRIV=SANDY_WORKSPACE_AGENTS,SANDY_AGENT" "PROBE=ran" && _s267_has "$3" "STATUS=pending" "KEYS=SANDY_AGENT,SANDY_WORKSPACE_AGENTS" "RC=2" "PROBE=ran"' _ "$_S267_A" "$_S267_V" "$_S267_P"
+
+# (5) fail loudly: an unknown name and `all` are each warned about, naming the
+# entry and the key; the other entries still apply, and one trailing comma is
+# dropped without a warning.
+_S267_A="$(_s267_load "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=bogus,codex,all,' 'SANDY_AGENT=claude,codex')"
+_S267_V="$(_s267_vc "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=bogus,codex,all,' '' host)"
+check "§267(5) host SANDY_WORKSPACE_AGENTS=bogus,codex,all,: the launch warns about 'bogus' and 'all' by name, keeps codex (so claude,codex is free), and --validate-config of the host file reports the same two warnings (loader: $(printf '%s' "$_S267_A" | tr '\n' ';'); validate: $(printf '%s' "$_S267_V" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "SANDY_AGENT=claude,codex" "ALLOW=codex" "PENDING=" "PROBE=ran" \
+        && grep -qF "WARN:SANDY_WORKSPACE_AGENTS: '\''bogus'\'' is not an agent name" <<<"$1" \
+        && grep -qF "WARN:SANDY_WORKSPACE_AGENTS: '\''all'\'' is not accepted here" <<<"$1" \
+        && test "$(grep -c "^WARN:" <<<"$1")" = 2 \
+        && _s267_has "$2" "PROBE=ran" \
+        && grep -qF "WARN=SANDY_WORKSPACE_AGENTS:'\''bogus'\'' is not an agent name" <<<"$2" \
+        && grep -qF "SANDY_WORKSPACE_AGENTS:'\''all'\'' is not accepted here" <<<"$2"' _ "$_S267_A" "$_S267_V"
+
+# (6) real headless launches through the §215 stubs. The allowance widens what
+# a workspace may pick; it never picks anything itself.
+mkdir -p "$_A6_DIR/s267-none/sh"
+printf 'SANDY_WORKSPACE_AGENTS=claude,codex\n' > "$_A6_DIR/s267-none/sh/config"
+_a6_launch s267-none ANTHROPIC_API_KEY=sk-fixture-a6 OPENAI_API_KEY=sk-fixture-a6
+_S267_L="$(_a6_agent_args s267-none)"
+_S267_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S267_L" ]; then echo "launch rc $_A6_RC"; fi
+    _a6_pair "$_S267_L" -e SANDY_AGENT=claude || echo "no -e SANDY_AGENT=claude"
+    grep -qxF sandy-claude-code "$_S267_L" || echo "not the single-agent claude image"; } 2>&1)" || true
+if [ -n "$_S267_R" ]; then _a6_diag "§267(6a)" s267-none; fi
+check "§267(6a) host allowance claude,codex and no workspace config: the launch still runs SANDY_AGENT=claude on the claude image (${_S267_R:-ok})" \
+    test -z "$_S267_R"
+# A workspace codex under a host allowance of codex: free, so codex runs with
+# no approval notice. The control, with no allowance, drops it (headless).
+_s267_launch_ws() { # $1 CASE  $2 host config body or ""
+    mkdir -p "$_A6_DIR/$1/ws/.sandy" "$_A6_DIR/$1/sh"
+    printf 'SANDY_AGENT=codex\n' > "$_A6_DIR/$1/ws/.sandy/config"
+    if [ -n "$2" ]; then printf '%s\n' "$2" > "$_A6_DIR/$1/sh/config"; fi
+    _a6_launch "$1" ANTHROPIC_API_KEY=sk-fixture-a6 OPENAI_API_KEY=sk-fixture-a6
+}
+_s267_launch_ws s267-allow 'SANDY_WORKSPACE_AGENTS=codex'
+_S267_L="$(_a6_agent_args s267-allow)"
+_S267_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S267_L" ]; then echo "launch rc $_A6_RC"; fi
+    _a6_pair "$_S267_L" -e SANDY_AGENT=codex || echo "no -e SANDY_AGENT=codex"
+    grep -qxF sandy-codex "$_S267_L" || echo "not the codex image"
+    if grep -qF "wants to set privileged keys" "$_A6_DIR/s267-allow/out"; then echo "an approval was asked for"; fi; } 2>&1)" || true
+if [ -n "$_S267_R" ]; then _a6_diag "§267(6b)" s267-allow; fi
+check "§267(6b) host allowance codex, workspace SANDY_AGENT=codex: a headless launch runs codex with no approval notice (${_S267_R:-ok})" \
+    test -z "$_S267_R"
+_s267_launch_ws s267-gated ''
+_S267_L="$(_a6_agent_args s267-gated)"
+_S267_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S267_L" ]; then echo "launch rc $_A6_RC"; fi
+    _a6_pair "$_S267_L" -e SANDY_AGENT=claude || echo "no -e SANDY_AGENT=claude"
+    grep -qF "wants to set privileged keys" "$_A6_DIR/s267-gated/out" || echo "no approval notice"
+    grep -qF "Non-interactive session" "$_A6_DIR/s267-gated/out" || echo "not dropped as non-interactive"; } 2>&1)" || true
+if [ -n "$_S267_R" ]; then _a6_diag "§267(6c)" s267-gated; fi
+check "§267(6c) control, no allowance: the same workspace SANDY_AGENT=codex is approval-gated, dropped headless, and claude runs (${_S267_R:-ok})" \
+    test -z "$_S267_R"
+
+# (7) --approvals is the launch's own verdict, so it agrees with (1) and (2).
+_S267_P="$(_s267_ap "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,codex')"
+_S267_Q="$(_s267_ap "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,opencode')"
+check "§267(7) --approvals agrees: under host allowance claude,codex the passive_privileged gate is not_applicable for claude,codex (exit 0) and pending on SANDY_AGENT for claude,opencode (exit 2) (got: $(printf '%s' "$_S267_P" | tr '\n' ';') / $(printf '%s' "$_S267_Q" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; _s267_has "$1" "STATUS=not_applicable" "KEYS=" "RC=0" "PROBE=ran" && _s267_has "$2" "STATUS=pending" "KEYS=SANDY_AGENT" "RC=2" "PROBE=ran"' _ "$_S267_P" "$_S267_Q"
+
+# (8) mutation, in a temp copy: drop the allowance from the gate's allowed set.
+# The probes of (1) then report the workspace claude,codex as gated.
+awk -v m='${4:+$4,}' '{ i = index($0, m); if (i) { $0 = substr($0, 1, i - 1) substr($0, i + length(m)); n++ } print } END { if (n != 1) exit 1 }' \
+    "$SANDY_SCRIPT" > "$_S267_D/sandy.mut" && _S267_M=ok || _S267_M="the union was not found exactly once"
+_S267_A="$(_s267_load "$_S267_D/sandy.mut" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,codex')"
+_S267_V="$(_s267_vc "$_S267_D/sandy.mut" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,codex' ws)"
+_S267_P="$(_s267_ap "$_S267_D/sandy.mut" 'SANDY_WORKSPACE_AGENTS=claude,codex' 'SANDY_AGENT=claude,codex')"
+check "§267(8) mutation: with the allowance union removed from a copy of the gate (${_S267_M}), (1)'s workspace claude,codex is gated by the loader, --validate-config and --approvals, so (1)-(7) can fail (loader: $(printf '%s' "$_S267_A" | tr '\n' ';'); validate: $(printf '%s' "$_S267_V" | tr '\n' ';'); approvals: $(printf '%s' "$_S267_P" | tr '\n' ';'))" \
+    bash -c "$(declare -f _s267_has)"'; test "$4" = ok && _s267_has "$1" "ALLOW=claude,codex" "PENDING=SANDY_AGENT=claude,codex" "PROBE=ran" && _s267_has "$2" "PRIV=SANDY_AGENT" "PROBE=ran" && _s267_has "$3" "STATUS=pending" "KEYS=SANDY_AGENT" "RC=2" "PROBE=ran"' _ "$_S267_A" "$_S267_V" "$_S267_P" "$_S267_M"
+rm -rf "$_S267_D"
+_a6_done
+unset -f _s267_defs _s267_load _s267_vc _s267_ap _s267_has _s267_launch_ws
+unset _S267_D _S267_A _S267_V _S267_W _S267_P _S267_Q _S267_L _S267_R _S267_M
 echo ""
 
 # BEGIN SUMMARY
