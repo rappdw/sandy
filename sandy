@@ -5705,7 +5705,7 @@ XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enable
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'); a single trailing comma is accepted and dropped (2.9.1), so the launch, the container and the session marker see 'claude' for 'claude,'. 'all' = 'claude,gemini,codex,opencode'. Ordered tier (2.9.0): from a workspace .sandy/config a value is passive-safe only when every agent it names is already in the set the environment or host config resolved (default claude; 'all' expanded on both sides), so narrowing and reordering are free while adding or replacing an agent is approval-gated, because each agent brings its own host credentials into the container. Agents named in SANDY_WORKSPACE_AGENTS (2.13.0), as the environment or host config set it, are also free to select this way. Not consulted when --agent is given (the --start approval pass gets --agent too). The approval is one hash of the exact gated set, so in a workspace that also sets another gated key, alternating launches with and without --agent re-prompt each time the set flips; that is a prompt, never a silent widening.
-SANDY_WORKSPACE_AGENTS|string|||2.13.0|stable|Comma-separated agent names (e.g. 'claude,codex') that a workspace .sandy/config may select through SANDY_AGENT with no approval prompt, on top of the set the environment or host config resolved for SANDY_AGENT itself. Set it in ~/.sandy/config to stop being asked, workspace after workspace, for agents you use everywhere. Names only, as SANDY_AGENT accepts them (claude, gemini, codex, opencode, grok, mirror); a single trailing comma is dropped. 'all' is not accepted, and an entry that is not an agent name is ignored with a warning naming it (the other entries still apply). It widens only what a workspace may pick: it never changes which agents a launch runs, so a workspace with no SANDY_AGENT still runs the resolved one (default claude). Taken from the environment and host config (or .secrets) before any workspace file is read; set in a workspace .sandy/config or .secrets it is ignored with a warning and never queued for approval, since it could not apply there. An approval still covers every key the gate judges without the allowance, so adding or removing an agent here never invalidates an approval already given; when the allowance covers every gated key there is no prompt and no approval file. --validate-config and --approvals judge SANDY_AGENT with the same allowance. Empty (the default) changes nothing. Ignored when --agent is given, since the flag skips the SANDY_AGENT check.
+SANDY_WORKSPACE_AGENTS|string|||2.13.0|stable|Comma-separated agent names (e.g. 'claude,codex') that a workspace .sandy/config may select through SANDY_AGENT with no approval prompt, on top of the set the environment or host config resolved for SANDY_AGENT itself. Set it in ~/.sandy/config to stop being asked, workspace after workspace, for agents you use everywhere. Names only, as SANDY_AGENT accepts them (claude, gemini, codex, opencode, grok, mirror); a single trailing comma is dropped. 'all' is not accepted, and an entry that is not an agent name is ignored with a warning naming it (the other entries still apply). It widens only what a workspace may pick: it never changes which agents a launch runs, so a workspace with no SANDY_AGENT still runs the resolved one (default claude). Taken from the environment and host config (or .secrets) before any workspace file is read; set in a workspace .sandy/config or .secrets it is ignored with a warning and never queued for approval, since it could not apply there. An approval still covers every key the gate judges without the allowance, so adding or removing an agent here never invalidates an approval already given; when the allowance covers every gated key there is no prompt and no approval file, and a launch that is not approved (headless, or answered N) still honours the agents it covers, dropping only the keys that need approval. --validate-config and --approvals judge SANDY_AGENT with the same allowance. Empty (the default) changes nothing. Ignored when --agent is given, since the flag skips the SANDY_AGENT check.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
 SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding modelConfigs.customOverrides (and, on every gemini launch since 2.10.0, security.auth.selectedType and enforcedType, the auth type sandy selected) -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
@@ -18917,10 +18917,27 @@ _sandy_export_approved_kv() {
         *) export "$1" ;;
     esac
 }
+# An unapproved launch with SANDY_WORKSPACE_AGENTS-covered entries (2.13.0):
+# name the entries dropped ($1) and the ones kept ($2), names only (the values
+# can be credentials), then export the kept ones: they are free under the
+# host's policy, exactly as when nothing needs approval.
+_sandy_passive_report_kept() {
+    local _rk_kv _rk_names=""
+    while IFS= read -r _rk_kv; do
+        if [ -n "$_rk_kv" ]; then echo "[sandy]   ${_rk_kv%%=*}" >&2; fi
+    done <<< "$1"
+    while IFS= read -r _rk_kv; do
+        if [ -n "$_rk_kv" ]; then _rk_names="${_rk_names:+$_rk_names, }${_rk_kv%%=*}"; fi
+    done <<< "$2"
+    echo "[sandy] Keeping $_rk_names: SANDY_WORKSPACE_AGENTS (host config or environment) allows it." >&2
+    while IFS= read -r _rk_kv; do
+        if [ -n "$_rk_kv" ]; then _sandy_export_approved_kv "$_rk_kv"; fi
+    done <<< "$2"
+}
 _resolve_passive_privileged_approval() {
     if [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ]; then
         if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
-            _sandy_approve_report_add passive_privileged not_applicable "" "" "" "" keys_dropped '"keys":[],"sources":[]'
+            _sandy_approve_report_add passive_privileged not_applicable "" "" "" "" keys_dropped '"keys":[],"sources":[],"dropped_keys":[]'
         fi
         return 0
     fi
@@ -18929,18 +18946,30 @@ _resolve_passive_privileged_approval() {
     local sorted
     sorted="$(printf '%s\n' "${_PASSIVE_PRIVILEGED_PENDING[@]}" | sort -u)"
 
-    # SANDY_WORKSPACE_AGENTS (2.13.0) covers every gated key (P is empty):
-    # nothing needs approval, so there is no prompt, no hash and no approval
-    # file, and the set is honoured. When anything still needs a prompt, the
-    # hash, the prompt and the approval below all cover the whole set H, as
-    # 2.9.0 judged it, so a later change to the allowance keeps the approval.
-    local _pp_n=0
-    if [ -n "${_PASSIVE_PRIVILEGED_ALLOWED[*]+x}" ]; then _pp_n="${#_PASSIVE_PRIVILEGED_ALLOWED[@]}"; fi
-    if [ "$_pp_n" -eq "${#_PASSIVE_PRIVILEGED_PENDING[@]}" ]; then
+    # SANDY_WORKSPACE_AGENTS (2.13.0). _pp_cov: the entries of H the allowance
+    # covers, free under the host's policy. _pp_need: the rest (P), the
+    # entries that still need approval, as a set difference, so a missing
+    # record of covered entries fails CLOSED (everything needs approval).
+    # When nothing needs approval there is no prompt, no hash and no approval
+    # file, and H is honoured. Otherwise the hash, the prompt and an approval
+    # cover the whole of H, as 2.9.0 judged it, so a later change to the
+    # allowance keeps the approval; a launch that is not approved (headless,
+    # or answered N) drops only _pp_need and still honours _pp_cov.
+    local _pp_cov="" _pp_need="" _pp_kv
+    if [ -n "${_PASSIVE_PRIVILEGED_ALLOWED[*]+x}" ]; then
+        _pp_cov="$(printf '%s\n' "${_PASSIVE_PRIVILEGED_ALLOWED[@]}" | sort -u)"
+    fi
+    while IFS= read -r _pp_kv; do
+        [ -z "$_pp_kv" ] && continue
+        case $'\n'"$_pp_cov"$'\n' in
+            *$'\n'"$_pp_kv"$'\n'*) ;;
+            *) _pp_need+="$_pp_kv"$'\n' ;;
+        esac
+    done <<< "$sorted"
+    if [ -z "$_pp_need" ]; then
         if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
-            _sandy_approve_report_add passive_privileged not_applicable "" "" "" "" keys_dropped '"keys":[],"sources":[]'
+            _sandy_approve_report_add passive_privileged not_applicable "" "" "" "" keys_dropped '"keys":[],"sources":[],"dropped_keys":[]'
         fi
-        local _pp_kv
         while IFS= read -r _pp_kv; do
             [ -z "$_pp_kv" ] && continue
             _sandy_export_approved_kv "$_pp_kv"
@@ -18975,14 +19004,25 @@ _resolve_passive_privileged_approval() {
         fi
         _rnames="$(while IFS= read -r _kv; do if [ -n "$_kv" ]; then printf '%s\n' "${_kv%%=*}"; fi; done <<< "$sorted" | sort -u)"
         _rsrcs="$(for _f in "${_PASSIVE_PRIVILEGED_SOURCES[@]}"; do printf '%s\n' "${_f#"$WORK_DIR"/}"; done | sort -u)"
+        # dropped_keys (2.13.0): what a launch that cannot ask would drop,
+        # which is only what still needs approval; none once approved.
+        local _rdrop=""
+        if [ "$_rs" != "approved" ]; then
+            _rdrop="$(while IFS= read -r _kv; do if [ -n "$_kv" ]; then printf '%s\n' "${_kv%%=*}"; fi; done <<< "$_pp_need" | sort -u)"
+        fi
         _sandy_approve_report_add passive_privileged "$_rs" "$set_hash" "$approval_file" "$_rby" \
             "$(_sandy_approval_file_date "$approval_file")" keys_dropped \
-            "\"keys\":$(_sandy_json_str_array "$_rnames"),\"sources\":$(_sandy_json_str_array "$_rsrcs")"
+            "\"keys\":$(_sandy_json_str_array "$_rnames"),\"sources\":$(_sandy_json_str_array "$_rsrcs"),\"dropped_keys\":$(_sandy_json_str_array "$_rdrop")"
         if [ "$_rs" = "approved" ]; then
             while IFS= read -r _kv; do
                 [ -z "$_kv" ] && continue
                 _sandy_export_approved_kv "$_kv"
             done <<< "$sorted"
+        else
+            while IFS= read -r _kv; do
+                [ -z "$_kv" ] && continue
+                _sandy_export_approved_kv "$_kv"
+            done <<< "$_pp_cov"
         fi
         return 0
     fi
@@ -19040,9 +19080,15 @@ _resolve_passive_privileged_approval() {
     echo "[sandy] The approval is tied to the exact set above — any edit re-prompts." >&2
     echo "[sandy]" >&2
 
-    # Headless / non-interactive: fail closed.
+    # Headless / non-interactive: fail closed for what needs approval; the
+    # entries SANDY_WORKSPACE_AGENTS covers are free, so they are kept.
     if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
-        echo "[sandy] Non-interactive session — dropping these keys." >&2
+        if [ -z "$_pp_cov" ]; then
+            echo "[sandy] Non-interactive session — dropping these keys." >&2
+        else
+            echo "[sandy] Non-interactive session — dropping these keys:" >&2
+            _sandy_passive_report_kept "$_pp_need" "$_pp_cov"
+        fi
         echo "[sandy] Launch sandy interactively once from this directory to approve." >&2
         echo "[sandy]" >&2
         return 0
@@ -19076,7 +19122,12 @@ _resolve_passive_privileged_approval() {
             echo "[sandy] unless you edit the set. Revoke via: rm $approval_file" >&2
             ;;
         *)
-            echo "[sandy] Not approved — dropping these keys for this launch." >&2
+            if [ -z "$_pp_cov" ]; then
+                echo "[sandy] Not approved — dropping these keys for this launch." >&2
+            else
+                echo "[sandy] Not approved — dropping these keys for this launch:" >&2
+                _sandy_passive_report_kept "$_pp_need" "$_pp_cov"
+            fi
             echo "[sandy] (Edit $_src and relaunch to re-prompt.)" >&2
             ;;
     esac

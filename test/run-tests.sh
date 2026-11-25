@@ -36444,16 +36444,39 @@ try:
         g = [g for g in d["gates"] if g["gate"] == "passive_privileged"][0]
         print("STATUS=" + g["status"])
         print("KEYS=" + ",".join(g["keys"]))
+        print("DROPPED=" + ",".join(g.get("dropped_keys", ["<absent>"])))
     print("PROBE=ran")
 except Exception:
     print("PARSE-FAIL")
+PY
+cat > "$_S267_D/ptyans.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]; argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try: os.execvp(argv[0], argv)
+    finally: os._exit(127)
+buf = b''; sent = False; deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try: d = os.read(fd, 4096)
+        except OSError: break
+        if not d: break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode()); sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
 PY
 # The tier arrays, the gate and its helpers, the loader and the approval
 # resolver, from script $1. warn is a stand-in that marks its lines (the real
 # one needs the colour globals).
 _s267_defs() {
     sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$1"
-    sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p; /^_sandy_is_agent_name()/,/^}$/p; /^_sandy_workspace_agents_parse()/,/^}$/p; /^_load_sandy_config()/,/^}$/p; /^_sandy_export_approved_kv() {/,/^}$/p; /^_resolve_passive_privileged_approval() {/,/^}$/p' "$1"
+    sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_sandy_expand_agent_alias()/,/^}$/p; /^_sandy_is_agent_name()/,/^}$/p; /^_sandy_workspace_agents_parse()/,/^}$/p; /^_load_sandy_config()/,/^}$/p; /^_sandy_export_approved_kv() {/,/^}$/p; /^_sandy_passive_report_kept() {/,/^}$/p; /^_resolve_passive_privileged_approval() {/,/^}$/p' "$1"
     grep -m1 '^sha256() {' "$1"
     printf '%s\n' 'warn() { printf "WARN:%s\n" "$*"; }'
 }
@@ -36465,16 +36488,13 @@ _s267_defs() {
 # entries the allowance covers (ALLOWED), every warn and resolver line, and
 # PROBE=ran when the probe reached its end.
 _S267_HSEC=""
-_s267_load() {
-    local s="$1"
-    mkdir -p "$_S267_D/lh" "$_S267_D/lw"
-    printf '%s\n' "$2" > "$_S267_D/lh/config"; printf '%s\n' "$_S267_HSEC" > "$_S267_D/lh/.secrets"
-    printf '%s\n' "$3" > "$_S267_D/lw/config"; shift 3
-    env -i PATH="$PATH" SANDY_HOME="$_S267_D/lh" WORK_DIR="$_S267_D/lw" "$@" bash -c '
+# With $_S267_TTY set (y or n), the probe runs on a pty instead, not headless,
+# and the approval prompt is answered with it.
+_S267_PROBE='
         set -euo pipefail
         eval "$1"
         _SANDY_ENV_SET_KEYS=(); _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=(); _PASSIVE_PRIVILEGED_ALLOWED=()
-        _SANDY_EXTRA_ENV_HOST_LISTS=(); _SANDY_EXTRA_ENV_WS_LISTS=(); _sandy_is_headless=true
+        _SANDY_EXTRA_ENV_HOST_LISTS=(); _SANDY_EXTRA_ENV_WS_LISTS=(); _sandy_is_headless="${S267_HL:-true}"
         for k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
             if [ -n "${!k:-}" ]; then _SANDY_ENV_SET_KEYS+=("$k"); fi
         done
@@ -36483,10 +36503,23 @@ _s267_load() {
         _load_sandy_config "$WORK_DIR/config" passive
         _resolve_passive_privileged_approval
         printf "SANDY_AGENT=%s\n" "${SANDY_AGENT--unset-}"
+        printf "SANDY_SSH=%s\n" "${SANDY_SSH--unset-}"
         printf "ALLOW=%s\n" "${_SANDY_PASSIVE_BASE_SANDY_WORKSPACE_AGENTS--unset-}"
         printf "PENDING=%s\n" "${_PASSIVE_PRIVILEGED_PENDING[*]-}"
         printf "ALLOWED=%s\n" "${_PASSIVE_PRIVILEGED_ALLOWED[*]-}"
-        printf "PROBE=ran\n"' _ "$(_s267_defs "$s")" </dev/null 2>&1 || printf 'RC=%s\n' "$?"
+        printf "PROBE=ran\n"'
+_s267_load() {
+    local s="$1"
+    rm -rf "$_S267_D/lh"; mkdir -p "$_S267_D/lh" "$_S267_D/lw"
+    printf '%s\n' "$2" > "$_S267_D/lh/config"; printf '%s\n' "$_S267_HSEC" > "$_S267_D/lh/.secrets"
+    printf '%b\n' "$3" > "$_S267_D/lw/config"; shift 3
+    if [ -n "${_S267_TTY:-}" ]; then
+        env -i PATH="$PATH" SANDY_HOME="$_S267_D/lh" WORK_DIR="$_S267_D/lw" S267_HL=false "$@" \
+            python3 "$_S267_D/ptyans.py" "$_S267_TTY" bash -c "$_S267_PROBE" _ "$(_s267_defs "$s")" 2>&1 | tr -d '\r' || printf 'RC=%s\n' "$?"
+    else
+        env -i PATH="$PATH" SANDY_HOME="$_S267_D/lh" WORK_DIR="$_S267_D/lw" "$@" \
+            bash -c "$_S267_PROBE" _ "$(_s267_defs "$s")" </dev/null 2>&1 || printf 'RC=%s\n' "$?"
+    fi
 }
 # $1 script  $2 host config body  $3 workspace config body  $4 which file to
 # judge (ws|host)  [VAR=VALUE...]; $_S267_HSEC is the host .secrets body.
@@ -36672,28 +36705,6 @@ check "§267(8) mutation: with the allowance union removed from a copy of the ga
 if ! command -v python3 >/dev/null 2>&1; then
     skip "§267(9) python3 not available to drive a pty"
 else
-    cat > "$_S267_D/ptyans.py" <<'PY'
-import os, pty, sys, select, time, signal
-answer = sys.argv[1]; argv = sys.argv[2:]
-pid, fd = pty.fork()
-if pid == 0:
-    try: os.execvp(argv[0], argv)
-    finally: os._exit(127)
-buf = b''; sent = False; deadline = time.time() + 90
-while time.time() < deadline:
-    r, _, _ = select.select([fd], [], [], 0.5)
-    if fd in r:
-        try: d = os.read(fd, 4096)
-        except OSError: break
-        if not d: break
-        buf += d
-        if not sent and b'[y/N]' in buf:
-            os.write(fd, (answer + '\n').encode()); sent = True
-else:
-    os.kill(pid, signal.SIGKILL)
-os.waitpid(pid, 0)
-sys.stdout.write(buf.decode('utf-8', 'replace'))
-PY
     # $1 fixture  $2 host config body  $3 workspace config body (printf %b)
     _s267_fx() {
         local T="$_S267_D/$1"
@@ -36765,10 +36776,53 @@ PY
         bash -c "$_S267_HAS"'; test "$3" = ok && grep -qF "Approved." <<<"$1" && _s267_has "$2" "STATUS=changed" "KEYS=SANDY_SSH" "RC=2" "PROBE=ran"' _ "$_S267_G" "$_S267_P" "$_S267_M"
     unset -f _s267_fx _s267_pass _s267_sup_ok
 fi
+
+# (10) a launch that is not approved drops only what still needs approval: an
+# entry the allowance covers is free under the host's policy, so it is kept,
+# as it is when nothing needs approval. Workspace SANDY_AGENT=codex (covered by
+# a host allowance of codex) plus SANDY_SSH=agent (needs a prompt), unapproved.
+_S267_WS2='SANDY_AGENT=codex\nSANDY_SSH=agent'
+_s267_dropped() { # $1 output -> the names listed under "dropping these keys:"
+    awk '/dropping these keys[^:]*:$/ {on=1; next} on && /^\[sandy\]   / {sub(/^\[sandy\]   /, ""); print; next} on {exit}' <<<"$1" | tr '\n' ',' | sed 's/,$//'
+}
+_S267_A="$(_s267_load "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=codex' "$_S267_WS2")"
+check "§267(10a) headless, covered SANDY_AGENT=codex plus unapproved SANDY_SSH=agent: SANDY_SSH is dropped, SANDY_AGENT=codex is kept, and the drop notice lists only SANDY_SSH (dropped: $(_s267_dropped "$_S267_A"); got: $(_s267_show "$_S267_A"))" \
+    bash -c "$_S267_HAS"'; _s267_has "$1" "SANDY_AGENT=codex" "SANDY_SSH=-unset-" "PENDING=SANDY_AGENT=codex SANDY_SSH=agent" "ALLOWED=SANDY_AGENT=codex" "PROBE=ran" && grep -qF "Non-interactive session" <<<"$1" && test "$2" = SANDY_SSH && grep -qF "Keeping SANDY_AGENT: SANDY_WORKSPACE_AGENTS" <<<"$1" && test -z "$(ls "$3/lh/approvals" 2>/dev/null)"' _ "$_S267_A" "$(_s267_dropped "$_S267_A")" "$_S267_D"
+if command -v python3 >/dev/null 2>&1; then
+    _S267_A="$(_S267_TTY=n _s267_load "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=codex' "$_S267_WS2")"
+    check "§267(10b) the same on a pty answered N: the prompt lists both keys, SANDY_SSH is dropped, SANDY_AGENT=codex is kept, the notice lists only SANDY_SSH, and no approval file is written (dropped: $(_s267_dropped "$_S267_A"); got: $(_s267_show "$_S267_A"))" \
+        bash -c "$_S267_HAS"'; _s267_has "$1" "SANDY_AGENT=codex" "SANDY_SSH=-unset-" "[sandy]   SANDY_AGENT" "[sandy]   SANDY_SSH" "PROBE=ran" && grep -qF "Not approved" <<<"$1" && test "$2" = SANDY_SSH && test -z "$(ls "$3/lh/approvals" 2>/dev/null)"' _ "$_S267_A" "$(_s267_dropped "$_S267_A")" "$_S267_D"
+else
+    skip "§267(10b) python3 not available to drive a pty"
+fi
+_S267_P="$(_s267_ap "$SANDY_SCRIPT" 'SANDY_WORKSPACE_AGENTS=codex' "$(printf '%b' "$_S267_WS2")")"
+check "§267(10c) --approvals agrees: the gate is pending on both keys (the set an approval covers) but would drop only SANDY_SSH unanswered (got: $(_s267_show "$_S267_P"))" \
+    bash -c "$_S267_HAS"'; _s267_has "$1" "STATUS=pending" "KEYS=SANDY_AGENT,SANDY_SSH" "DROPPED=SANDY_SSH" "RC=2" "PROBE=ran"' _ "$_S267_P"
+# A real headless launch of that workspace runs codex.
+mkdir -p "$_A6_DIR/s267-keep/ws/.sandy" "$_A6_DIR/s267-keep/sh"
+printf '%b\n' "$_S267_WS2" > "$_A6_DIR/s267-keep/ws/.sandy/config"
+printf 'SANDY_WORKSPACE_AGENTS=codex\n' > "$_A6_DIR/s267-keep/sh/config"
+_a6_launch s267-keep ANTHROPIC_API_KEY=sk-fixture-a6 OPENAI_API_KEY=sk-fixture-a6
+_S267_L="$(_a6_agent_args s267-keep)"
+_S267_R="$( { if [ "$_A6_RC" != 0 ] || [ -z "$_S267_L" ]; then echo "launch rc $_A6_RC"; fi
+    _a6_pair "$_S267_L" -e SANDY_AGENT=codex || echo "no -e SANDY_AGENT=codex"
+    grep -qxF sandy-codex "$_S267_L" || echo "not the codex image"
+    test "$(_s267_dropped "$(cat "$_A6_DIR/s267-keep/out")")" = SANDY_SSH || echo "the drop notice does not list exactly SANDY_SSH"; } 2>&1)" || true
+if [ -n "$_S267_R" ]; then _a6_diag "§267(10d)" s267-keep; fi
+check "§267(10d) a real headless launch of that workspace runs codex on the codex image and drops only SANDY_SSH (${_S267_R:-ok})" \
+    test -z "$_S267_R"
+# (10e) mutation, in a temp copy: an unapproved launch drops all of H again
+# (the covered entries are no longer exported). (10a) then sees no codex.
+awk 'index($0, "if [ -n \"$_rk_kv\" ]; then _sandy_export_approved_kv \"$_rk_kv\"; fi") { sub(/_sandy_export_approved_kv "\$_rk_kv"/, ":"); n++ } { print } END { if (n != 1) exit 1 }' \
+    "$SANDY_SCRIPT" > "$_S267_D/sandy.keep" && _S267_M=ok || _S267_M="the export of kept entries was not found exactly once"
+_S267_A="$(_s267_load "$_S267_D/sandy.keep" 'SANDY_WORKSPACE_AGENTS=codex' "$_S267_WS2")"
+check "§267(10e) mutation: with the kept entries no longer exported in a copy (${_S267_M}), (10a) fails: the headless launch loses SANDY_AGENT=codex (got: $(_s267_show "$_S267_A"))" \
+    bash -c "$_S267_HAS"'; test "$2" = ok && _s267_has "$1" "SANDY_AGENT=-unset-" "SANDY_SSH=-unset-" "PROBE=ran"' _ "$_S267_A" "$_S267_M"
+unset -f _s267_dropped
 rm -rf "$_S267_D"
 _a6_done
 unset -f _s267_defs _s267_load _s267_vc _s267_ap _s267_ap_at _s267_has _s267_show _s267_launch_ws
-unset _S267_D _S267_A _S267_V _S267_W _S267_P _S267_Q _S267_L _S267_R _S267_M _S267_G _S267_N _S267_HAS _S267_SUP _S267_WS _S267_HSEC
+unset _S267_D _S267_A _S267_V _S267_W _S267_P _S267_Q _S267_L _S267_R _S267_M _S267_G _S267_N _S267_HAS _S267_SUP _S267_WS _S267_WS2 _S267_HSEC _S267_PROBE
 echo ""
 
 # BEGIN SUMMARY
