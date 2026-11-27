@@ -6,7 +6,7 @@
   <img src="images/sandy-mascot.png" alt="Sandy's mascot: an orange hermit crab whose shell is a terminal window" width="240">
 </p>
 
-# sandy — an isolated sibling for your coding agents
+# An isolated sibling for your coding agents
 
 **New to sandy?** [sandy, explained](https://rappdw.github.io/sandy/) is a short guided walkthrough: what it isolates, animated examples of the boundary at work, and how to get running.
 
